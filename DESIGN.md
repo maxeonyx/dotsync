@@ -2,31 +2,27 @@
 
 ## The problem
 
-You have config files scattered across `~/` on multiple machines. Some config is universal (`.gitconfig`), some is OS-specific (hyprland on linux), some is machine-specific (wallpaper paths). You want a single repo that is the source of truth for all of it, and you want AI agents to be able to maintain it without special knowledge.
+You have config files scattered across `~/` on multiple machines. Some config is universal (`.gitconfig`), some is OS-specific (hyprland on linux), some is machine-specific (wallpaper paths). You want a single repo that is the source of truth for all of it, and you want AI agents — your primary method of editing config — to be able to maintain it naturally.
 
-Manual dotfile management breaks down along several axes:
+Dotfile management breaks down along several axes:
 
 1. **Syncing** — copying files between a repo and the live system is tedious and error-prone. People forget, things drift, and nobody notices until something breaks on a fresh machine.
 
 2. **Multiple versions** — the same *kind* of config (e.g. "shell config") might differ between linux and windows, or between your laptop and your server. Most dotfile tools either ignore this (one branch, one machine) or punt to symlink farms with conditionals baked into the files themselves.
 
-3. **Contributing changes** — when you edit a config file, getting that change into the right place in the repo should be frictionless. If it's not, you stop doing it, and the repo rots.
+3. **Contributing changes** — when an agent (or human) edits a config file, getting that change into the right place in the repo should be frictionless. If it's not, agents make mistakes and humans stop doing it, and the repo rots.
 
-4. **Agent usability** — AI agents edit config files. If the dotfiles system has a complex mental model, agents will get it wrong. The system must be simple enough that a skill description can fully explain the workflow.
+4. **Agent-first** — AI agents are the primary editors of config. The system must be simple enough that a skill description can fully explain the workflow — agents can't handle complex mental models or ambiguous "which file do I edit?" situations.
 
 ## Why not existing tools?
 
-Most dotfile managers (stow, chezmoi, yadm, bare git repo) solve problem 1 and partially solve problem 2. None of them solve problems 3 or 4 well. The specific gaps:
-
 - **Bare git repo with `$HOME` as worktree**: elegant but terrifying. Every `git clean` or careless `git checkout` can nuke your home directory. `git status` shows thousands of untracked files. Agents would need to be told "never run git clean" — a footgun.
 
-- **Symlink managers (stow, etc.)**: solve syncing well but don't handle multiple versions. You end up with `hyprland.conf.linux` and `hyprland.conf.arch` and a script that picks the right one. The indirection makes it hard for agents to know which file to edit.
+- **Symlink managers (stow, etc.)**: stow creates symlinks from a package directory into `~/`. Multi-machine is DIY — you pick which "packages" to install per machine, but there's no built-in scoping. Agents don't know which package a file belongs to without being told.
 
-- **Chezmoi**: powerful, handles templates and secrets, but has a complex mental model (source state vs target state, template syntax, `.chezmoiignore`). An agent would need extensive prompting to use it correctly.
+- **Chezmoi**: the closest existing tool to what we want. It handles multi-machine via Go templates embedded in config files (`{{ if eq .chezmoi.os "linux" }}`), has a proper `diff`/`apply` workflow, and supports secrets. It would work. But templates mean the file in the repo is *not* the file on the system — agents editing config need to understand both the config syntax and the template syntax. Our approach puts plain files in the repo, and uses git's merge machinery for scoping instead of templates. This means an agent edits exactly the file that ends up on the system, with no indirection.
 
-- **Branching approaches**: some people use git branches for per-machine config. This works until you need to propagate a universal change to all machines — you're manually cherry-picking or rebasing across N branches, re-solving the same conflicts.
-
-The gap in all of these: none of them make it easy to say "this change belongs to all linux machines" and have it automatically propagate to every machine that cares, with conflict resolutions preserved.
+- **Naive branching**: some people use git branches for per-machine config. This works until you need to propagate a universal change to all machines — you're manually cherry-picking or rebasing across N branches, re-solving the same conflicts. dotsync automates the propagation and uses merge commits to preserve conflict resolutions.
 
 ## The scope DAG
 
@@ -108,7 +104,11 @@ If the system file differs from the repo, that's drift. dotsync warns and shows 
 
 Bidirectional sync requires conflict resolution between the repo and the system, which is a fundamentally different (and harder) problem than git merge conflicts. It also makes the mental model ambiguous: "which is the source of truth?" With unidirectional sync, the answer is always "the repo."
 
+dotsync still *reads* system files — it diffs them against the repo and warns on drift. But it never overwrites the repo with system state. If the system has drifted, the user or agent must manually reconcile (typically by re-making the change in the repo).
+
 The cost: to contribute a system change, you must first recreate it in the repo. In practice this is trivial — you edit the file in `~/dotfiles/` instead of `~/`. The agent skill enforces this.
+
+An open question: some config files may end up with sections that shouldn't be checked in (e.g. secrets injected by an application). We don't have a strategy for this yet. Hopefully it doesn't come up, but if it does we'll need something — possibly `.gitignore` patterns for sections, or splitting the file.
 
 ### Drift detection without tracking state
 
@@ -126,15 +126,17 @@ With jj, you create a commit directly on the target scope's branch and rebase/me
 
 jj is also git-compatible — the repo is a valid git repo, pushable to GitHub, cloneable with git. jj is just a better local interface for the graph manipulation dotsync needs.
 
+One risk: jj is newer and less well-known than git. AI agents may not have strong intuitions for jj commands and concepts. The dotsync agent skill will need to explain jj basics, or dotsync itself should abstract away jj so agents only interact with `dotsync` commands and never run `jj` directly.
+
 ## Commands
 
 There is one command: `dotsync`.
 
-**`dotsync`** (no arguments): Sync repo -> system. Errors if there are uncommitted local changes (because those changes need a scope to be committed to).
+**`dotsync`** (no arguments): Sync repo -> system. If there are uncommitted local changes, errors and directs you to use `dotsync <scope> -m "message"` instead (because those changes need a scope to be committed to).
 
 **`dotsync <scope> -m "message"`**: Commit the current changes to the named scope branch, merge cascade through all descendant scopes, sync repo -> system, push to remote.
 
-The merge cascade is the key operation: after committing to a scope, every scope that has it as an ancestor (directly or transitively) gets the change merged in. If there are no conflicts, this happens silently. If there are conflicts, dotsync stops and reports them.
+Both forms diff system files against the repo before syncing. If any system file has drifted from what the repo expects, dotsync stops, shows the diff, and warns. `--force` still shows the diffs but proceeds anyway — so you always see what's being overwritten, even if you've chosen not to stop for it.
 
 ### Why one command?
 
@@ -145,10 +147,11 @@ Earlier designs had separate `dotsync` (sync), `dotsync commit` (commit + cascad
 dotsync includes an agent skill (`dotfiles`) that triggers whenever any home directory config file is edited. The skill tells agents:
 
 1. Edit files in `~/dotfiles/`, not `~/` directly
-2. Choose the root-est appropriate scope for the change
-3. Run `dotsync <scope> -m "description"` when done
+2. Read `.config/dotsync/config.toml` in the repo to see available scopes — the config file contains comments explaining what each scope is for and guiding scope selection
+3. Choose the root-est appropriate scope for the change
+4. Run `dotsync <scope> -m "description"` when done
 
-This is the mechanism that makes the system agent-friendly. The tool itself is simple plumbing — the skill is what makes agents use the plumbing correctly.
+This is the mechanism that makes the system agent-friendly. The tool itself is simple plumbing — the skill is what makes agents use the plumbing correctly. The comments in the config file are load-bearing: they're how agents learn "hyprland stuff goes on `hyprland`, not `linux`."
 
 ## What dotsync is NOT
 
