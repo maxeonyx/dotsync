@@ -7,3 +7,4 @@ license = "MIT"
 repository = "https://github.com/maxeonyx/dotsync"
 
 [dependencies]
+clap = { version = "4.5.31", features = ["derive"] }

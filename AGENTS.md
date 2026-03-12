@@ -4,17 +4,27 @@ This file guides AI agents working on the dotsync codebase itself.
 
 ## Start Here
 
-- Read `DESIGN.md` when you need the product intent, command contract, and scope model.
-- Read `README.md` when you need public-facing project context and links.
-- Read `docs/SKILL.md` when working on the end-user OpenCode skill for dotfiles workflows.
+- Read `DESIGN.md` before changing command behavior, scope semantics, sync rules, or any product requirement.
+- Read `README.md` when updating public-facing positioning, quick-start content, or outbound links.
+- Read `docs/SKILL.md` only when editing the end-user dotfiles workflow skill that agents load while changing config files.
 
 ## Project Overview
 
-`dotsync` is a Rust CLI for dotfile synchronization using scope branches and merge cascades.
+`dotsync` is a Rust CLI that wraps `jj` (Jujutsu) workflows for dotfile synchronization using scope branches and merge cascades.
 Current code is scaffolding only; product logic is intentionally not implemented yet.
 
 `jj` (Jujutsu) is a runtime dependency for the final product behavior.
 It may not be installed in every dev environment yet.
+
+## Scope Model
+
+- Scopes form a DAG of branches (for example `all -> linux -> hyprland -> machine`), and machine scopes are leaf scopes.
+- The full model, rationale, and command contract live in `DESIGN.md`; treat it as the source of truth.
+
+## Agent Docs Boundaries
+
+- `AGENTS.md` is developer guidance for contributors working on the dotsync codebase itself.
+- `docs/SKILL.md` is the end-user dotfiles skill for agents editing `~/dotfiles/` on managed machines.
 
 ## Development Commands
 
@@ -38,13 +48,13 @@ cargo clippy -- -D warnings
 
 ## Key Files
 
-- `DESIGN.md`: full design story and requirements; read before implementing behavior
-- `src/main.rs`: CLI entry point (currently stub)
-- `.github/workflows/ci.yml`: CI checks on pushes and pull requests
-- `.github/workflows/release.yml`: tag-triggered cross-platform release assets
-- `.github/workflows/pages.yml`: Pages deployment from `docs/`
-- `docs/index.html`: website landing page
-- `docs/SKILL.md`: skeleton dotfiles workflow skill
+- `DESIGN.md`: read when implementation choices might affect requirements or workflow semantics
+- `src/main.rs`: read when modifying CLI parsing, command shapes, or startup behavior
+- `.github/workflows/ci.yml`: read when changing test/lint/build expectations in CI
+- `.github/workflows/release.yml`: read when changing release packaging or tag-triggered publishing
+- `.github/workflows/pages.yml`: read when changing how `docs/` is deployed to Pages
+- `docs/index.html`: read when updating the public landing page content or style
+- `docs/SKILL.md`: read when refining end-user agent instructions for dotfiles edits
 
 ## CI and Release
 
