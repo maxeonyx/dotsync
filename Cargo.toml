@@ -1,0 +1,9 @@
+[package]
+name = "dotsync"
+version = "0.1.0"
+edition = "2021"
+description = "Agent-first dotfile sync with scope branches and merge cascades"
+license = "MIT"
+repository = "https://github.com/maxeonyx/dotsync"
+
+[dependencies]
