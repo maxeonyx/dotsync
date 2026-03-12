@@ -6,10 +6,9 @@ dotsync is an agent-first Rust CLI for managing dotfiles with a scope DAG: chang
 
 ## Quick install
 
-Release binaries coming soon. For now, clone and build locally with Rust:
-
 ```bash
-cargo build --release
+curl -Lo ~/.local/bin/dotsync https://github.com/maxeonyx/dotsync/releases/latest/download/dotsync-x86_64-linux
+chmod +x ~/.local/bin/dotsync
 ```
 
 ## Learn more
