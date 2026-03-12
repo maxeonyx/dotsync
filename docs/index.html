@@ -1,74 +1,187 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>dotsync</title>
-    <style>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <title>dotsync</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #fafafa;
+      --fg: #1a1a1a;
+      --muted: #666;
+      --border: #e0e0e0;
+      --code-bg: #f5f5f5;
+      --cmd: #1565c0;
+      --str: #388e3c;
+      --comment: #757575;
+    }
+    @media (prefers-color-scheme: dark) {
       :root {
-        color-scheme: light dark;
+        --bg: #0d0d0d;
+        --fg: #e8e8e8;
+        --muted: #888;
+        --border: #2a2a2a;
+        --code-bg: #1a1a1a;
+        --cmd: #90caf9;
+        --str: #a5d6a7;
+        --comment: #757575;
       }
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+    .container {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 4rem 2rem;
+    }
+    h1 {
+      font-size: 2.5rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      margin-bottom: 0.5rem;
+    }
+    h2 {
+      font-size: 1.3rem;
+      font-weight: 600;
+      margin-top: 3rem;
+      margin-bottom: 1rem;
+    }
+    .tagline {
+      color: var(--muted);
+      font-size: 1.1rem;
+      margin-bottom: 3rem;
+    }
+    .commands {
+      display: grid;
+      gap: 1.5rem;
+      margin-bottom: 3rem;
+    }
+    .command {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1rem 1.25rem;
+    }
+    .command code {
+      font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+      font-size: 0.9rem;
+      background: var(--code-bg);
+      padding: 0.15rem 0.4rem;
+      border-radius: 3px;
+    }
+    .command p {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin-top: 0.5rem;
+    }
+    .codeblock {
+      background: var(--code-bg);
+      border-radius: 6px;
+      padding: 1rem 1.25rem;
+      font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+      font-size: 0.85rem;
+      margin-bottom: 1.5rem;
+      white-space: pre;
+      position: relative;
+      overflow-x: auto;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+    }
+    .codeblock::-webkit-scrollbar {
+      height: 6px;
+    }
+    .codeblock::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .codeblock::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 3px;
+    }
+    .codeblock-wide {
+      width: max(100%, 66vw);
+      position: relative;
+      left: 50%;
+      transform: translateX(-50%);
+      border-radius: 0;
+    }
+    .codeblock .comment { color: var(--comment); }
+    .codeblock .cmd { color: var(--cmd); font-weight: 500; }
+    .codeblock .str { color: var(--str); }
+    .copy-btn {
+      position: absolute;
+      top: 0.5rem;
+      right: 0.5rem;
+      background: var(--border);
+      border: none;
+      border-radius: 6px;
+      padding: 0.5rem 1rem;
+      font-size: 0.85rem;
+      font-weight: 500;
+      cursor: pointer;
+      color: var(--fg);
+      opacity: 0.8;
+      transition: opacity 0.15s;
+    }
+    .copy-btn:hover { opacity: 1; }
+    footer {
+      color: var(--muted);
+      font-size: 0.85rem;
+      border-top: 1px solid var(--border);
+      padding-top: 2rem;
+      margin-top: 2rem;
+    }
+    footer a {
+      color: var(--fg);
+      text-decoration: none;
+    }
+    footer a:hover { text-decoration: underline; }
+    .ecosystem {
+      margin-top: 0.6rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>dotsync</h1>
+    <p class="tagline">Agent-first dotfile sync with scope branches and merge cascades.</p>
 
-      body {
-        margin: 0;
-        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-        min-height: 100vh;
-        display: grid;
-        place-items: center;
-        background: linear-gradient(160deg, #eef6ff 0%, #f6fffa 55%, #fff3e8 100%);
-      }
+    <div class="commands">
+      <div class="command">
+        <code>dotsync</code>
+        <p>Sync repo to system. Shows diffs for any files that have drifted.</p>
+      </div>
+      <div class="command">
+        <code>dotsync &lt;scope&gt; -m "message"</code>
+        <p>Commit changes to a scope branch, cascade merges through descendants, sync, and push.</p>
+      </div>
+    </div>
 
-      @media (prefers-color-scheme: dark) {
-        body {
-          background: linear-gradient(160deg, #0f172a 0%, #111827 55%, #1f2937 100%);
-        }
-      }
+    <h2>Install</h2>
+    <div class="codeblock codeblock-wide" id="install-block"><span class="comment"># Linux x86_64</span>
+<span class="cmd">curl</span> -Lo ~/.local/bin/dotsync <span class="str">https://github.com/maxeonyx/dotsync/releases/latest/download/dotsync-x86_64-linux</span>
+<span class="cmd">chmod</span> +x ~/.local/bin/dotsync<button class="copy-btn" onclick="copyInstall()">Copy</button></div>
 
-      main {
-        width: min(44rem, 92vw);
-        padding: 2.5rem;
-        border-radius: 1rem;
-        background: color-mix(in oklab, canvas 86%, transparent);
-        border: 1px solid color-mix(in oklab, canvastext 14%, transparent);
-        backdrop-filter: blur(10px);
-      }
+    <footer>
+      <a href="https://github.com/maxeonyx/dotsync">GitHub</a>
+      <p class="ecosystem">Part of <a href="https://tools.maxeonyx.com">maxeonyx agent-tools</a>: <a href="https://trunc.maxeonyx.com">trunc</a> | <a href="https://tmux-bridge.maxeonyx.com">tb</a> | <a href="https://dotsync.maxeonyx.com">dotsync</a> | <a href="https://tdd-ratchet.maxeonyx.com">tdd-ratchet</a></p>
+    </footer>
+  </div>
 
-      h1 {
-        margin: 0 0 1rem;
-        font-size: clamp(2rem, 5vw, 3rem);
-      }
-
-      p {
-        margin: 0 0 1rem;
-        line-height: 1.6;
-      }
-
-      a {
-        color: inherit;
-        text-underline-offset: 0.2em;
-      }
-
-      .ecosystem {
-        margin-top: 1.25rem;
-        font-size: 0.95rem;
-      }
-    </style>
-  </head>
-  <body>
-    <main>
-      <h1>dotsync</h1>
-      <p>
-        dotsync is an agent-first CLI that manages dotfiles with scope branches: edit in a repo that mirrors your home
-        directory, commit to the right scope, cascade through descendants, then sync to your live system.
-      </p>
-      <pre style="background: color-mix(in oklab, canvas 86%, transparent); border: 1px solid color-mix(in oklab, canvastext 14%, transparent); border-radius: 0.5rem; padding: 0.8rem 1rem; overflow-x: auto; font-size: 0.9rem;">curl -Lo ~/.local/bin/dotsync https://github.com/maxeonyx/dotsync/releases/latest/download/dotsync-x86_64-linux
-chmod +x ~/.local/bin/dotsync</pre>
-      <p>
-        <a href="https://github.com/maxeonyx/dotsync">View the repository on GitHub</a>
-      </p>
-      <p class="ecosystem">
-        Part of <a href="https://tools.maxeonyx.com">maxeonyx agent-tools</a>: <a href="https://trunc.maxeonyx.com">trunc</a> | <a href="https://tmux-bridge.maxeonyx.com">tb</a> | <a href="https://dotsync.maxeonyx.com">dotsync</a> | <a href="https://tdd-ratchet.maxeonyx.com">tdd-ratchet</a>
-      </p>
-    </main>
-  </body>
+  <script>
+    function copyInstall() {
+      const text = `curl -Lo ~/.local/bin/dotsync https://github.com/maxeonyx/dotsync/releases/latest/download/dotsync-x86_64-linux
+chmod +x ~/.local/bin/dotsync`;
+      navigator.clipboard.writeText(text);
+      event.target.textContent = 'Copied!';
+      setTimeout(() => event.target.textContent = 'Copy', 1500);
+    }
+  </script>
+</body>
 </html>
