@@ -25,13 +25,10 @@ fn main() {
         (Some(_), Some(_)) => {
             println!("dotsync: not implemented yet (commit + cascade + sync + push mode)");
         }
-        (None, Some(_)) => {
-            eprintln!("dotsync: -m/--message requires <scope>");
-            std::process::exit(2);
-        }
         (Some(_), None) => {
             eprintln!("dotsync: <scope> requires -m/--message");
             std::process::exit(2);
         }
+        (None, Some(_)) => unreachable!("clap requires scope when message is set"),
     }
 }

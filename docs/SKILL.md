@@ -14,4 +14,4 @@ Use this skill when editing dotfiles on a machine managed by dotsync.
 
 - dotsync is repo-first: the repo is the source of truth.
 - The repo mirrors `~/`: paths map directly (for example `~/dotfiles/.config/fish/config.fish` maps to `~/.config/fish/config.fish`).
-- If live system files drift, inspect the diff before forcing sync.
+- If live system files have drifted, dotsync will show the diff and stop. Inspect the diff before re-running with `--force`.

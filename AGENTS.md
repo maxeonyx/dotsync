@@ -21,43 +21,14 @@ It may not be installed in every dev environment yet.
 - Scopes form a DAG of branches (for example `all -> linux -> hyprland -> machine`), and machine scopes are leaf scopes.
 - The full model, rationale, and command contract live in `DESIGN.md`; treat it as the source of truth.
 
-## Agent Docs Boundaries
-
-- `AGENTS.md` is developer guidance for contributors working on the dotsync codebase itself.
-- `docs/SKILL.md` is the end-user dotfiles skill for agents editing `~/dotfiles/` on managed machines.
-
-## Development Commands
-
-```bash
-# Build
-cargo build
-
-# Test
-cargo test
-
-# Lint and formatting checks
-cargo fmt --check
-cargo clippy -- -D warnings
-```
-
-## Architecture Notes
-
-- Keep side effects at the edges (filesystem, subprocesses, VCS operations).
-- Prefer explicit failures over silent fallbacks.
-- Keep docs and implementation aligned with `DESIGN.md`.
-
 ## Key Files
 
 - `DESIGN.md`: read when implementation choices might affect requirements or workflow semantics
 - `src/main.rs`: read when modifying CLI parsing, command shapes, or startup behavior
-- `.github/workflows/ci.yml`: read when changing test/lint/build expectations in CI
-- `.github/workflows/release.yml`: read when changing release packaging or tag-triggered publishing
-- `.github/workflows/pages.yml`: read when changing how `docs/` is deployed to Pages
+- `.github/workflows/ci.yml`: read when changing CI, release, or Pages deployment
 - `docs/index.html`: read when updating the public landing page content or style
 - `docs/SKILL.md`: read when refining end-user agent instructions for dotfiles edits
 
 ## CI and Release
 
-- CI runs format, lint, check, and tests on Linux/macOS/Windows for pushes and PRs to `main`.
-- Release runs on `v*` tags and publishes binaries as GitHub Release assets.
-- Pages deploys static content from `docs/` via GitHub Actions.
+Single `ci.yml` workflow: format, lint, check, test, build matrix (6 targets), GitHub Release (version from Cargo.toml, no tags), Pages deploy (docs + binaries combined at dotsync.maxeonyx.com).
