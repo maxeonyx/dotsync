@@ -31,8 +31,10 @@ jobs:
         run: cargo fmt --check
       - name: Clippy
         run: cargo clippy -- -D warnings
-      - name: Run tests
-        run: cargo test
+      - name: Install cargo-ratchet
+        run: cargo install tdd-ratchet cargo-nextest cargo-nextest
+      - name: Run tests (ratchet)
+        run: cargo ratchet
 
   build:
     name: Build (${{ matrix.target }})

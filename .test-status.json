@@ -1,0 +1,7 @@
+{
+  "$schema": "https://tdd-ratchet.maxeonyx.com/schema/test-status.v1.json",
+  "tests": {
+    "dotsync::dotsync$tests::tdd_ratchet_gatekeeper": "passing"
+  },
+  "baseline": "c1136cda3733e0bdce76a4fbc38d00dc6cc35e43"
+}

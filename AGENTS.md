@@ -29,6 +29,10 @@ It may not be installed in every dev environment yet.
 - `docs/index.html`: read when updating the public landing page content or style
 - `docs/SKILL.md`: read when refining end-user agent instructions for dotfiles edits
 
+## TDD Ratchet
+
+This project uses strict TDD via [tdd-ratchet](https://tdd-ratchet.maxeonyx.com). Run `cargo ratchet` instead of `cargo test`. New tests must fail first (committed as `pending`), then pass in a separate commit. See `.test-status.json` for current test states.
+
 ## CI and Release
 
 Single `ci.yml` workflow: format, lint, check, test, build matrix (6 targets), GitHub Release (version from Cargo.toml, no tags), Pages deploy (docs + binaries combined at dotsync.maxeonyx.com).

@@ -32,3 +32,13 @@ fn main() {
         (None, Some(_)) => unreachable!("clap requires scope when message is set"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn tdd_ratchet_gatekeeper() {
+        if std::env::var("TDD_RATCHET").is_err() {
+            panic!("Run tdd-ratchet instead of cargo test.");
+        }
+    }
+}
