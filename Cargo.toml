@@ -8,3 +8,8 @@ repository = "https://github.com/maxeonyx/dotsync"
 
 [dependencies]
 clap = { version = "4.5.31", features = ["derive"] }
+jj-lib = "0.39"
+
+[dev-dependencies]
+tempfile = "3.18"
+tokio = { version = "1.44", features = ["macros", "rt-multi-thread"] }
