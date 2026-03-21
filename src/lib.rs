@@ -1,11 +1,12 @@
-use std::collections::{HashMap, HashSet};
+mod cascade;
+
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use gix::remote::fetch::Tags;
-use jj_lib::commit::Commit;
 use jj_lib::config::StackedConfig;
 use jj_lib::git::{
     self, GitBranchPushTargets, GitFetch, GitFetchRefExpression, GitImportOptions, GitProgress,
@@ -14,10 +15,9 @@ use jj_lib::git::{
 use jj_lib::gitignore::GitIgnoreFile;
 use jj_lib::matchers::EverythingMatcher;
 use jj_lib::op_store::RefTarget;
-use jj_lib::ref_name::{RefNameBuf, WorkspaceNameBuf};
+use jj_lib::ref_name::RefNameBuf;
 use jj_lib::refs::BookmarkPushUpdate;
 use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo as _, StoreFactories};
-use jj_lib::rewrite::merge_commit_trees;
 use jj_lib::settings::UserSettings;
 use jj_lib::str_util::StringExpression;
 use jj_lib::working_copy::SnapshotOptions;
@@ -25,6 +25,11 @@ use jj_lib::workspace::{default_working_copy_factories, Workspace};
 use serde::Deserialize;
 use thiserror::Error;
 use walkdir::{DirEntry, WalkDir};
+
+use crate::cascade::{
+    build_cascade_plan, execute_cascade_plan, CascadeCommand, CascadeStateStore,
+    JsonCascadeStateStore, PersistedCascadeState, ScopeHeads,
+};
 
 #[derive(Debug, Clone)]
 pub struct DotsyncPaths {
@@ -72,6 +77,12 @@ pub struct CommitReport {
     pub sync: SyncReport,
 }
 
+#[derive(Debug, Clone)]
+struct CommitSession {
+    current_scope: String,
+    graph: ScopeGraph,
+}
+
 #[derive(Debug, Error)]
 pub enum DotsyncError {
     #[error("not implemented: {0}")]
@@ -103,6 +114,12 @@ pub enum DotsyncError {
     },
     #[error("scope `{scope}` does not have a local bookmark")]
     MissingScopeBookmark { scope: String },
+    #[error("cascade state error at {path}: {source}")]
+    CascadeState {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("detected drift in {count} file(s)")]
     DriftDetected {
         count: usize,
@@ -207,32 +224,10 @@ pub async fn commit_and_sync(
     paths: &DotsyncPaths,
     options: CommitOptions,
 ) -> Result<CommitReport, DotsyncError> {
-    let workspace = load_workspace(paths)?;
-    let repo = workspace
-        .repo_loader()
-        .load_at_head()
-        .await
-        .map_err(|err| jj_error(format!("load repo at head: {err}")))?;
-    let initial_graph = load_scope_graph(paths)?;
-    let current_scope = detect_current_scope(&initial_graph, &workspace, repo.as_ref())?;
-
-    let _repo = fetch_origin(repo).await?;
+    let session = prepare_commit_session(paths, &options.scope).await?;
     let mut workspace = load_workspace(paths)?;
-    checkout_workspace_to_scope(paths, &mut workspace, &current_scope).await?;
+    checkout_workspace_to_scope(paths, &mut workspace, &session.current_scope).await?;
     sync_primary_config_to_home(paths)?;
-
-    let graph = load_scope_graph(paths)?;
-    if !graph.parents.contains_key(&options.scope) {
-        return Err(DotsyncError::InvalidScope {
-            scope: options.scope,
-        });
-    }
-    if !is_ancestor_scope(&graph, &options.scope, &current_scope)? {
-        return Err(DotsyncError::ScopeNotAncestor {
-            scope: options.scope,
-            current_scope,
-        });
-    }
 
     let snapshot_commit_id = snapshot_working_copy(paths).await?;
     let mut workspace = load_workspace(paths)?;
@@ -246,18 +241,18 @@ pub async fn commit_and_sync(
         .get_commit(&snapshot_commit_id)
         .map_err(|err| jj_error(format!("load snapshot commit: {err}")))?;
 
-    let (_repo, cascaded_scopes) = commit_to_scope_and_cascade(
-        &graph,
+    let cascaded_scopes = commit_snapshot_and_apply_cascade(
+        paths,
+        &session,
         repo,
-        &workspace.workspace_name().to_owned(),
-        &current_scope,
+        &workspace,
         &options.scope,
         &snapshot_commit.tree(),
         &options.message,
     )
     .await?;
 
-    checkout_workspace_to_scope(paths, &mut workspace, &current_scope).await?;
+    checkout_workspace_to_scope(paths, &mut workspace, &session.current_scope).await?;
     let sync = sync_repo_to_home(
         paths,
         SyncOptions {
@@ -272,6 +267,111 @@ pub async fn commit_and_sync(
         cascaded_scopes,
         sync,
     })
+}
+
+async fn prepare_commit_session(
+    paths: &DotsyncPaths,
+    target_scope: &str,
+) -> Result<CommitSession, DotsyncError> {
+    let workspace = load_workspace(paths)?;
+    let repo = workspace
+        .repo_loader()
+        .load_at_head()
+        .await
+        .map_err(|err| jj_error(format!("load repo at head: {err}")))?;
+    let initial_graph = load_scope_graph(paths)?;
+    let current_scope = detect_current_scope(&initial_graph, &workspace, repo.as_ref())?;
+
+    let _repo = fetch_origin(repo).await?;
+    let graph = load_scope_graph(paths)?;
+    validate_commit_scope(&graph, target_scope, &current_scope)?;
+
+    Ok(CommitSession {
+        current_scope,
+        graph,
+    })
+}
+
+fn validate_commit_scope(
+    graph: &ScopeGraph,
+    target_scope: &str,
+    current_scope: &str,
+) -> Result<(), DotsyncError> {
+    if !graph.parents.contains_key(target_scope) {
+        return Err(DotsyncError::InvalidScope {
+            scope: target_scope.to_string(),
+        });
+    }
+    if !is_ancestor_scope(graph, target_scope, current_scope)? {
+        return Err(DotsyncError::ScopeNotAncestor {
+            scope: target_scope.to_string(),
+            current_scope: current_scope.to_string(),
+        });
+    }
+    Ok(())
+}
+
+async fn commit_snapshot_and_apply_cascade(
+    paths: &DotsyncPaths,
+    session: &CommitSession,
+    repo: std::sync::Arc<ReadonlyRepo>,
+    workspace: &Workspace,
+    target_scope: &str,
+    tree: &jj_lib::merged_tree::MergedTree,
+    message: &str,
+) -> Result<Vec<String>, DotsyncError> {
+    let state_store = cascade_state_store(paths);
+    let mut tx = repo.start_transaction();
+    let mut scope_heads = ScopeHeads::load_existing(tx.repo_mut().base_repo(), &session.graph)?;
+    let target_head = scope_heads.require(target_scope)?;
+
+    let target_commit = tx
+        .repo_mut()
+        .new_commit(vec![target_head.id().clone()], tree.clone())
+        .set_description(message)
+        .write()
+        .await
+        .map_err(|err| jj_error(format!("write scope commit: {err}")))?;
+    tx.repo_mut().set_local_bookmark_target(
+        RefNameBuf::from(target_scope).as_ref(),
+        RefTarget::normal(target_commit.id().clone()),
+    );
+    scope_heads.update(target_scope.to_string(), target_commit);
+
+    let cascade_command = CascadeCommand {
+        root_scope: target_scope.to_string(),
+        description: format!("dotsync: cascade {message}"),
+    };
+    let cascade_plan = build_cascade_plan(&session.graph, &scope_heads, &cascade_command);
+    state_store.save(&PersistedCascadeState {
+        original_scope: target_scope.to_string(),
+        machine_scope: session.current_scope.clone(),
+        current_scope: target_scope.to_string(),
+        completed_scopes: Vec::new(),
+        pending_scopes: cascade_plan.pending_scopes(),
+    })?;
+    let cascade_result = execute_cascade_plan(
+        tx.repo_mut(),
+        &mut scope_heads,
+        &cascade_plan,
+        &cascade_command.description,
+    )
+    .await?;
+
+    let current_commit = scope_heads.require(&session.current_scope)?;
+    tx.repo_mut()
+        .set_wc_commit(
+            workspace.workspace_name().to_owned(),
+            current_commit.id().clone(),
+        )
+        .map_err(|err| jj_error(format!("update working copy bookmark: {err}")))?;
+
+    tx.commit(format!("dotsync: {message}"))
+        .await
+        .map_err(|err| jj_error(format!("commit scope update: {err}")))?;
+    state_store.clear()?;
+
+    Ok(cascade_result.progress.completed_scopes)
 }
 
 fn load_scope_graph(paths: &DotsyncPaths) -> Result<ScopeGraph, DotsyncError> {
@@ -817,14 +917,8 @@ async fn join_existing_remote(
         .map_err(|err| jj_error(format!("load join snapshot commit: {err}")))?;
 
     let mut tx = repo.start_transaction();
-    let mut scope_heads = load_scope_heads(tx.repo_mut().base_repo(), &updated_graph).await?;
-    let all_head =
-        scope_heads
-            .get("all")
-            .cloned()
-            .ok_or_else(|| DotsyncError::MissingScopeBookmark {
-                scope: "all".to_string(),
-            })?;
+    let mut scope_heads = ScopeHeads::load_existing(tx.repo_mut().base_repo(), &updated_graph)?;
+    let all_head = scope_heads.require("all")?;
 
     let config_commit = tx
         .repo_mut()
@@ -837,19 +931,25 @@ async fn join_existing_remote(
         "all".as_ref(),
         RefTarget::normal(config_commit.id().clone()),
     );
-    scope_heads.insert("all".to_string(), config_commit.clone());
+    scope_heads.update("all".to_string(), config_commit.clone());
 
-    let descendant_scopes = cascade_descendants(
+    let cascade_command = CascadeCommand {
+        root_scope: "all".to_string(),
+        description: "dotsync: cascade init config".to_string(),
+    };
+    let cascade_plan = build_cascade_plan(&updated_graph, &scope_heads, &cascade_command);
+    let descendant_scopes = execute_cascade_plan(
         tx.repo_mut(),
-        &updated_graph,
         &mut scope_heads,
-        "all",
-        "dotsync: cascade init config",
+        &cascade_plan,
+        &cascade_command.description,
     )
-    .await?;
+    .await?
+    .progress
+    .completed_scopes;
 
-    if !scope_heads.contains_key(&identity.os_scope) {
-        let parent = scope_heads.get("all").cloned().expect("all scope exists");
+    if !scope_heads.contains(&identity.os_scope) {
+        let parent = scope_heads.require("all")?;
         let commit = tx
             .repo_mut()
             .new_commit(vec![parent.id().clone()], parent.tree())
@@ -861,14 +961,11 @@ async fn join_existing_remote(
             RefNameBuf::from(identity.os_scope.as_str()).as_ref(),
             RefTarget::normal(commit.id().clone()),
         );
-        scope_heads.insert(identity.os_scope.clone(), commit);
+        scope_heads.update(identity.os_scope.clone(), commit);
     }
 
-    if !scope_heads.contains_key(&identity.machine_scope) {
-        let parent = scope_heads
-            .get(&identity.os_scope)
-            .cloned()
-            .expect("os scope exists");
+    if !scope_heads.contains(&identity.machine_scope) {
+        let parent = scope_heads.require(&identity.os_scope)?;
         let commit = tx
             .repo_mut()
             .new_commit(vec![parent.id().clone()], parent.tree())
@@ -880,13 +977,10 @@ async fn join_existing_remote(
             RefNameBuf::from(identity.machine_scope.as_str()).as_ref(),
             RefTarget::normal(commit.id().clone()),
         );
-        scope_heads.insert(identity.machine_scope.clone(), commit);
+        scope_heads.update(identity.machine_scope.clone(), commit);
     }
 
-    let machine_commit = scope_heads
-        .get(&identity.machine_scope)
-        .cloned()
-        .expect("machine scope exists");
+    let machine_commit = scope_heads.require(&identity.machine_scope)?;
     tx.repo_mut()
         .set_wc_commit(
             workspace.workspace_name().to_owned(),
@@ -907,166 +1001,6 @@ async fn join_existing_remote(
     created.sort();
     created.dedup();
     Ok((created, identity.machine_scope.clone()))
-}
-
-async fn commit_to_scope_and_cascade(
-    graph: &ScopeGraph,
-    repo: std::sync::Arc<ReadonlyRepo>,
-    workspace_name: &WorkspaceNameBuf,
-    current_scope: &str,
-    target_scope: &str,
-    tree: &jj_lib::merged_tree::MergedTree,
-    message: &str,
-) -> Result<(std::sync::Arc<ReadonlyRepo>, Vec<String>), DotsyncError> {
-    let mut tx = repo.start_transaction();
-    let mut scope_heads = load_scope_heads(tx.repo_mut().base_repo(), graph).await?;
-    let target_head = scope_heads.get(target_scope).cloned().ok_or_else(|| {
-        DotsyncError::MissingScopeBookmark {
-            scope: target_scope.to_string(),
-        }
-    })?;
-
-    let target_commit = tx
-        .repo_mut()
-        .new_commit(vec![target_head.id().clone()], tree.clone())
-        .set_description(message)
-        .write()
-        .await
-        .map_err(|err| jj_error(format!("write scope commit: {err}")))?;
-    tx.repo_mut().set_local_bookmark_target(
-        RefNameBuf::from(target_scope).as_ref(),
-        RefTarget::normal(target_commit.id().clone()),
-    );
-    scope_heads.insert(target_scope.to_string(), target_commit);
-
-    let cascaded_scopes = cascade_descendants(
-        tx.repo_mut(),
-        graph,
-        &mut scope_heads,
-        target_scope,
-        &format!("dotsync: cascade {message}"),
-    )
-    .await?;
-
-    let current_commit = scope_heads.get(current_scope).cloned().ok_or_else(|| {
-        DotsyncError::MissingScopeBookmark {
-            scope: current_scope.to_string(),
-        }
-    })?;
-    tx.repo_mut()
-        .set_wc_commit(workspace_name.clone(), current_commit.id().clone())
-        .map_err(|err| jj_error(format!("update working copy bookmark: {err}")))?;
-
-    let repo = tx
-        .commit(format!("dotsync: {message}"))
-        .await
-        .map_err(|err| jj_error(format!("commit scope update: {err}")))?;
-    Ok((repo, cascaded_scopes))
-}
-
-async fn cascade_descendants(
-    mut_repo: &mut MutableRepo,
-    graph: &ScopeGraph,
-    scope_heads: &mut HashMap<String, Commit>,
-    root_scope: &str,
-    description: &str,
-) -> Result<Vec<String>, DotsyncError> {
-    let ordered = descendants_in_topological_order(graph, root_scope);
-    let mut cascaded = Vec::new();
-    for scope in ordered {
-        let Some(existing_head) = scope_heads.get(&scope).cloned() else {
-            continue;
-        };
-
-        let mut parents = vec![existing_head.clone()];
-        for parent in graph.parents.get(&scope).into_iter().flatten() {
-            let Some(parent_head) = scope_heads.get(parent).cloned() else {
-                continue;
-            };
-            parents.push(parent_head);
-        }
-        if parents.len() <= 1 {
-            continue;
-        }
-
-        let merged_tree = merge_commit_trees(mut_repo, &parents)
-            .await
-            .map_err(|err| jj_error(format!("merge trees for {scope}: {err}")))?;
-        let new_commit = mut_repo
-            .new_commit(
-                parents.iter().map(|commit| commit.id().clone()).collect(),
-                merged_tree,
-            )
-            .set_description(description)
-            .write()
-            .await
-            .map_err(|err| jj_error(format!("write cascade commit for {scope}: {err}")))?;
-        mut_repo.set_local_bookmark_target(
-            RefNameBuf::from(scope.as_str()).as_ref(),
-            RefTarget::normal(new_commit.id().clone()),
-        );
-        scope_heads.insert(scope.clone(), new_commit);
-        cascaded.push(scope);
-    }
-    Ok(cascaded)
-}
-
-fn descendants_in_topological_order(graph: &ScopeGraph, scope: &str) -> Vec<String> {
-    let descendants: HashSet<String> = descendants_of(graph, scope).into_iter().collect();
-    let mut remaining = descendants.clone();
-    let mut ordered = Vec::new();
-    while !remaining.is_empty() {
-        let mut ready: Vec<String> = remaining
-            .iter()
-            .filter(|candidate| {
-                graph.parents[*candidate]
-                    .iter()
-                    .all(|parent| !descendants.contains(parent) || ordered.contains(parent))
-            })
-            .cloned()
-            .collect();
-        ready.sort();
-        for candidate in ready {
-            remaining.remove(&candidate);
-            ordered.push(candidate);
-        }
-    }
-    ordered
-}
-
-fn descendants_of(graph: &ScopeGraph, scope: &str) -> Vec<String> {
-    let mut descendants = Vec::new();
-    let mut stack = graph.children.get(scope).cloned().unwrap_or_default();
-    let mut seen = HashSet::new();
-    while let Some(child) = stack.pop() {
-        if seen.insert(child.clone()) {
-            descendants.push(child.clone());
-            if let Some(grandchildren) = graph.children.get(&child) {
-                stack.extend(grandchildren.iter().cloned());
-            }
-        }
-    }
-    descendants
-}
-
-async fn load_scope_heads(
-    repo: &ReadonlyRepo,
-    graph: &ScopeGraph,
-) -> Result<HashMap<String, Commit>, DotsyncError> {
-    let mut heads = HashMap::new();
-    for scope in graph.parents.keys() {
-        let target = repo
-            .view()
-            .get_local_bookmark(RefNameBuf::from(scope.as_str()).as_ref());
-        if let Some(commit_id) = target.as_normal() {
-            let commit = repo
-                .store()
-                .get_commit(commit_id)
-                .map_err(|err| jj_error(format!("load scope head for {scope}: {err}")))?;
-            heads.insert(scope.clone(), commit);
-        }
-    }
-    Ok(heads)
 }
 
 async fn checkout_workspace_to_scope(
@@ -1231,6 +1165,10 @@ fn write_config(paths: &DotsyncPaths, contents: &str) -> Result<(), DotsyncError
 
 fn sync_primary_config_to_home(paths: &DotsyncPaths) -> Result<(), DotsyncError> {
     copy_repo_file_to_home(paths, Path::new(".config/dotsync/config.toml"))
+}
+
+fn cascade_state_store(paths: &DotsyncPaths) -> JsonCascadeStateStore {
+    JsonCascadeStateStore::new(paths.repo_root.join(".jj/dotsync/cascade-state.json"))
 }
 
 fn config_path(paths: &DotsyncPaths) -> PathBuf {

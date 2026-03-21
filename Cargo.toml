@@ -11,11 +11,11 @@ clap = { version = "4.5.31", features = ["derive"] }
 gix = "0.80"
 jj-lib = "0.39"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 thiserror = "2.0"
 tokio = { version = "1.44", features = ["macros", "rt-multi-thread"] }
 toml = "0.8"
 walkdir = "2.5"
 
 [dev-dependencies]
-serde_json = "1.0"
 tempfile = "3.18"
