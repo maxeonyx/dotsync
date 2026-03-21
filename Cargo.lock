@@ -383,6 +383,7 @@ dependencies = [
  "gix",
  "jj-lib",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",

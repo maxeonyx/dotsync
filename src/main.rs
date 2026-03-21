@@ -1,15 +1,25 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
     commit_and_sync, init, sync, CommitOptions, DotsyncError, DotsyncPaths, SyncOptions,
 };
 use std::env;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, ValueEnum)]
+enum OutputFormat {
+    Human,
+    Json,
+}
+
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Agent-first dotfile sync", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+
+    /// Output format
+    #[arg(long = "output", value_enum, default_value = "human")]
+    output_format: OutputFormat,
 
     /// Scope to commit changes to; omit for sync-only mode
     scope: Option<String>,
