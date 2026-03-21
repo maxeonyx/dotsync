@@ -27,6 +27,8 @@ struct Cli {
 enum Command {
     /// Clone or join a dotsync remote
     Init { remote_url: String },
+    /// Continue a paused merge cascade after resolving conflicts
+    Continue,
 }
 
 #[tokio::main]
@@ -35,6 +37,7 @@ async fn main() {
 
     let result = match (cli.command, cli.scope, cli.message) {
         (Some(Command::Init { remote_url }), None, None) => run_init(remote_url).await,
+        (Some(Command::Continue), None, None) => run_continue().await,
         (None, None, None) => run_sync(cli.force).await,
         (None, Some(scope), Some(message)) => run_commit(scope, message, cli.force).await,
         (None, Some(_), None) => {
@@ -43,6 +46,10 @@ async fn main() {
         }
         (Some(Command::Init { .. }), Some(_), _) | (Some(Command::Init { .. }), None, Some(_)) => {
             eprintln!("dotsync: `init` does not take scope or message arguments");
+            std::process::exit(2);
+        }
+        (Some(Command::Continue), Some(_), _) | (Some(Command::Continue), None, Some(_)) => {
+            eprintln!("dotsync: `continue` does not take scope or message arguments");
             std::process::exit(2);
         }
         (None, None, Some(_)) => unreachable!("clap requires scope when message is set"),
@@ -63,6 +70,10 @@ async fn run_init(remote_url: String) -> Result<(), DotsyncError> {
         report.sync.synced_paths.len()
     );
     Ok(())
+}
+
+async fn run_continue() -> Result<(), DotsyncError> {
+    Err(DotsyncError::NotImplemented("continue not implemented yet"))
 }
 
 async fn run_sync(force: bool) -> Result<(), DotsyncError> {
