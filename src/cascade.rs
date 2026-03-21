@@ -7,6 +7,7 @@ use jj_lib::commit::Commit;
 use jj_lib::op_store::RefTarget;
 use jj_lib::ref_name::RefNameBuf;
 use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo as _};
+use jj_lib::repo_path::RepoPathBuf;
 use jj_lib::rewrite::merge_commit_trees;
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,8 @@ use crate::{jj_error, DotsyncError, ScopeGraph};
 pub(crate) struct CascadeCommand {
     pub(crate) root_scope: String,
     pub(crate) description: String,
+    pub(crate) original_scope: String,
+    pub(crate) machine_scope: String,
 }
 
 #[derive(Debug, Clone)]
@@ -23,10 +26,10 @@ pub(crate) struct CascadePlan {
     steps: Vec<CascadeStep>,
 }
 
-#[derive(Debug, Clone)]
-struct CascadeStep {
-    scope: String,
-    parent_scopes: Vec<String>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CascadeStep {
+    pub(crate) scope: String,
+    pub(crate) parent_scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -34,18 +37,38 @@ pub(crate) struct CascadeProgress {
     pub(crate) completed_scopes: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CascadePause {
+    pub scope: String,
+    pub conflicted_files: Vec<String>,
+    pub scopes_done: Vec<String>,
+    pub scopes_pending: Vec<String>,
+    pub original_scope: String,
+    pub machine_scope: String,
+    pub parent_scopes: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CascadeSuccess {
     pub(crate) progress: CascadeProgress,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum CascadeOutcome {
+    Completed(CascadeSuccess),
+    Paused(CascadePause),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PersistedCascadeState {
     pub(crate) original_scope: String,
     pub(crate) machine_scope: String,
-    pub(crate) current_scope: String,
+    pub(crate) paused_scope: String,
+    pub(crate) paused_parent_scopes: Vec<String>,
+    pub(crate) command_description: String,
+    pub(crate) committed_scope: String,
     pub(crate) completed_scopes: Vec<String>,
-    pub(crate) pending_scopes: Vec<String>,
+    pub(crate) remaining_steps: Vec<CascadeStep>,
 }
 
 pub(crate) trait CascadeStateStore {
@@ -163,6 +186,10 @@ impl CascadePlan {
     pub(crate) fn pending_scopes(&self) -> Vec<String> {
         self.steps.iter().map(|step| step.scope.clone()).collect()
     }
+
+    pub(crate) fn remaining_steps(&self) -> &[CascadeStep] {
+        &self.steps
+    }
 }
 
 pub(crate) fn build_cascade_plan(
@@ -195,10 +222,49 @@ pub(crate) async fn execute_cascade_plan(
     mut_repo: &mut MutableRepo,
     scope_heads: &mut ScopeHeads,
     plan: &CascadePlan,
-    description: &str,
-) -> Result<CascadeSuccess, DotsyncError> {
-    let mut progress = CascadeProgress::default();
-    for step in &plan.steps {
+    command: &CascadeCommand,
+) -> Result<CascadeOutcome, DotsyncError> {
+    execute_cascade_steps(
+        mut_repo,
+        scope_heads,
+        plan.remaining_steps(),
+        command,
+        CascadeProgress::default(),
+    )
+    .await
+}
+
+pub(crate) async fn resume_cascade(
+    mut_repo: &mut MutableRepo,
+    scope_heads: &mut ScopeHeads,
+    state: &PersistedCascadeState,
+) -> Result<CascadeOutcome, DotsyncError> {
+    let command = CascadeCommand {
+        root_scope: state.committed_scope.clone(),
+        description: state.command_description.clone(),
+        original_scope: state.original_scope.clone(),
+        machine_scope: state.machine_scope.clone(),
+    };
+    execute_cascade_steps(
+        mut_repo,
+        scope_heads,
+        &state.remaining_steps,
+        &command,
+        CascadeProgress {
+            completed_scopes: state.completed_scopes.clone(),
+        },
+    )
+    .await
+}
+
+async fn execute_cascade_steps(
+    mut_repo: &mut MutableRepo,
+    scope_heads: &mut ScopeHeads,
+    steps: &[CascadeStep],
+    command: &CascadeCommand,
+    mut progress: CascadeProgress,
+) -> Result<CascadeOutcome, DotsyncError> {
+    for (index, step) in steps.iter().enumerate() {
         let existing_head = scope_heads.require(&step.scope)?;
         let mut parents = vec![existing_head];
         for parent_scope in &step.parent_scopes {
@@ -211,12 +277,38 @@ pub(crate) async fn execute_cascade_plan(
         let merged_tree = merge_commit_trees(mut_repo, &parents)
             .await
             .map_err(|err| jj_error(format!("merge trees for {}: {err}", step.scope)))?;
+
+        if merged_tree.has_conflict() {
+            let conflicted_files = merged_tree
+                .conflicts()
+                .map(|(path, value)| {
+                    value.map_err(|err| {
+                        jj_error(format!("read conflict for {}: {err}", step.scope))
+                    })?;
+                    Ok(path.as_internal_file_string().to_string())
+                })
+                .collect::<Result<Vec<_>, DotsyncError>>()?;
+
+            return Ok(CascadeOutcome::Paused(CascadePause {
+                scope: step.scope.clone(),
+                conflicted_files,
+                scopes_done: progress.completed_scopes.clone(),
+                scopes_pending: steps[index..]
+                    .iter()
+                    .map(|step| step.scope.clone())
+                    .collect(),
+                original_scope: command.original_scope.clone(),
+                machine_scope: command.machine_scope.clone(),
+                parent_scopes: step.parent_scopes.clone(),
+            }));
+        }
+
         let new_commit = mut_repo
             .new_commit(
                 parents.iter().map(|commit| commit.id().clone()).collect(),
                 merged_tree,
             )
-            .set_description(description)
+            .set_description(&command.description)
             .write()
             .await
             .map_err(|err| jj_error(format!("write cascade commit for {}: {err}", step.scope)))?;
@@ -227,7 +319,192 @@ pub(crate) async fn execute_cascade_plan(
         scope_heads.update(step.scope.clone(), new_commit);
         progress.completed_scopes.push(step.scope.clone());
     }
-    Ok(CascadeSuccess { progress })
+    Ok(CascadeOutcome::Completed(CascadeSuccess { progress }))
+}
+
+pub(crate) fn build_paused_state(
+    plan: &CascadePlan,
+    pause: &CascadePause,
+    command: &CascadeCommand,
+) -> PersistedCascadeState {
+    let pause_index = plan
+        .remaining_steps()
+        .iter()
+        .position(|step| step.scope == pause.scope)
+        .expect("paused scope should exist in plan");
+
+    PersistedCascadeState {
+        original_scope: pause.original_scope.clone(),
+        machine_scope: pause.machine_scope.clone(),
+        paused_scope: pause.scope.clone(),
+        paused_parent_scopes: pause.parent_scopes.clone(),
+        command_description: command.description.clone(),
+        committed_scope: command.root_scope.clone(),
+        completed_scopes: pause.scopes_done.clone(),
+        remaining_steps: plan.remaining_steps()[pause_index + 1..].to_vec(),
+    }
+}
+
+pub(crate) async fn create_scope_head_if_missing(
+    mut_repo: &mut MutableRepo,
+    scope_heads: &mut ScopeHeads,
+    graph: &ScopeGraph,
+    scope: &str,
+    description: &str,
+) -> Result<(), DotsyncError> {
+    if scope_heads.contains(scope) {
+        return Ok(());
+    }
+
+    let parents = graph
+        .parents
+        .get(scope)
+        .ok_or_else(|| DotsyncError::InvalidScope {
+            scope: scope.to_string(),
+        })?;
+
+    let parent_commit = if let Some(first_parent) = parents.first() {
+        scope_heads.require(first_parent)?
+    } else {
+        return Err(DotsyncError::MissingScopeBookmark {
+            scope: scope.to_string(),
+        });
+    };
+
+    let commit = mut_repo
+        .new_commit(vec![parent_commit.id().clone()], parent_commit.tree())
+        .set_description(description)
+        .write()
+        .await
+        .map_err(|err| jj_error(format!("write new scope head for {scope}: {err}")))?;
+    mut_repo.set_local_bookmark_target(
+        RefNameBuf::from(scope).as_ref(),
+        RefTarget::normal(commit.id().clone()),
+    );
+    scope_heads.update(scope.to_string(), commit);
+    Ok(())
+}
+
+pub(crate) async fn commit_resolved_pause(
+    mut_repo: &mut MutableRepo,
+    scope_heads: &mut ScopeHeads,
+    state: &PersistedCascadeState,
+    resolved_tree: &jj_lib::merged_tree::MergedTree,
+) -> Result<(), DotsyncError> {
+    let existing_head = scope_heads.require(&state.paused_scope)?;
+    let mut parents = vec![existing_head];
+    for parent_scope in &state.paused_parent_scopes {
+        parents.push(scope_heads.require(parent_scope)?);
+    }
+
+    let commit = mut_repo
+        .new_commit(
+            parents.iter().map(|commit| commit.id().clone()).collect(),
+            resolved_tree.clone(),
+        )
+        .set_description(&state.command_description)
+        .write()
+        .await
+        .map_err(|err| {
+            jj_error(format!(
+                "write resolved cascade commit for {}: {err}",
+                state.paused_scope
+            ))
+        })?;
+    mut_repo.set_local_bookmark_target(
+        RefNameBuf::from(state.paused_scope.as_str()).as_ref(),
+        RefTarget::normal(commit.id().clone()),
+    );
+    scope_heads.update(state.paused_scope.clone(), commit);
+    Ok(())
+}
+
+pub(crate) fn pause_conflict_message(graph: &ScopeGraph, pause: &CascadePause) -> String {
+    let mut message = String::new();
+    message.push_str("dotsync paused while propagating a config change through the scope branches so all machines stay in sync.\n");
+    message.push_str("Scopes exist because different machines and operating systems share some config and also have unique config, so dotsync keeps them as a branch DAG.\n");
+    message.push_str("This paused because the same file changed differently on branches that now need to be merged.\n\n");
+    message.push_str("Scope DAG:\n");
+    message.push_str(&render_scope_dag(graph, pause));
+    message.push_str("\n");
+    message.push_str(&format!("Paused on scope: {}\n", pause.scope));
+    message.push_str(&format!(
+        "Merging changes from {} into {}\n",
+        pause.parent_scopes.join(" + "),
+        pause.scope
+    ));
+    message.push_str("Conflicted files:\n");
+    for file in &pause.conflicted_files {
+        message.push_str(&format!("- {}\n", file));
+    }
+    message.push_str("\nResolve by editing the conflicted files in ~/dotfiles/ to remove conflict markers and keep the desired content.\n");
+    message.push_str("Then run `dotsync continue` to resume the cascade. Run `dotsync abort` to undo the cascade and return to the pre-commit state.\n");
+    message.push_str("The cascade may pause again at another scope; that is normal, just resolve and continue again.\n");
+    message.push_str("The scope you are resolving may be another machine's branch, which is expected. After the cascade completes, you'll be back on your machine's branch.\n");
+    message.push_str("Do not run other dotsync commands while a cascade is in progress.\n");
+    message
+}
+
+fn render_scope_dag(graph: &ScopeGraph, pause: &CascadePause) -> String {
+    let mut scopes: Vec<_> = graph.parents.keys().cloned().collect();
+    scopes.sort();
+    let done: HashSet<_> = pause.scopes_done.iter().cloned().collect();
+    let pending: HashSet<_> = pause.scopes_pending.iter().cloned().collect();
+
+    let mut lines = Vec::new();
+    for scope in scopes {
+        let marker = if scope == pause.original_scope {
+            "origin"
+        } else if scope == pause.scope {
+            "paused"
+        } else if done.contains(&scope) {
+            "done"
+        } else if pending.contains(&scope) {
+            "pending"
+        } else {
+            "idle"
+        };
+        let parents = graph.parents.get(&scope).cloned().unwrap_or_default();
+        if parents.is_empty() {
+            lines.push(format!("- [{}] {}", marker, scope));
+        } else {
+            lines.push(format!(
+                "- [{}] {} <- {}",
+                marker,
+                scope,
+                parents.join(", ")
+            ));
+        }
+    }
+    lines.join("\n") + "\n"
+}
+
+pub(crate) fn conflicted_files_from_tree(
+    tree: &jj_lib::merged_tree::MergedTree,
+) -> Result<Vec<String>, DotsyncError> {
+    tree.conflicts()
+        .map(|(path, value)| {
+            value.map_err(|err| {
+                jj_error(format!(
+                    "read conflicted path {}: {err}",
+                    path.as_internal_file_string()
+                ))
+            })?;
+            Ok(path.as_internal_file_string().to_string())
+        })
+        .collect()
+}
+
+pub(crate) fn repo_path_strings_to_paths(
+    paths: &[String],
+) -> Result<Vec<RepoPathBuf>, DotsyncError> {
+    paths
+        .iter()
+        .map(|path| {
+            RepoPathBuf::from_internal_string(path)
+                .map_err(|err| jj_error(format!("invalid conflicted path {path}: {err}")))
+        })
+        .collect()
 }
 
 fn descendants_in_topological_order(graph: &ScopeGraph, scope: &str) -> Vec<String> {

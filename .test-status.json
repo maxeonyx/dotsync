@@ -6,7 +6,7 @@
     "dotsync::user_flows$commit_rejects_non_ancestor_scope": "passing",
     "dotsync::user_flows$config_validation_rejects_cycle": "passing",
     "dotsync::user_flows$config_validation_rejects_missing_parent": "passing",
-    "dotsync::user_flows$diamond_cascade_resolves_conflicts_across_multi_parent_merge": "pending",
+    "dotsync::user_flows$diamond_cascade_resolves_conflicts_across_multi_parent_merge": "passing",
     "dotsync::user_flows$drift_detection_preserves_home_file": "passing",
     "dotsync::user_flows$force_sync_overwrites_drift": "passing",
     "dotsync::user_flows$init_creates_repo_and_syncs_config": "passing",
