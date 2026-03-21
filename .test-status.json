@@ -1,7 +1,18 @@
 {
   "$schema": "https://tdd-ratchet.maxeonyx.com/schema/test-status.v1.json",
   "tests": {
-    "dotsync::dotsync$tests::tdd_ratchet_gatekeeper": "passing"
+    "dotsync::dotsync$tests::tdd_ratchet_gatekeeper": "passing",
+    "dotsync::user_flows$basic_sync_after_init_copies_repo_file_to_home": "pending",
+    "dotsync::user_flows$commit_rejects_non_ancestor_scope": "pending",
+    "dotsync::user_flows$config_validation_rejects_cycle": "pending",
+    "dotsync::user_flows$config_validation_rejects_missing_parent": "pending",
+    "dotsync::user_flows$drift_detection_preserves_home_file": "pending",
+    "dotsync::user_flows$force_sync_overwrites_drift": "pending",
+    "dotsync::user_flows$init_creates_repo_and_syncs_config": "pending",
+    "dotsync::user_flows$invalid_scope_is_rejected": "pending",
+    "dotsync::user_flows$multi_machine_shared_config_syncs_to_joining_machine": "pending",
+    "dotsync::user_flows$scope_specific_config_stays_within_scope_descendants": "pending",
+    "dotsync::user_flows$tdd_ratchet_gatekeeper": "passing"
   },
   "baseline": "c1136cda3733e0bdce76a4fbc38d00dc6cc35e43"
 }
