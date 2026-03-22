@@ -11,10 +11,10 @@ This file guides AI agents working on the dotsync codebase itself.
 ## Project Overview
 
 `dotsync` is a Rust CLI that wraps `jj` (Jujutsu) workflows for dotfile synchronization using scope branches and merge cascades.
-Current code is scaffolding only; product logic is intentionally not implemented yet.
 
-`jj` (Jujutsu) is a runtime dependency for the final product behavior.
-It may not be installed in every dev environment yet.
+Core flows implemented: `dotsync init`, sync, commit with cascade, conflict pause/resume via `dotsync continue`, `--output json`, drift detection, scope isolation, multi-machine support.
+
+`jj` (Jujutsu) is a runtime dependency. It may not be installed in every dev environment yet.
 
 ## Scope Model
 
