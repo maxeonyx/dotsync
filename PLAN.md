@@ -2,9 +2,9 @@
 
 ## Current state
 
-18 passing black-box CLI tests. Ratchet clean. Clippy clean.
+20 passing black-box CLI tests. Ratchet clean. Clippy clean.
 
-Working: `dotsync init`, `dotsync` (sync), `dotsync <scope> -m "msg"` (commit + cascade + sync + push), `--force`, `--output json` on all commands, drift detection, scope isolation, multi-machine via shared remote, merge cascade with conflict pause/resume via `dotsync continue`, full DAG traversal (all machines), return to home branch after cascade, structured JSON error/usage/drift/conflict output, rich human conflict messages with ASCII DAG rendering.
+Working: `dotsync init`, `dotsync` (sync), `dotsync <scope> -m "msg"` (commit + cascade + sync + push), `--force`, `--output json` on all commands, drift detection, scope isolation, multi-machine via shared remote, merge cascade with conflict pause/resume via `dotsync continue`, full DAG traversal (all machines), return to home branch after cascade, structured JSON error/usage/drift/conflict output, rich human conflict messages with ASCII DAG rendering, config discovery from repo (primary) with system path fallback.
 
 ### Code structure
 - `src/cascade.rs`: cascade domain model (`CascadeOutcome::{Completed, Paused}`), traversal, merge execution, `PersistedCascadeState`, `CascadeStateStore`, `ScopeDagRenderer` for human conflict messages
@@ -20,7 +20,7 @@ Working: `dotsync init`, `dotsync` (sync), `dotsync <scope> -m "msg"` (commit + 
 - [x] Diamond cascade test passing (basic pause/resume works)
 - [x] Fix merge-history preservation (tests 2 and 3) — pause is now workspace state + persisted intent, not history
 - [x] `--output json` on all commands — JSON on stdout for machine consumption, human text on stderr. Structured error codes for usage, drift, and runtime errors. Rich human conflict messages with ASCII DAG.
-- [ ] Change config to be read from system path (`~/.config/dotsync/config.toml`), not repo path
+- [x] Config discovery: repo-first with system path (`~/.config/dotsync/config.toml`) fallback. Agents can edit repo config and immediately use new scopes.
 - [ ] Manually verify conflict messages contain everything an agent needs (initial implementation done — needs Max's eye)
 
 ## Key design decision: pause model
@@ -115,7 +115,7 @@ Stable error codes include: `invalid_scope`, `drift_detected`, `no_paused_cascad
 }
 ```
 
-## Test coverage (18 tests)
+## Test coverage (20 tests)
 
 Cascade conflict tests (all passing):
 1. `diamond_cascade_resolves_conflicts_across_multi_parent_merge` — diamond scope graph, conflicting changes, resolve on machine
@@ -126,6 +126,10 @@ JSON output contract tests (all passing):
 4. `json_usage_error_is_emitted_for_missing_commit_message` — usage errors emit structured JSON
 5. `json_continue_without_pause_reports_structured_error` — runtime errors have stable codes
 6. `json_drift_error_includes_drift_details` — drift errors include per-file detail
+
+Config discovery tests (all passing):
+7. `sync_reads_scope_graph_from_home_config_when_repo_copy_is_missing` — system path fallback works
+8. `commit_sees_new_scope_added_in_repo_before_home_config_is_synced` — repo-first discovery for immediate use
 
 ## Design decisions
 
