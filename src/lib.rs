@@ -624,7 +624,7 @@ async fn set_working_copy_to_paused_conflict(
 }
 
 fn load_scope_graph(paths: &DotsyncPaths) -> Result<ScopeGraph, DotsyncError> {
-    let config_path = config_path(paths);
+    let config_path = resolve_scope_graph_path(paths)?;
     let contents = fs::read_to_string(&config_path).map_err(|source| DotsyncError::Io {
         path: config_path.clone(),
         source,
@@ -1289,9 +1289,9 @@ async fn checkout_workspace_to_scope(
         .map_err(|err| jj_error(format!("commit checkout operation for {scope}: {err}")))?;
     checkout_workspace_to_commit(workspace, repo.op_id().clone(), &commit).await?;
 
-    if !config_path(paths).exists() && scope == "all" {
+    if !repo_config_path(paths).exists() && scope == "all" {
         return Err(DotsyncError::Io {
-            path: config_path(paths),
+            path: repo_config_path(paths),
             source: io::Error::new(io::ErrorKind::NotFound, "config missing after checkout"),
         });
     }
@@ -1419,7 +1419,7 @@ fn render_config(graph: &ScopeGraph) -> String {
 }
 
 fn write_config(paths: &DotsyncPaths, contents: &str) -> Result<(), DotsyncError> {
-    let path = config_path(paths);
+    let path = repo_config_path(paths);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| DotsyncError::Io {
             path: parent.to_path_buf(),
@@ -1437,8 +1437,29 @@ fn cascade_state_store(paths: &DotsyncPaths) -> JsonCascadeStateStore {
     JsonCascadeStateStore::new(paths.repo_root.join(".jj/dotsync/cascade-state.json"))
 }
 
-fn config_path(paths: &DotsyncPaths) -> PathBuf {
+fn repo_config_path(paths: &DotsyncPaths) -> PathBuf {
     paths.repo_root.join(".config/dotsync/config.toml")
+}
+
+fn system_config_path(paths: &DotsyncPaths) -> PathBuf {
+    paths.home_dir.join(".config/dotsync/config.toml")
+}
+
+fn resolve_scope_graph_path(paths: &DotsyncPaths) -> Result<PathBuf, DotsyncError> {
+    let repo_path = repo_config_path(paths);
+    if repo_path.exists() {
+        return Ok(repo_path);
+    }
+
+    let system_path = system_config_path(paths);
+    if system_path.exists() {
+        return Ok(system_path);
+    }
+
+    Err(DotsyncError::Io {
+        path: repo_path,
+        source: io::Error::from(io::ErrorKind::NotFound),
+    })
 }
 
 fn detect_machine() -> Result<MachineIdentity, DotsyncError> {

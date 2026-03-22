@@ -455,7 +455,7 @@ fn commit_sees_new_scope_added_in_repo_before_home_config_is_synced() {
 
     machine.write_repo_file(
         &format!("{CONFIG_DIR}/config.toml"),
-        "[scopes]\nall = {}\nlinux = { parents = [\"all\"] }\nhyprland = { parents = [\"linux\"] }\nmx-xps-cy = { parents = [\"linux\"] }\n",
+        "[scopes]\nall = {}\nlinux = { parents = [\"all\"] }\nhyprland = { parents = [\"linux\"] }\nmx-xps-cy = { parents = [\"hyprland\"] }\n",
     );
     machine.remove_home_file(&format!("{CONFIG_DIR}/config.toml"));
     machine.write_repo_file(".config/hypr/hyprland.conf", "monitor=preferred,auto,1\n");
