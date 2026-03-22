@@ -4,6 +4,7 @@
     "dotsync::dotsync$tests::tdd_ratchet_gatekeeper": "passing",
     "dotsync::user_flows$basic_sync_after_init_copies_repo_file_to_home": "passing",
     "dotsync::user_flows$commit_rejects_non_ancestor_scope": "passing",
+    "dotsync::user_flows$commit_sees_new_scope_added_in_repo_before_home_config_is_synced": "pending",
     "dotsync::user_flows$config_validation_rejects_cycle": "passing",
     "dotsync::user_flows$config_validation_rejects_missing_parent": "passing",
     "dotsync::user_flows$diamond_cascade_resolves_conflicts_across_multi_parent_merge": "passing",
@@ -18,6 +19,7 @@
     "dotsync::user_flows$multi_machine_shared_config_syncs_to_joining_machine": "passing",
     "dotsync::user_flows$recorded_conflict_resolution_survives_subsequent_cascade": "passing",
     "dotsync::user_flows$scope_specific_config_stays_within_scope_descendants": "passing",
+    "dotsync::user_flows$sync_reads_scope_graph_from_home_config_when_repo_copy_is_missing": "pending",
     "dotsync::user_flows$tdd_ratchet_gatekeeper": "passing"
   },
   "baseline": "c1136cda3733e0bdce76a4fbc38d00dc6cc35e43"

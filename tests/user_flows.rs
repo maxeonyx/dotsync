@@ -127,6 +127,13 @@ impl MachineEnvironment {
         self.repo_dir.exists()
     }
 
+    fn remove_home_file(&self, relative: &str) {
+        let path = self.home_dir.join(relative);
+        if path.exists() {
+            fs::remove_file(path).expect("remove home file");
+        }
+    }
+
     fn write_file(&self, path: PathBuf, contents: &str) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("create parent dir");
@@ -424,6 +431,42 @@ fn json_drift_error_includes_drift_details() {
     assert_eq!(drifts.len(), 1, "json: {json}");
     assert_eq!(drifts[0]["path"], ".gitconfig");
     assert!(drifts[0]["diff"].as_str().is_some(), "json: {json}");
+}
+
+#[test]
+fn sync_reads_scope_graph_from_home_config_when_repo_copy_is_missing() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    assert!(machine.init().status.success(), "init failed");
+
+    fs::remove_file(machine.repo_dir.join(CONFIG_DIR).join("config.toml"))
+        .expect("remove repo config");
+
+    let output = machine.sync();
+
+    assert!(output.status.success(), "{}", render_output(&output));
+}
+
+#[test]
+fn commit_sees_new_scope_added_in_repo_before_home_config_is_synced() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    assert!(machine.init().status.success(), "init failed");
+
+    machine.write_repo_file(
+        &format!("{CONFIG_DIR}/config.toml"),
+        "[scopes]\nall = {}\nlinux = { parents = [\"all\"] }\nhyprland = { parents = [\"linux\"] }\nmx-xps-cy = { parents = [\"linux\"] }\n",
+    );
+    machine.remove_home_file(&format!("{CONFIG_DIR}/config.toml"));
+    machine.write_repo_file(".config/hypr/hyprland.conf", "monitor=preferred,auto,1\n");
+
+    let output = machine.commit("hyprland", "add hyprland scope");
+
+    assert!(output.status.success(), "{}", render_output(&output));
+    assert_eq!(
+        machine.read_home_file(".config/hypr/hyprland.conf"),
+        "monitor=preferred,auto,1\n"
+    );
 }
 
 #[test]
