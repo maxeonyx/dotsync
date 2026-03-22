@@ -2,13 +2,11 @@
 
 ## Current state
 
-13 passing + 2 pending black-box CLI tests. Ratchet clean. Commit `d727175` on main.
+15 passing black-box CLI tests. Ratchet clean.
 
-Working: `dotsync init`, `dotsync` (sync), `dotsync <scope> -m "msg"` (commit + cascade + sync + push), `--force`, `--output json`, drift detection, scope isolation, multi-machine via shared remote. Basic conflict pause/resume works (diamond test passes). `dotsync continue` exists and works for simple cases.
+Working: `dotsync init`, `dotsync` (sync), `dotsync <scope> -m "msg"` (commit + cascade + sync + push), `--force`, `--output json`, drift detection, scope isolation, multi-machine via shared remote, merge cascade with conflict pause/resume via `dotsync continue`, full DAG traversal (all machines), return to home branch after cascade.
 
-Partially working: merge cascade with conflict detection and pause/resume. The diamond test (test 1 of 3) passes. Tests 2 and 3 fail because **merge history is not preserved correctly** — resolved merges don't create the right ancestry for downstream cascades to reuse.
-
-### Code structure after refactoring (commit `58826be`)
+### Code structure
 - `src/cascade.rs`: cascade domain model (`CascadeOutcome::{Completed, Paused}`), traversal, merge execution, `PersistedCascadeState`, `CascadeStateStore`
 - `src/lib.rs`: command orchestration split into `prepare_commit_session()`, `validate_commit_scope()`, `commit_snapshot_and_apply_cascade()`, plus `continue_after_conflict()`
 - `src/main.rs`: `--output json` emits JSON for success/error/conflict, `continue` command wired up, exit code 3 for conflicts
@@ -20,18 +18,12 @@ Partially working: merge cascade with conflict detection and pause/resume. The d
 - [x] Write conflict message requirements (see below)
 - [x] Pre-implementation refactoring: extract cascade engine into `src/cascade.rs`, split `commit_and_sync()` into phases
 - [x] Diamond cascade test passing (basic pause/resume works)
-- [ ] **Fix merge-history preservation** (tests 2 and 3) — see "Root cause of remaining failures" below
+- [x] Fix merge-history preservation (tests 2 and 3) — pause is now workspace state + persisted intent, not history
 - [ ] `--output json` on all commands — JSON on stdout for machine consumption, human text on stderr
 - [ ] Change config to be read from system path (`~/.config/dotsync/config.toml`), not repo path
 - [ ] Manually verify conflict messages contain everything an agent needs
 
-## Root cause of remaining failures
-
-Tests 2 and 3 fail for the same reason: **the pause/resume mechanism contaminates branch ancestry.**
-
-The current implementation creates a temporary conflicted commit and moves the bookmark to it during pause. When `continue` runs, it tries to reconstruct the "real" merge from `paused_head_hex` — but the temporary commit is already in the branch history, defeating jj's ability to reuse earlier merge resolutions.
-
-### The correct model (confirmed with Max via DAG visualization)
+## Key design decision: pause model
 
 **In jj, the working copy IS always a commit and can be in a conflicted state.** This is the key simplification.
 
@@ -41,11 +33,7 @@ The current implementation creates a temporary conflicted commit and moves the b
 
 ### DAG visualization tool
 
-`~/dotsync-b/render-dag.ignore.py` renders correct DAG graphs for each step of both test scenarios. Run `python3 render-dag.ignore.py` to see the full step-by-step simulation. The commit parent relationships encoded in that script are confirmed correct by Max.
-
-Key property test 2 checks: After resolving `all→linux` (creating L2), the `linux→machine` merge (M3) is CLEAN because M2 already recorded the L1+M1 resolution — jj can reuse that merge ancestry.
-
-Key property test 3 checks: The cascade walks ALL descendants (both linux and windows sides), resolving conflicts on each, and returns the working copy to the originating machine's branch when done.
+`render-dag.ignore.py` (in any clone) renders correct DAG graphs for each step of both test scenarios. Run `python3 render-dag.ignore.py` to see the full step-by-step simulation. The commit parent relationships are confirmed correct.
 
 ## Conflict message requirements (human-readable, verified manually)
 
