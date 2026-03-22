@@ -14,7 +14,6 @@ use jj_lib::git::{
 };
 use jj_lib::gitignore::GitIgnoreFile;
 use jj_lib::matchers::EverythingMatcher;
-use jj_lib::object_id::ObjectId;
 use jj_lib::op_store::RefTarget;
 use jj_lib::ref_name::RefNameBuf;
 use jj_lib::ref_name::WorkspaceNameBuf;
@@ -348,7 +347,6 @@ pub async fn continue_after_conflict(
                     machine_scope: resumed_state.machine_scope.clone(),
                 },
                 &scope_heads,
-                current_commit.id().hex(),
             );
             let repo = tx
                 .commit("dotsync: pause merge cascade")
@@ -503,7 +501,6 @@ async fn commit_snapshot_and_apply_cascade(
                 &pause,
                 &cascade_command,
                 &scope_heads,
-                current_commit.id().hex(),
             );
             let repo = tx
                 .commit(format!("dotsync: {message}"))

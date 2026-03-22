@@ -497,9 +497,10 @@ fn recorded_conflict_resolution_survives_subsequent_cascade() {
     // 1. Commit to machine (file change)
     // 2. Commit conflicting change to linux → cascade to machine conflicts
     //    → resolve → continue
-    // 3. Commit conflicting change to all → cascade to linux conflicts
-    //    → resolve → continue → cascade to machine should be CLEAN
-    //    (resolution from step 2 is in merge history)
+    // 3. Commit a change to all that still conflicts at linux, but after resolving
+    //    linux the cascade to machine should be clean because the machine-side merge
+    //    from step 2 is already represented in history and these later edits are
+    //    merge-compatible under jj's real 3-way merge rules.
 
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
@@ -544,7 +545,7 @@ fn recorded_conflict_resolution_survives_subsequent_cascade() {
     assert_eq!(all_json["status"], "conflict");
     assert_eq!(all_json["scope"], "linux");
 
-    // Resolve: combine all + linux
+    // Resolve: keep the combined all/linux/machine content in a merge-compatible order
     machine.write_repo_file(
         ".shellrc",
         "export ALL=1\nexport LINUX=1\nexport MACHINE=1\n",
@@ -556,8 +557,8 @@ fn recorded_conflict_resolution_survives_subsequent_cascade() {
         render_output(&cont2)
     );
 
-    // The key assertion: machine has the fully resolved file,
-    // meaning the resolution from step 2 was preserved in merge history
+    // The key assertion: machine has the fully resolved file, meaning the earlier
+    // machine/linux resolution did not force a second pause during the later cascade.
     assert_eq!(
         machine.read_home_file(".shellrc"),
         "export ALL=1\nexport LINUX=1\nexport MACHINE=1\n",
@@ -573,11 +574,11 @@ fn multi_machine_cascade_resolves_other_machines_conflicts_and_returns_home() {
     //     |       |
     //   machA   machB
     //
-    // machA commits to linux, machB commits to windows (same file, different content).
-    // machA commits to all with a conflicting change — cascade walks the
-    // whole DAG and conflicts on the other branches.
+    // machA commits to linux, machB commits to windows, then machA commits to all.
+    // The shared file contents are chosen so the OS-branch merges conflict, while the
+    // follow-on machine merges remain clean once each OS branch is resolved.
     // machA resolves, continues until done.
-    // Verify: machA ends up on its own branch. machB syncs and gets the resolved file.
+    // Verify: machA ends up on its own branch and machB can accept the cascaded result.
 
     let harness = TestHarness::new();
     let mach_a = harness.machine("machine-a", "linux", "mx-xps-cy");
@@ -607,8 +608,8 @@ fn multi_machine_cascade_resolves_other_machines_conflicts_and_returns_home() {
     // machA syncs to pick up machB's changes
     assert!(mach_a.sync().status.success(), "machA sync failed");
 
-    // machA commits a conflicting change to `all` — cascade will walk:
-    // all → linux (may conflict) → machA, all → windows (may conflict) → machB
+    // machA commits a shared change to `all` — cascade will walk:
+    // all → linux (conflict) → machA (clean), all → windows (conflict) → machB (clean)
     mach_a.write_repo_file(".shellrc", "export ALL=1\nexport LINUX=1\n");
     let (all_output, all_json) = mach_a.run_dotsync_json(&["all", "-m", "shared shell config"]);
 
@@ -622,11 +623,11 @@ fn multi_machine_cascade_resolves_other_machines_conflicts_and_returns_home() {
     assert_eq!(all_json["status"], "conflict");
     let first_scope = all_json["scope"].as_str().expect("scope string");
 
-    // Resolve the first conflict — write a combined version
+    // Resolve the first OS-branch conflict with the shared line plus that branch's line
     write_resolution(&mach_a, first_scope);
     let (cont1_output, cont1_json) = mach_a.run_dotsync_json(&["continue"]);
 
-    // There may be a second conflict (the other OS branch)
+    // The cascade may then pause on the other OS branch before finishing
     if cont1_output.status.code() == Some(3) {
         assert_eq!(cont1_json["status"], "conflict");
         let second_scope = cont1_json["scope"].as_str().expect("scope string");
@@ -662,7 +663,8 @@ fn multi_machine_cascade_resolves_other_machines_conflicts_and_returns_home() {
         "machA should have LINUX: {mach_a_file}"
     );
 
-    // machB force-syncs to accept the cascaded shared change into its home files
+    // machB force-syncs to accept the cascaded shared change into its home files;
+    // this test is about cascade propagation, not default drift-preservation semantics.
     let mach_b_sync = mach_b.force_sync();
     assert!(
         mach_b_sync.status.success(),
@@ -680,7 +682,7 @@ fn multi_machine_cascade_resolves_other_machines_conflicts_and_returns_home() {
     );
 }
 
-/// Helper: write a resolved .shellrc based on which scope is conflicted.
+/// Helper: write the branch-appropriate resolved shared file for the paused scope.
 fn write_resolution(machine: &MachineEnvironment, scope: &str) {
     let mut lines = vec!["export ALL=1"];
     match scope {
