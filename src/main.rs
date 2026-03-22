@@ -69,14 +69,10 @@ async fn main() {
     let output_format = cli.output_format.clone();
 
     let outcome = match (cli.command, cli.scope, cli.message) {
-        (Some(Command::Init { remote_url }), None, None) => {
-            run_init(remote_url, &output_format).await
-        }
-        (Some(Command::Continue), None, None) => run_continue(cli.force, &output_format).await,
-        (None, None, None) => run_sync(cli.force, &output_format).await,
-        (None, Some(scope), Some(message)) => {
-            run_commit(scope, message, cli.force, &output_format).await
-        }
+        (Some(Command::Init { remote_url }), None, None) => run_init(remote_url).await,
+        (Some(Command::Continue), None, None) => run_continue(cli.force).await,
+        (None, None, None) => run_sync(cli.force).await,
+        (None, Some(scope), Some(message)) => run_commit(scope, message, cli.force).await,
         (None, Some(_), None) => Ok(CliOutput::Usage(UsageError {
             message: "<scope> requires -m/--message",
         })),
@@ -100,10 +96,7 @@ async fn main() {
     std::process::exit(exit_code);
 }
 
-async fn run_init(
-    remote_url: String,
-    _output_format: &OutputFormat,
-) -> Result<CliOutput, DotsyncError> {
+async fn run_init(remote_url: String) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     let report = init(&paths, &remote_url).await?;
     Ok(CliOutput::Success(SuccessOutput {
@@ -123,10 +116,7 @@ async fn run_init(
     }))
 }
 
-async fn run_continue(
-    force: bool,
-    _output_format: &OutputFormat,
-) -> Result<CliOutput, DotsyncError> {
+async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     match continue_after_conflict(&paths, SyncOptions { force }).await? {
         CommandOutcome::Success(report) => Ok(CliOutput::Success(SuccessOutput {
@@ -147,7 +137,7 @@ async fn run_continue(
     }
 }
 
-async fn run_sync(force: bool, _output_format: &OutputFormat) -> Result<CliOutput, DotsyncError> {
+async fn run_sync(force: bool) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     let report = sync(&paths, SyncOptions { force }).await?;
     Ok(CliOutput::Success(SuccessOutput {
@@ -171,7 +161,6 @@ async fn run_commit(
     scope: String,
     message: String,
     force: bool,
-    _output_format: &OutputFormat,
 ) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     match commit_and_sync(
@@ -315,7 +304,7 @@ fn render_conflict_human(conflict: &dotsync::CascadePause) -> String {
     let colliding_scopes = conflict.parent_scopes.join(", ");
 
     format!(
-        "dotsync: cascade paused due to conflicts\n\nDotsync is propagating a config change through the scope branch DAG so shared changes reach every affected machine. Different scopes exist because some config is shared across all machines, some is shared by subsets like an OS or desktop environment, and some is machine-specific. This pause happened because the same file was changed differently on branches that now need to be merged.\n\nScope DAG:\n{}\n\nPaused at scope: {}\nMerging changes from {} into {}\nConflicted files:\n{}\n\nWhat to do next:\n- Edit the conflicted files in ~/dotfiles/ and remove the conflict markers, keeping the content you want in this paused scope.\n- Run `dotsync continue` to resume the cascade.\n- Run `dotsync abort` to undo the cascade and return to the pre-cascade state. (Note: `dotsync abort` is not implemented yet in this build.)\n- The cascade may pause again on a later scope; if it does, repeat this process.\n\nAgent notes:\n- The scope you are resolving may belong to another machine; that is expected because dotsync cascades through every affected descendant scope.\n- When the cascade finishes, dotsync returns you to your machine scope: {}.\n- Do not run other dotsync commands while this cascade is paused.",
+        "dotsync: cascade paused due to conflicts\n\nDotsync is propagating a config change through the scope branch DAG so shared changes reach every affected machine. Different scopes exist because some config is shared across all machines, some is shared by subsets like an OS or desktop environment, and some is machine-specific. This pause happened because the same file was changed differently on branches that now need to be merged.\n\nScope DAG:\n{}\n\nPaused at scope: {}\nMerging changes from {} into {}\nConflicted files:\n{}\n\nWhat to do next:\n- Edit the conflicted files in ~/dotfiles/ and remove the conflict markers, keeping the content you want in this paused scope.\n- Run `dotsync continue` to resume the cascade.\n- The cascade may pause again on a later scope; if it does, repeat this process.\n\nAgent notes:\n- The scope you are resolving may belong to another machine; that is expected because dotsync cascades through every affected descendant scope.\n- When the cascade finishes, dotsync returns you to your machine scope: {}.\n- Do not run other dotsync commands while this cascade is paused.\n- `dotsync abort` is planned but is not implemented yet in this build.",
         conflict.scope_dag,
         conflict.scope,
         colliding_scopes,

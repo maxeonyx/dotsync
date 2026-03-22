@@ -112,82 +112,36 @@ impl DotsyncError {
                 message: self.to_string(),
                 drifts: drifts.clone(),
             },
-            DotsyncError::NoPausedCascade => ErrorReport {
-                code: "no_paused_cascade",
-                message: self.to_string(),
-                drifts: Vec::new(),
-            },
-            DotsyncError::InvalidScope { .. } => ErrorReport {
-                code: "invalid_scope",
-                message: self.to_string(),
-                drifts: Vec::new(),
-            },
-            DotsyncError::ScopeNotAncestor { .. } => ErrorReport {
-                code: "scope_not_ancestor",
-                message: self.to_string(),
-                drifts: Vec::new(),
-            },
-            DotsyncError::CascadeInProgress { .. } => ErrorReport {
-                code: "cascade_in_progress",
-                message: self.to_string(),
-                drifts: Vec::new(),
-            },
-            DotsyncError::NoCurrentScope => ErrorReport {
-                code: "no_current_scope",
-                message: self.to_string(),
-                drifts: Vec::new(),
-            },
-            DotsyncError::MissingScopeBookmark { .. } => ErrorReport {
-                code: "missing_scope_bookmark",
-                message: self.to_string(),
-                drifts: Vec::new(),
-            },
-            DotsyncError::MissingParent { .. } => ErrorReport {
-                code: "missing_parent",
-                message: self.to_string(),
-                drifts: Vec::new(),
-            },
-            DotsyncError::ScopeCycle { .. } => ErrorReport {
-                code: "scope_cycle",
-                message: self.to_string(),
-                drifts: Vec::new(),
-            },
-            DotsyncError::ConfigParse { .. } => ErrorReport {
-                code: "config_parse",
-                message: self.to_string(),
-                drifts: Vec::new(),
-            },
-            DotsyncError::CascadeState { .. } => ErrorReport {
-                code: "cascade_state",
-                message: self.to_string(),
-                drifts: Vec::new(),
-            },
-            DotsyncError::RepoAlreadyExists { .. } => ErrorReport {
-                code: "repo_exists",
-                message: self.to_string(),
-                drifts: Vec::new(),
-            },
-            DotsyncError::MissingHostname => ErrorReport {
-                code: "missing_hostname",
-                message: self.to_string(),
-                drifts: Vec::new(),
-            },
-            DotsyncError::Io { .. } => ErrorReport {
-                code: "io",
-                message: self.to_string(),
-                drifts: Vec::new(),
-            },
-            DotsyncError::Jj { .. } => ErrorReport {
-                code: "jj",
-                message: self.to_string(),
-                drifts: Vec::new(),
-            },
-            DotsyncError::NotImplemented(_) => ErrorReport {
-                code: "not_implemented",
-                message: self.to_string(),
-                drifts: Vec::new(),
-            },
+            DotsyncError::NoPausedCascade => basic_error_report("no_paused_cascade", self),
+            DotsyncError::InvalidScope { .. } => basic_error_report("invalid_scope", self),
+            DotsyncError::ScopeNotAncestor { .. } => {
+                basic_error_report("scope_not_ancestor", self)
+            }
+            DotsyncError::CascadeInProgress { .. } => {
+                basic_error_report("cascade_in_progress", self)
+            }
+            DotsyncError::NoCurrentScope => basic_error_report("no_current_scope", self),
+            DotsyncError::MissingScopeBookmark { .. } => {
+                basic_error_report("missing_scope_bookmark", self)
+            }
+            DotsyncError::MissingParent { .. } => basic_error_report("missing_parent", self),
+            DotsyncError::ScopeCycle { .. } => basic_error_report("scope_cycle", self),
+            DotsyncError::ConfigParse { .. } => basic_error_report("config_parse", self),
+            DotsyncError::CascadeState { .. } => basic_error_report("cascade_state", self),
+            DotsyncError::RepoAlreadyExists { .. } => basic_error_report("repo_exists", self),
+            DotsyncError::MissingHostname => basic_error_report("missing_hostname", self),
+            DotsyncError::Io { .. } => basic_error_report("io", self),
+            DotsyncError::Jj { .. } => basic_error_report("jj", self),
+            DotsyncError::NotImplemented(_) => basic_error_report("not_implemented", self),
         }
+    }
+}
+
+fn basic_error_report(code: &'static str, error: &DotsyncError) -> ErrorReport {
+    ErrorReport {
+        code,
+        message: error.to_string(),
+        drifts: Vec::new(),
     }
 }
 
@@ -366,7 +320,7 @@ pub async fn commit_and_sync(
     )
     .await?
     {
-        CommandOutcome::Conflict(pause) => return Ok(CommandOutcome::Conflict(pause)),
+        CommandOutcome::Conflict(pause) => Ok(CommandOutcome::Conflict(pause)),
         CommandOutcome::Success(cascaded_scopes) => {
             checkout_workspace_to_scope(paths, &mut workspace, &session.current_scope).await?;
             let sync = sync_repo_to_home(
@@ -604,7 +558,7 @@ async fn commit_snapshot_and_apply_cascade(
                 .map_err(|err| jj_error(format!("commit paused scope update: {err}")))?;
             state_store.save(&paused_state)?;
             checkout_workspace_to_commit(workspace, repo.op_id().clone(), &current_commit).await?;
-            return Ok(CommandOutcome::Conflict(pause));
+            Ok(CommandOutcome::Conflict(pause))
         }
         CascadeOutcome::Completed(success) => {
             let current_commit = scope_heads.require(&session.current_scope)?;

@@ -2,7 +2,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use serde_json;
 use tempfile::TempDir;
 
 const CONFIG_DIR: &str = ".config/dotsync";
