@@ -2,14 +2,14 @@
 
 ## Current state
 
-15 passing black-box CLI tests. Ratchet clean.
+18 passing black-box CLI tests. Ratchet clean. Clippy clean.
 
-Working: `dotsync init`, `dotsync` (sync), `dotsync <scope> -m "msg"` (commit + cascade + sync + push), `--force`, `--output json`, drift detection, scope isolation, multi-machine via shared remote, merge cascade with conflict pause/resume via `dotsync continue`, full DAG traversal (all machines), return to home branch after cascade.
+Working: `dotsync init`, `dotsync` (sync), `dotsync <scope> -m "msg"` (commit + cascade + sync + push), `--force`, `--output json` on all commands, drift detection, scope isolation, multi-machine via shared remote, merge cascade with conflict pause/resume via `dotsync continue`, full DAG traversal (all machines), return to home branch after cascade, structured JSON error/usage/drift/conflict output, rich human conflict messages with ASCII DAG rendering.
 
 ### Code structure
-- `src/cascade.rs`: cascade domain model (`CascadeOutcome::{Completed, Paused}`), traversal, merge execution, `PersistedCascadeState`, `CascadeStateStore`
-- `src/lib.rs`: command orchestration split into `prepare_commit_session()`, `validate_commit_scope()`, `commit_snapshot_and_apply_cascade()`, plus `continue_after_conflict()`
-- `src/main.rs`: `--output json` emits JSON for success/error/conflict, `continue` command wired up, exit code 3 for conflicts
+- `src/cascade.rs`: cascade domain model (`CascadeOutcome::{Completed, Paused}`), traversal, merge execution, `PersistedCascadeState`, `CascadeStateStore`, `ScopeDagRenderer` for human conflict messages
+- `src/lib.rs`: command orchestration split into `prepare_commit_session()`, `validate_commit_scope()`, `commit_snapshot_and_apply_cascade()`, plus `continue_after_conflict()`. Structured `ErrorReport` for machine-facing errors with stable codes and drift details.
+- `src/main.rs`: centralized output rendering — commands return typed payloads, one emitter handles JSON/human split. `continue` command wired up, exit code 3 for conflicts
 
 ## Immediate TODO
 
@@ -19,9 +19,9 @@ Working: `dotsync init`, `dotsync` (sync), `dotsync <scope> -m "msg"` (commit + 
 - [x] Pre-implementation refactoring: extract cascade engine into `src/cascade.rs`, split `commit_and_sync()` into phases
 - [x] Diamond cascade test passing (basic pause/resume works)
 - [x] Fix merge-history preservation (tests 2 and 3) — pause is now workspace state + persisted intent, not history
-- [ ] `--output json` on all commands — JSON on stdout for machine consumption, human text on stderr
+- [x] `--output json` on all commands — JSON on stdout for machine consumption, human text on stderr. Structured error codes for usage, drift, and runtime errors. Rich human conflict messages with ASCII DAG.
 - [ ] Change config to be read from system path (`~/.config/dotsync/config.toml`), not repo path
-- [ ] Manually verify conflict messages contain everything an agent needs
+- [ ] Manually verify conflict messages contain everything an agent needs (initial implementation done — needs Max's eye)
 
 ## Key design decision: pause model
 
@@ -59,8 +59,8 @@ The message MUST contain all of the following:
 ### Instructions (what to do)
 - Edit the conflicted files in `~/dotfiles/` to resolve the conflict (remove conflict markers, keep the desired content)
 - Run `dotsync continue` to resume the cascade
-- Run `dotsync abort` to undo the cascade and go back to the state before the commit
 - Note that the cascade may pause again at a later scope — this is normal, just repeat the process
+- (`dotsync abort` is planned but not yet implemented)
 
 ### Agent-specific guidance
 - The scope being resolved may be a different machine's branch — this is expected and necessary
@@ -99,15 +99,33 @@ All commands emit JSON on stdout when `--output json` is passed. Human-readable 
 ```json
 {
   "status": "error",
+  "error": "invalid_scope",
   "message": "scope `nonexistent` does not exist"
 }
 ```
 
-## Pending tests (drive the implementation)
+Stable error codes include: `invalid_scope`, `drift_detected`, `no_paused_cascade`, `not_initialized`, etc. Drift errors include a `drifts` array with per-file details.
 
-1. `diamond_cascade_resolves_conflicts_across_multi_parent_merge` — diamond scope graph (all → a, all → b, a+b+linux → machine), conflicting changes to a and b, resolve on machine, verify
-2. `recorded_conflict_resolution_survives_subsequent_cascade` — chain (all → linux → machine), commit to machine then conflicting to linux (resolve), then conflicting to all (resolve at linux, machine should be clean because first resolution is in merge history)
-3. `multi_machine_cascade_resolves_other_machines_conflicts_and_returns_home` — two machines (linux/windows), scope-specific changes then conflicting commit to all, resolve other machine's branch, verify you end up on your own branch, verify other machine syncs cleanly
+### Usage error (exit code 2)
+```json
+{
+  "status": "error",
+  "error": "usage",
+  "message": "missing required argument: -m <message>"
+}
+```
+
+## Test coverage (18 tests)
+
+Cascade conflict tests (all passing):
+1. `diamond_cascade_resolves_conflicts_across_multi_parent_merge` — diamond scope graph, conflicting changes, resolve on machine
+2. `recorded_conflict_resolution_survives_subsequent_cascade` — chain with merge history preservation
+3. `multi_machine_cascade_resolves_other_machines_conflicts_and_returns_home` — two machines, cross-machine conflict resolution
+
+JSON output contract tests (all passing):
+4. `json_usage_error_is_emitted_for_missing_commit_message` — usage errors emit structured JSON
+5. `json_continue_without_pause_reports_structured_error` — runtime errors have stable codes
+6. `json_drift_error_includes_drift_details` — drift errors include per-file detail
 
 ## Design decisions
 
