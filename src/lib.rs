@@ -33,6 +33,8 @@ use crate::cascade::{
     CascadeOutcome, CascadePlan, CascadeStateStore, JsonCascadeStateStore, ScopeHeads,
 };
 
+const DOTSYNC_CONFIG_RELATIVE_PATH: &str = ".config/dotsync/config.toml";
+
 #[derive(Debug, Clone)]
 pub struct DotsyncPaths {
     pub repo_root: PathBuf,
@@ -624,7 +626,7 @@ async fn set_working_copy_to_paused_conflict(
 }
 
 fn load_scope_graph(paths: &DotsyncPaths) -> Result<ScopeGraph, DotsyncError> {
-    let config_path = resolve_scope_graph_path(paths)?;
+    let config_path = discover_scope_graph_path(paths)?;
     let contents = fs::read_to_string(&config_path).map_err(|source| DotsyncError::Io {
         path: config_path.clone(),
         source,
@@ -1430,7 +1432,7 @@ fn write_config(paths: &DotsyncPaths, contents: &str) -> Result<(), DotsyncError
 }
 
 fn sync_primary_config_to_home(paths: &DotsyncPaths) -> Result<(), DotsyncError> {
-    copy_repo_file_to_home(paths, Path::new(".config/dotsync/config.toml"))
+    copy_repo_file_to_home(paths, Path::new(DOTSYNC_CONFIG_RELATIVE_PATH))
 }
 
 fn cascade_state_store(paths: &DotsyncPaths) -> JsonCascadeStateStore {
@@ -1438,14 +1440,14 @@ fn cascade_state_store(paths: &DotsyncPaths) -> JsonCascadeStateStore {
 }
 
 fn repo_config_path(paths: &DotsyncPaths) -> PathBuf {
-    paths.repo_root.join(".config/dotsync/config.toml")
+    paths.repo_root.join(DOTSYNC_CONFIG_RELATIVE_PATH)
 }
 
 fn system_config_path(paths: &DotsyncPaths) -> PathBuf {
-    paths.home_dir.join(".config/dotsync/config.toml")
+    paths.home_dir.join(DOTSYNC_CONFIG_RELATIVE_PATH)
 }
 
-fn resolve_scope_graph_path(paths: &DotsyncPaths) -> Result<PathBuf, DotsyncError> {
+fn discover_scope_graph_path(paths: &DotsyncPaths) -> Result<PathBuf, DotsyncError> {
     let repo_path = repo_config_path(paths);
     if repo_path.exists() {
         return Ok(repo_path);
