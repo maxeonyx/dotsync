@@ -29,8 +29,8 @@ use walkdir::{DirEntry, WalkDir};
 
 use crate::cascade::{
     build_cascade_plan, build_paused_state, commit_resolved_pause, create_scope_head_if_missing,
-    execute_cascade_plan, resume_cascade, CascadeCommand, CascadeOutcome, CascadePlan,
-    CascadeStateStore, JsonCascadeStateStore, ScopeHeads,
+    enrich_pause_with_scope_dag, execute_cascade_plan, resume_cascade, CascadeCommand,
+    CascadeOutcome, CascadePlan, CascadeStateStore, JsonCascadeStateStore, ScopeHeads,
 };
 
 #[derive(Debug, Clone)]
@@ -86,6 +86,13 @@ pub struct ContinueReport {
 }
 
 #[derive(Debug, Clone)]
+pub struct ErrorReport {
+    pub code: &'static str,
+    pub message: String,
+    pub drifts: Vec<FileDrift>,
+}
+
+#[derive(Debug, Clone)]
 struct CommitSession {
     current_scope: String,
     graph: ScopeGraph,
@@ -95,6 +102,93 @@ struct CommitSession {
 pub enum CommandOutcome<T> {
     Success(T),
     Conflict(CascadePause),
+}
+
+impl DotsyncError {
+    pub fn to_error_report(&self) -> ErrorReport {
+        match self {
+            DotsyncError::DriftDetected { drifts, .. } => ErrorReport {
+                code: "drift_detected",
+                message: self.to_string(),
+                drifts: drifts.clone(),
+            },
+            DotsyncError::NoPausedCascade => ErrorReport {
+                code: "no_paused_cascade",
+                message: self.to_string(),
+                drifts: Vec::new(),
+            },
+            DotsyncError::InvalidScope { .. } => ErrorReport {
+                code: "invalid_scope",
+                message: self.to_string(),
+                drifts: Vec::new(),
+            },
+            DotsyncError::ScopeNotAncestor { .. } => ErrorReport {
+                code: "scope_not_ancestor",
+                message: self.to_string(),
+                drifts: Vec::new(),
+            },
+            DotsyncError::CascadeInProgress { .. } => ErrorReport {
+                code: "cascade_in_progress",
+                message: self.to_string(),
+                drifts: Vec::new(),
+            },
+            DotsyncError::NoCurrentScope => ErrorReport {
+                code: "no_current_scope",
+                message: self.to_string(),
+                drifts: Vec::new(),
+            },
+            DotsyncError::MissingScopeBookmark { .. } => ErrorReport {
+                code: "missing_scope_bookmark",
+                message: self.to_string(),
+                drifts: Vec::new(),
+            },
+            DotsyncError::MissingParent { .. } => ErrorReport {
+                code: "missing_parent",
+                message: self.to_string(),
+                drifts: Vec::new(),
+            },
+            DotsyncError::ScopeCycle { .. } => ErrorReport {
+                code: "scope_cycle",
+                message: self.to_string(),
+                drifts: Vec::new(),
+            },
+            DotsyncError::ConfigParse { .. } => ErrorReport {
+                code: "config_parse",
+                message: self.to_string(),
+                drifts: Vec::new(),
+            },
+            DotsyncError::CascadeState { .. } => ErrorReport {
+                code: "cascade_state",
+                message: self.to_string(),
+                drifts: Vec::new(),
+            },
+            DotsyncError::RepoAlreadyExists { .. } => ErrorReport {
+                code: "repo_exists",
+                message: self.to_string(),
+                drifts: Vec::new(),
+            },
+            DotsyncError::MissingHostname => ErrorReport {
+                code: "missing_hostname",
+                message: self.to_string(),
+                drifts: Vec::new(),
+            },
+            DotsyncError::Io { .. } => ErrorReport {
+                code: "io",
+                message: self.to_string(),
+                drifts: Vec::new(),
+            },
+            DotsyncError::Jj { .. } => ErrorReport {
+                code: "jj",
+                message: self.to_string(),
+                drifts: Vec::new(),
+            },
+            DotsyncError::NotImplemented(_) => ErrorReport {
+                code: "not_implemented",
+                message: self.to_string(),
+                drifts: Vec::new(),
+            },
+        }
+    }
 }
 
 pub use crate::cascade::CascadePause;
@@ -328,6 +422,7 @@ pub async fn continue_after_conflict(
     let outcome = resume_cascade(tx.repo_mut(), &mut scope_heads, &resumed_state).await?;
     match outcome {
         CascadeOutcome::Paused(pause) => {
+            let pause = enrich_pause_with_scope_dag(pause, &graph);
             let paused_plan = CascadePlan::from_steps(resumed_state.remaining_steps.clone());
             let current_commit = set_working_copy_to_paused_conflict(
                 tx.repo_mut(),
@@ -488,6 +583,7 @@ async fn commit_snapshot_and_apply_cascade(
 
     match cascade_result {
         CascadeOutcome::Paused(pause) => {
+            let pause = enrich_pause_with_scope_dag(pause, &session.graph);
             let current_commit = set_working_copy_to_paused_conflict(
                 tx.repo_mut(),
                 &scope_heads,

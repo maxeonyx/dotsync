@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -47,6 +48,7 @@ pub struct CascadePause {
     pub original_scope: String,
     pub machine_scope: String,
     pub parent_scopes: Vec<String>,
+    pub scope_dag: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -301,6 +303,7 @@ async fn execute_cascade_steps(
                 original_scope: command.original_scope.clone(),
                 machine_scope: command.machine_scope.clone(),
                 parent_scopes: step.parent_scopes.clone(),
+                scope_dag: String::new(),
             }));
         }
 
@@ -501,4 +504,139 @@ fn descendants_of(graph: &ScopeGraph, scope: &str) -> Vec<String> {
         }
     }
     descendants
+}
+
+pub(crate) fn enrich_pause_with_scope_dag(
+    mut pause: CascadePause,
+    graph: &ScopeGraph,
+) -> CascadePause {
+    pause.scope_dag = render_scope_dag(graph, &pause);
+    pause
+}
+
+fn render_scope_dag(graph: &ScopeGraph, pause: &CascadePause) -> String {
+    let done: HashSet<&str> = pause.scopes_done.iter().map(String::as_str).collect();
+    let pending: HashSet<&str> = pause.scopes_pending.iter().map(String::as_str).collect();
+
+    let mut roots: Vec<String> = graph
+        .parents
+        .iter()
+        .filter(|(_, parents)| parents.is_empty())
+        .map(|(scope, _)| scope.clone())
+        .collect();
+    roots.sort();
+
+    let mut primary_children: HashMap<String, Vec<String>> = HashMap::new();
+    for (scope, parents) in &graph.parents {
+        if let Some(primary_parent) = parents.first() {
+            primary_children
+                .entry(primary_parent.clone())
+                .or_default()
+                .push(scope.clone());
+        }
+    }
+    for children in primary_children.values_mut() {
+        children.sort();
+    }
+
+    let mut lines = Vec::new();
+    lines.push(
+        "Legend: [origin] original change, [done] cascaded, [paused] conflict here, [pending] still to cascade, [machine] your machine scope".to_string(),
+    );
+    for (index, root) in roots.iter().enumerate() {
+        render_scope_tree(
+            &mut lines,
+            graph,
+            &primary_children,
+            root,
+            "",
+            index + 1 == roots.len(),
+            pause,
+            &done,
+            &pending,
+        );
+    }
+    lines.join("\n")
+}
+
+fn render_scope_tree(
+    lines: &mut Vec<String>,
+    graph: &ScopeGraph,
+    primary_children: &HashMap<String, Vec<String>>,
+    scope: &str,
+    prefix: &str,
+    is_last: bool,
+    pause: &CascadePause,
+    done: &HashSet<&str>,
+    pending: &HashSet<&str>,
+) {
+    let connector = if prefix.is_empty() {
+        ""
+    } else if is_last {
+        "└─ "
+    } else {
+        "├─ "
+    };
+
+    let mut line = String::new();
+    let _ = write!(&mut line, "{prefix}{connector}{scope}");
+
+    for marker in scope_markers(scope, pause, done, pending) {
+        let _ = write!(&mut line, " {marker}");
+    }
+
+    let parents = &graph.parents[scope];
+    if parents.len() > 1 {
+        let extra_parents = parents[1..].join(", ");
+        let _ = write!(&mut line, " (also inherits: {extra_parents})");
+    }
+
+    lines.push(line);
+
+    let child_prefix = if prefix.is_empty() {
+        String::new()
+    } else if is_last {
+        format!("{prefix}   ")
+    } else {
+        format!("{prefix}│  ")
+    };
+
+    if let Some(children) = primary_children.get(scope) {
+        for (index, child) in children.iter().enumerate() {
+            render_scope_tree(
+                lines,
+                graph,
+                primary_children,
+                child,
+                &child_prefix,
+                index + 1 == children.len(),
+                pause,
+                done,
+                pending,
+            );
+        }
+    }
+}
+
+fn scope_markers<'a>(
+    scope: &'a str,
+    pause: &'a CascadePause,
+    done: &HashSet<&str>,
+    pending: &HashSet<&str>,
+) -> Vec<&'a str> {
+    let mut markers = Vec::new();
+    if scope == pause.original_scope {
+        markers.push("[origin]");
+    }
+    if scope == pause.scope {
+        markers.push("[paused]");
+    } else if done.contains(scope) {
+        markers.push("[done]");
+    } else if pending.contains(scope) {
+        markers.push("[pending]");
+    }
+    if scope == pause.machine_scope {
+        markers.push("[machine]");
+    }
+    markers
 }

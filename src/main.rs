@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
     commit_and_sync, continue_after_conflict, init, sync, CommandOutcome, CommitOptions,
-    DotsyncError, DotsyncPaths, SyncOptions,
+    DotsyncError, DotsyncPaths, ErrorReport, FileDrift, SyncOptions,
 };
 use serde_json::json;
 use std::env;
@@ -43,12 +43,32 @@ enum Command {
     Continue,
 }
 
+#[derive(Debug, Clone)]
+struct SuccessOutput {
+    json: serde_json::Value,
+    human: String,
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct UsageError {
+    message: &'static str,
+}
+
+#[derive(Debug, Clone)]
+enum CliOutput {
+    Success(SuccessOutput),
+    Conflict(dotsync::CascadePause),
+    Error(ErrorReport),
+    Usage(UsageError),
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
     let output_format = cli.output_format.clone();
 
-    let result = match (cli.command, cli.scope, cli.message) {
+    let outcome = match (cli.command, cli.scope, cli.message) {
         (Some(Command::Init { remote_url }), None, None) => {
             run_init(remote_url, &output_format).await
         }
@@ -57,99 +77,102 @@ async fn main() {
         (None, Some(scope), Some(message)) => {
             run_commit(scope, message, cli.force, &output_format).await
         }
-        (None, Some(_), None) => {
-            eprintln!("dotsync: <scope> requires -m/--message");
-            std::process::exit(2);
-        }
+        (None, Some(_), None) => Ok(CliOutput::Usage(UsageError {
+            message: "<scope> requires -m/--message",
+        })),
         (Some(Command::Init { .. }), Some(_), _) | (Some(Command::Init { .. }), None, Some(_)) => {
-            eprintln!("dotsync: `init` does not take scope or message arguments");
-            std::process::exit(2);
+            Ok(CliOutput::Usage(UsageError {
+                message: "`init` does not take scope or message arguments",
+            }))
         }
         (Some(Command::Continue), Some(_), _) | (Some(Command::Continue), None, Some(_)) => {
-            eprintln!("dotsync: `continue` does not take scope or message arguments");
-            std::process::exit(2);
+            Ok(CliOutput::Usage(UsageError {
+                message: "`continue` does not take scope or message arguments",
+            }))
         }
         (None, None, Some(_)) => unreachable!("clap requires scope when message is set"),
     };
 
-    if let Err(error) = result {
-        print_error(&error, &output_format);
-        std::process::exit(1);
-    }
+    let exit_code = match outcome {
+        Ok(output) => emit_output(&output_format, output),
+        Err(error) => emit_output(&output_format, CliOutput::Error(error.to_error_report())),
+    };
+    std::process::exit(exit_code);
 }
 
-async fn run_init(remote_url: String, output_format: &OutputFormat) -> Result<(), DotsyncError> {
+async fn run_init(
+    remote_url: String,
+    _output_format: &OutputFormat,
+) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     let report = init(&paths, &remote_url).await?;
-    emit_success(
-        &output_format,
-        json!({
+    Ok(CliOutput::Success(SuccessOutput {
+        json: json!({
             "status": "ok",
             "command": "init",
             "scope": report.current_scope,
+            "machine_scope": report.current_scope,
             "synced_files": report.sync.synced_paths.iter().map(|path| display_path(path)).collect::<Vec<_>>()
         }),
-        format!(
+        human: format!(
             "dotsync: initialized {} and synced {} file(s)",
             report.current_scope,
             report.sync.synced_paths.len()
         ),
-    );
-    Ok(())
+        notes: Vec::new(),
+    }))
 }
 
-async fn run_continue(force: bool, output_format: &OutputFormat) -> Result<(), DotsyncError> {
+async fn run_continue(
+    force: bool,
+    _output_format: &OutputFormat,
+) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     match continue_after_conflict(&paths, SyncOptions { force }).await? {
-        CommandOutcome::Success(report) => {
-            emit_success(
-                &output_format,
-                json!({
-                    "status": "ok",
-                    "command": "continue",
-                    "synced_files": report.sync.synced_paths.iter().map(|path| display_path(path)).collect::<Vec<_>>()
-                }),
-                format!(
-                    "dotsync: resumed cascade and synced {} file(s)",
-                    report.sync.synced_paths.len()
-                ),
-            );
-            Ok(())
-        }
-        CommandOutcome::Conflict(conflict) => exit_conflict(&output_format, conflict),
+        CommandOutcome::Success(report) => Ok(CliOutput::Success(SuccessOutput {
+            json: json!({
+                "status": "ok",
+                "command": "continue",
+                "scope": report.sync.current_scope,
+                "machine_scope": report.sync.current_scope,
+                "synced_files": report.sync.synced_paths.iter().map(|path| display_path(path)).collect::<Vec<_>>()
+            }),
+            human: format!(
+                "dotsync: resumed cascade and synced {} file(s)",
+                report.sync.synced_paths.len()
+            ),
+            notes: success_notes_for_drifts(&report.sync.drifts),
+        })),
+        CommandOutcome::Conflict(conflict) => Ok(CliOutput::Conflict(conflict)),
     }
 }
 
-async fn run_sync(force: bool, output_format: &OutputFormat) -> Result<(), DotsyncError> {
+async fn run_sync(force: bool, _output_format: &OutputFormat) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     let report = sync(&paths, SyncOptions { force }).await?;
-    if !report.drifts.is_empty() {
-        eprintln!("dotsync: overwrote {} drifted file(s)", report.drifts.len());
-        print_drifts(&report.drifts);
-    }
-    emit_success(
-        &output_format,
-        json!({
+    Ok(CliOutput::Success(SuccessOutput {
+        json: json!({
             "status": "ok",
             "command": "sync",
             "scope": report.current_scope,
+            "machine_scope": report.current_scope,
             "synced_files": report.synced_paths.iter().map(|path| display_path(path)).collect::<Vec<_>>()
         }),
-        format!(
+        human: format!(
             "dotsync: synced {} file(s) for {}",
             report.synced_paths.len(),
             report.current_scope
         ),
-    );
-    Ok(())
+        notes: success_notes_for_drifts(&report.drifts),
+    }))
 }
 
 async fn run_commit(
     scope: String,
     message: String,
     force: bool,
-    output_format: &OutputFormat,
-) -> Result<(), DotsyncError> {
+    _output_format: &OutputFormat,
+) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     match commit_and_sync(
         &paths,
@@ -161,31 +184,22 @@ async fn run_commit(
     )
     .await?
     {
-        CommandOutcome::Success(report) => {
-            if !report.sync.drifts.is_empty() {
-                eprintln!(
-                    "dotsync: overwrote {} drifted file(s)",
-                    report.sync.drifts.len()
-                );
-                print_drifts(&report.sync.drifts);
-            }
-            emit_success(
-                &output_format,
-                json!({
-                    "status": "ok",
-                    "command": "commit",
-                    "scope": report.committed_scope,
-                    "synced_files": report.sync.synced_paths.iter().map(|path| display_path(path)).collect::<Vec<_>>()
-                }),
-                format!(
-                    "dotsync: committed {} and synced {} file(s)",
-                    report.committed_scope,
-                    report.sync.synced_paths.len()
-                ),
-            );
-            Ok(())
-        }
-        CommandOutcome::Conflict(conflict) => exit_conflict(&output_format, conflict),
+        CommandOutcome::Success(report) => Ok(CliOutput::Success(SuccessOutput {
+            json: json!({
+                "status": "ok",
+                "command": "commit",
+                "scope": report.committed_scope,
+                "machine_scope": report.sync.current_scope,
+                "synced_files": report.sync.synced_paths.iter().map(|path| display_path(path)).collect::<Vec<_>>()
+            }),
+            human: format!(
+                "dotsync: committed {} and synced {} file(s)",
+                report.committed_scope,
+                report.sync.synced_paths.len()
+            ),
+            notes: success_notes_for_drifts(&report.sync.drifts),
+        })),
+        CommandOutcome::Conflict(conflict) => Ok(CliOutput::Conflict(conflict)),
     }
 }
 
@@ -199,41 +213,54 @@ fn discover_paths() -> Result<DotsyncPaths, DotsyncError> {
     })
 }
 
-fn print_error(error: &DotsyncError, output_format: &OutputFormat) {
-    match error {
-        DotsyncError::DriftDetected { drifts, .. } => {
-            eprintln!("dotsync: drift detected");
-            print_drifts(drifts);
-        }
-        _ => eprintln!("dotsync: {error}"),
-    }
-    if matches!(output_format, OutputFormat::Json) {
-        println!(
-            "{}",
-            json!({"status": "error", "message": error.to_string()})
-        );
-    }
-}
-
-fn print_drifts(drifts: &[dotsync::FileDrift]) {
+fn print_drifts(drifts: &[FileDrift]) {
     for drift in drifts {
         eprintln!("- {}", drift.repo_path.display());
         eprintln!("{}", drift.diff);
     }
 }
 
-fn emit_success(output_format: &OutputFormat, json_value: serde_json::Value, human: String) {
-    match output_format {
-        OutputFormat::Human => println!("{human}"),
-        OutputFormat::Json => println!("{json_value}"),
+fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
+    match output {
+        CliOutput::Success(success) => {
+            for note in success.notes {
+                eprintln!("{note}");
+            }
+            eprintln!("{}", success.human);
+            if matches!(output_format, OutputFormat::Json) {
+                println!("{}", success.json);
+            }
+            0
+        }
+        CliOutput::Conflict(conflict) => {
+            eprintln!("{}", render_conflict_human(&conflict));
+            if matches!(output_format, OutputFormat::Json) {
+                println!("{}", render_conflict_json(&conflict));
+            }
+            3
+        }
+        CliOutput::Error(error) => {
+            eprintln!("{}", render_error_human(&error));
+            if !error.drifts.is_empty() {
+                print_drifts(&error.drifts);
+            }
+            if matches!(output_format, OutputFormat::Json) {
+                println!("{}", render_error_json(&error));
+            }
+            1
+        }
+        CliOutput::Usage(error) => {
+            eprintln!("dotsync: {}", error.message);
+            if matches!(output_format, OutputFormat::Json) {
+                println!("{}", render_usage_error_json(&error));
+            }
+            2
+        }
     }
 }
 
-fn exit_conflict(
-    output_format: &OutputFormat,
-    conflict: dotsync::CascadePause,
-) -> Result<(), DotsyncError> {
-    let json_value = json!({
+fn render_conflict_json(conflict: &dotsync::CascadePause) -> serde_json::Value {
+    json!({
         "status": "conflict",
         "scope": conflict.scope,
         "conflicted_files": conflict.conflicted_files,
@@ -241,12 +268,78 @@ fn exit_conflict(
         "scopes_pending": conflict.scopes_pending,
         "original_scope": conflict.original_scope,
         "machine_scope": conflict.machine_scope,
-    });
-    match output_format {
-        OutputFormat::Human => eprintln!("dotsync: conflict detected"),
-        OutputFormat::Json => println!("{json_value}"),
+        "parent_scopes": conflict.parent_scopes,
+        "scope_dag": conflict.scope_dag,
+    })
+}
+
+fn render_error_json(error: &ErrorReport) -> serde_json::Value {
+    json!({
+        "status": "error",
+        "error": error.code,
+        "message": error.message,
+        "drifts": error.drifts.iter().map(render_drift_json).collect::<Vec<_>>()
+    })
+}
+
+fn render_usage_error_json(error: &UsageError) -> serde_json::Value {
+    json!({
+        "status": "error",
+        "error": "usage",
+        "message": error.message,
+    })
+}
+
+fn render_drift_json(drift: &FileDrift) -> serde_json::Value {
+    json!({
+        "path": display_path(&drift.repo_path),
+        "system_path": display_path(&drift.system_path),
+        "diff": drift.diff,
+    })
+}
+
+fn render_error_human(error: &ErrorReport) -> String {
+    match error.code {
+        "drift_detected" => "dotsync: drift detected".to_string(),
+        _ => format!("dotsync: {}", error.message),
     }
-    std::process::exit(3);
+}
+
+fn render_conflict_human(conflict: &dotsync::CascadePause) -> String {
+    let conflicted_files = conflict
+        .conflicted_files
+        .iter()
+        .map(|path| format!("- {path}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let colliding_scopes = conflict.parent_scopes.join(", ");
+
+    format!(
+        "dotsync: cascade paused due to conflicts\n\nDotsync is propagating a config change through the scope branch DAG so shared changes reach every affected machine. Different scopes exist because some config is shared across all machines, some is shared by subsets like an OS or desktop environment, and some is machine-specific. This pause happened because the same file was changed differently on branches that now need to be merged.\n\nScope DAG:\n{}\n\nPaused at scope: {}\nMerging changes from {} into {}\nConflicted files:\n{}\n\nWhat to do next:\n- Edit the conflicted files in ~/dotfiles/ and remove the conflict markers, keeping the content you want in this paused scope.\n- Run `dotsync continue` to resume the cascade.\n- Run `dotsync abort` to undo the cascade and return to the pre-cascade state. (Note: `dotsync abort` is not implemented yet in this build.)\n- The cascade may pause again on a later scope; if it does, repeat this process.\n\nAgent notes:\n- The scope you are resolving may belong to another machine; that is expected because dotsync cascades through every affected descendant scope.\n- When the cascade finishes, dotsync returns you to your machine scope: {}.\n- Do not run other dotsync commands while this cascade is paused.",
+        conflict.scope_dag,
+        conflict.scope,
+        colliding_scopes,
+        conflict.scope,
+        conflicted_files,
+        conflict.machine_scope,
+    )
+}
+
+fn success_notes_for_drifts(drifts: &[FileDrift]) -> Vec<String> {
+    if drifts.is_empty() {
+        return Vec::new();
+    }
+    let mut notes = vec![format!(
+        "dotsync: overwrote {} drifted file(s)",
+        drifts.len()
+    )];
+    notes.extend(drifts.iter().flat_map(|drift| {
+        [
+            format!("- {}", drift.repo_path.display()),
+            drift.diff.clone(),
+        ]
+    }));
+    notes
 }
 
 fn display_path(path: &std::path::Path) -> String {
