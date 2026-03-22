@@ -378,6 +378,56 @@ fn invalid_scope_is_rejected() {
 }
 
 #[test]
+fn json_usage_error_is_emitted_for_missing_commit_message() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    assert!(machine.init().status.success(), "init failed");
+
+    let (_output, json) = machine.run_dotsync_json(&["all"]);
+
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"], "usage");
+    assert_eq!(json["message"], "<scope> requires -m/--message");
+}
+
+#[test]
+fn json_continue_without_pause_reports_structured_error() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    assert!(machine.init().status.success(), "init failed");
+
+    let (output, json) = machine.run_dotsync_json(&["continue"]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", render_output(&output));
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"], "no_paused_cascade");
+    assert_eq!(json["message"], "no cascade is currently paused");
+}
+
+#[test]
+fn json_drift_error_includes_drift_details() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    assert!(machine.init().status.success(), "init failed");
+    machine.write_repo_file(".gitconfig", "[user]\nname = \"Max\"\n");
+    assert!(
+        machine.commit("all", "add gitconfig").status.success(),
+        "commit failed"
+    );
+    machine.write_home_file(".gitconfig", "[user]\nname = \"Drift\"\n");
+
+    let (output, json) = machine.run_dotsync_json(&[]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", render_output(&output));
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"], "drift_detected");
+    let drifts = json["drifts"].as_array().expect("drifts array");
+    assert_eq!(drifts.len(), 1, "json: {json}");
+    assert_eq!(drifts[0]["path"], ".gitconfig");
+    assert!(drifts[0]["diff"].as_str().is_some(), "json: {json}");
+}
+
+#[test]
 fn config_validation_rejects_cycle() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
