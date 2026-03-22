@@ -3,7 +3,9 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
+use jj_lib::backend::CommitId;
 use jj_lib::commit::Commit;
+use jj_lib::object_id::ObjectId;
 use jj_lib::op_store::RefTarget;
 use jj_lib::ref_name::RefNameBuf;
 use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo as _};
@@ -64,7 +66,8 @@ pub(crate) struct PersistedCascadeState {
     pub(crate) original_scope: String,
     pub(crate) machine_scope: String,
     pub(crate) paused_scope: String,
-    pub(crate) paused_parent_scopes: Vec<String>,
+    pub(crate) paused_working_copy_commit_hex: String,
+    pub(crate) paused_parent_commit_hexes: Vec<String>,
     pub(crate) command_description: String,
     pub(crate) committed_scope: String,
     pub(crate) completed_scopes: Vec<String>,
@@ -183,6 +186,10 @@ impl ScopeHeads {
 }
 
 impl CascadePlan {
+    pub(crate) fn from_steps(steps: Vec<CascadeStep>) -> Self {
+        Self { steps }
+    }
+
     pub(crate) fn pending_scopes(&self) -> Vec<String> {
         self.steps.iter().map(|step| step.scope.clone()).collect()
     }
@@ -326,6 +333,8 @@ pub(crate) fn build_paused_state(
     plan: &CascadePlan,
     pause: &CascadePause,
     command: &CascadeCommand,
+    scope_heads: &ScopeHeads,
+    paused_working_copy_commit_hex: String,
 ) -> PersistedCascadeState {
     let pause_index = plan
         .remaining_steps()
@@ -337,7 +346,11 @@ pub(crate) fn build_paused_state(
         original_scope: pause.original_scope.clone(),
         machine_scope: pause.machine_scope.clone(),
         paused_scope: pause.scope.clone(),
-        paused_parent_scopes: pause.parent_scopes.clone(),
+        paused_working_copy_commit_hex,
+        paused_parent_commit_hexes: paused_parent_commit_ids(scope_heads, pause)
+            .into_iter()
+            .map(|commit_id| commit_id.hex())
+            .collect(),
         command_description: command.description.clone(),
         committed_scope: command.root_scope.clone(),
         completed_scopes: pause.scopes_done.clone(),
@@ -391,16 +404,26 @@ pub(crate) async fn commit_resolved_pause(
     state: &PersistedCascadeState,
     resolved_tree: &jj_lib::merged_tree::MergedTree,
 ) -> Result<(), DotsyncError> {
-    let existing_head = scope_heads.require(&state.paused_scope)?;
-    let mut parents = vec![existing_head];
-    for parent_scope in &state.paused_parent_scopes {
-        parents.push(scope_heads.require(parent_scope)?);
-    }
+    let resolved_tree = resolved_tree
+        .clone()
+        .resolve()
+        .await
+        .map_err(|err| {
+            jj_error(format!(
+                "resolve paused merge tree for {}: {err}",
+                state.paused_scope
+            ))
+        })?;
+    let parents = state
+        .paused_parent_commit_hexes
+        .iter()
+        .map(|hex| load_commit_from_hex(mut_repo.base_repo(), hex))
+        .collect::<Result<Vec<_>, _>>()?;
 
     let commit = mut_repo
         .new_commit(
             parents.iter().map(|commit| commit.id().clone()).collect(),
-            resolved_tree.clone(),
+            resolved_tree,
         )
         .set_description(&state.command_description)
         .write()
@@ -417,6 +440,37 @@ pub(crate) async fn commit_resolved_pause(
     );
     scope_heads.update(state.paused_scope.clone(), commit);
     Ok(())
+}
+
+fn paused_parent_commit_ids(scope_heads: &ScopeHeads, pause: &CascadePause) -> Vec<CommitId> {
+    let mut parent_ids = vec![
+        scope_heads
+            .require(&pause.scope)
+            .expect("paused scope head should exist")
+            .id()
+            .clone(),
+    ];
+    parent_ids.extend(
+        pause
+            .parent_scopes
+            .iter()
+            .map(|parent_scope| {
+                scope_heads
+                    .require(parent_scope)
+                    .expect("paused parent scope head should exist")
+                    .id()
+                    .clone()
+            }),
+    );
+    parent_ids
+}
+
+fn load_commit_from_hex(repo: &ReadonlyRepo, hex: &str) -> Result<Commit, DotsyncError> {
+    let commit_id = CommitId::try_from_hex(hex)
+        .ok_or_else(|| jj_error(format!("invalid persisted commit id {hex}")))?;
+    repo.store()
+        .get_commit(&commit_id)
+        .map_err(|err| jj_error(format!("load persisted commit {hex}: {err}")))
 }
 
 pub(crate) fn pause_conflict_message(graph: &ScopeGraph, pause: &CascadePause) -> String {

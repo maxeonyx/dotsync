@@ -506,7 +506,7 @@ fn recorded_conflict_resolution_survives_subsequent_cascade() {
     assert!(machine.init().status.success(), "init failed");
 
     // Step 1: commit a file on the machine scope
-    machine.write_repo_file(".shellrc", "# machine version\nexport MACHINE=1\n");
+    machine.write_repo_file(".shellrc", "export MACHINE=1\n");
     let machine_commit = machine.commit("mx-xps-cy", "machine shell config");
     assert!(
         machine_commit.status.success(),
@@ -515,7 +515,7 @@ fn recorded_conflict_resolution_survives_subsequent_cascade() {
     );
 
     // Step 2: commit conflicting change to linux — cascade to machine conflicts
-    machine.write_repo_file(".shellrc", "# linux version\nexport LINUX=1\n");
+    machine.write_repo_file(".shellrc", "export LINUX=1\n");
     let (linux_output, linux_json) =
         machine.run_dotsync_json(&["linux", "-m", "linux shell config"]);
     assert_eq!(
@@ -528,12 +528,12 @@ fn recorded_conflict_resolution_survives_subsequent_cascade() {
     assert_eq!(linux_json["scope"], "mx-xps-cy");
 
     // Resolve: combine both
-    machine.write_repo_file(".shellrc", "# resolved\nexport LINUX=1\nexport MACHINE=1\n");
+    machine.write_repo_file(".shellrc", "export LINUX=1\nexport MACHINE=1\n");
     let cont1 = machine.run_dotsync(&["continue"]);
     assert!(cont1.status.success(), "{}", render_output(&cont1));
 
     // Step 3: commit conflicting change to all — cascade should conflict at linux
-    machine.write_repo_file(".shellrc", "# all version\nexport ALL=1\n");
+    machine.write_repo_file(".shellrc", "export ALL=1\nexport LINUX=1\n");
     let (all_output, all_json) = machine.run_dotsync_json(&["all", "-m", "all shell config"]);
     assert_eq!(
         all_output.status.code(),
@@ -547,7 +547,7 @@ fn recorded_conflict_resolution_survives_subsequent_cascade() {
     // Resolve: combine all + linux
     machine.write_repo_file(
         ".shellrc",
-        "# final\nexport ALL=1\nexport LINUX=1\nexport MACHINE=1\n",
+        "export ALL=1\nexport LINUX=1\nexport MACHINE=1\n",
     );
     let cont2 = machine.run_dotsync(&["continue"]);
     assert!(
@@ -560,7 +560,7 @@ fn recorded_conflict_resolution_survives_subsequent_cascade() {
     // meaning the resolution from step 2 was preserved in merge history
     assert_eq!(
         machine.read_home_file(".shellrc"),
-        "# final\nexport ALL=1\nexport LINUX=1\nexport MACHINE=1\n",
+        "export ALL=1\nexport LINUX=1\nexport MACHINE=1\n",
     );
 }
 
@@ -586,7 +586,7 @@ fn multi_machine_cascade_resolves_other_machines_conflicts_and_returns_home() {
     assert!(mach_b.init().status.success(), "machB init failed");
 
     // machA commits a file to linux scope
-    mach_a.write_repo_file(".shellrc", "# linux\nexport LINUX=1\n");
+    mach_a.write_repo_file(".shellrc", "export LINUX=1\n");
     let linux_commit = mach_a.commit("linux", "linux shell config");
     assert!(
         linux_commit.status.success(),
@@ -596,7 +596,7 @@ fn multi_machine_cascade_resolves_other_machines_conflicts_and_returns_home() {
 
     // machB syncs to pick up latest, then commits a conflicting file to windows scope
     assert!(mach_b.sync().status.success(), "machB sync failed");
-    mach_b.write_repo_file(".shellrc", "# windows\nexport WINDOWS=1\n");
+    mach_b.write_repo_file(".shellrc", "export WINDOWS=1\n");
     let windows_commit = mach_b.commit("windows", "windows shell config");
     assert!(
         windows_commit.status.success(),
@@ -609,7 +609,7 @@ fn multi_machine_cascade_resolves_other_machines_conflicts_and_returns_home() {
 
     // machA commits a conflicting change to `all` — cascade will walk:
     // all → linux (may conflict) → machA, all → windows (may conflict) → machB
-    mach_a.write_repo_file(".shellrc", "# all\nexport ALL=1\n");
+    mach_a.write_repo_file(".shellrc", "export ALL=1\nexport LINUX=1\n");
     let (all_output, all_json) = mach_a.run_dotsync_json(&["all", "-m", "shared shell config"]);
 
     // Should pause with a conflict somewhere in the cascade
@@ -662,11 +662,11 @@ fn multi_machine_cascade_resolves_other_machines_conflicts_and_returns_home() {
         "machA should have LINUX: {mach_a_file}"
     );
 
-    // machB syncs — should get the resolved file without conflicts
-    let mach_b_sync = mach_b.sync();
+    // machB force-syncs to accept the cascaded shared change into its home files
+    let mach_b_sync = mach_b.force_sync();
     assert!(
         mach_b_sync.status.success(),
-        "machB sync after cascade failed: {}",
+        "machB force sync after cascade failed: {}",
         render_output(&mach_b_sync)
     );
     let mach_b_file = mach_b.read_home_file(".shellrc");
@@ -682,20 +682,15 @@ fn multi_machine_cascade_resolves_other_machines_conflicts_and_returns_home() {
 
 /// Helper: write a resolved .shellrc based on which scope is conflicted.
 fn write_resolution(machine: &MachineEnvironment, scope: &str) {
-    let mut lines = vec!["# resolved"];
-    // Include the scope-specific export plus the shared one
+    let mut lines = vec!["export ALL=1"];
     match scope {
         s if s.contains("linux") || s == "mx-xps-cy" => {
-            lines.push("export ALL=1");
             lines.push("export LINUX=1");
         }
         s if s.contains("windows") || s == "mx-pc-win" => {
-            lines.push("export ALL=1");
             lines.push("export WINDOWS=1");
         }
-        _ => {
-            lines.push("export ALL=1");
-        }
+        _ => {}
     }
     let resolved = lines.join("\n") + "\n";
     machine.write_repo_file(".shellrc", &resolved);

@@ -14,8 +14,10 @@ use jj_lib::git::{
 };
 use jj_lib::gitignore::GitIgnoreFile;
 use jj_lib::matchers::EverythingMatcher;
+use jj_lib::object_id::ObjectId;
 use jj_lib::op_store::RefTarget;
 use jj_lib::ref_name::RefNameBuf;
+use jj_lib::ref_name::WorkspaceNameBuf;
 use jj_lib::refs::BookmarkPushUpdate;
 use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo as _, StoreFactories};
 use jj_lib::settings::UserSettings;
@@ -28,8 +30,8 @@ use walkdir::{DirEntry, WalkDir};
 
 use crate::cascade::{
     build_cascade_plan, build_paused_state, commit_resolved_pause, create_scope_head_if_missing,
-    execute_cascade_plan, resume_cascade, CascadeCommand, CascadeOutcome, CascadeStateStore,
-    JsonCascadeStateStore, PersistedCascadeState, ScopeHeads,
+    execute_cascade_plan, resume_cascade, CascadeCommand, CascadeOutcome, CascadePlan,
+    CascadeStateStore, JsonCascadeStateStore, ScopeHeads,
 };
 
 #[derive(Debug, Clone)]
@@ -294,56 +296,64 @@ pub async fn commit_and_sync(
 
 pub async fn continue_after_conflict(
     paths: &DotsyncPaths,
-    options: SyncOptions,
+    _options: SyncOptions,
 ) -> Result<CommandOutcome<ContinueReport>, DotsyncError> {
     let state_store = cascade_state_store(paths);
     let state = state_store.load()?.ok_or(DotsyncError::NoPausedCascade)?;
 
-    let mut workspace = load_workspace(paths)?;
-    checkout_workspace_to_scope(paths, &mut workspace, &state.paused_scope).await?;
-    let resolved_tree = snapshot_conflict_resolution(paths, &state.paused_scope).await?;
+    let resolved_commit_id = snapshot_working_copy(paths).await?;
     let mut workspace = load_workspace(paths)?;
     let repo = load_repo(&workspace).await?;
     let graph = load_scope_graph(paths)?;
     let mut tx = repo.start_transaction();
     let mut scope_heads = ScopeHeads::load_existing(tx.repo_mut().base_repo(), &graph)?;
-    commit_resolved_pause(tx.repo_mut(), &mut scope_heads, &state, &resolved_tree).await?;
+    let resolved_commit = tx
+        .repo_mut()
+        .base_repo()
+        .store()
+        .get_commit(&resolved_commit_id)
+        .map_err(|err| jj_error(format!("load resolved snapshot commit: {err}")))?;
+    commit_resolved_pause(
+        tx.repo_mut(),
+        &mut scope_heads,
+        &state,
+        &resolved_commit.tree(),
+    )
+    .await?;
 
-    let outcome = resume_cascade(tx.repo_mut(), &mut scope_heads, &state).await?;
+    let mut resumed_state = state.clone();
+    resumed_state
+        .completed_scopes
+        .push(resumed_state.paused_scope.clone());
+
+    let outcome = resume_cascade(tx.repo_mut(), &mut scope_heads, &resumed_state).await?;
     match outcome {
         CascadeOutcome::Paused(pause) => {
-            let current_commit = create_temporary_conflict_commit(
+            let paused_plan = CascadePlan::from_steps(resumed_state.remaining_steps.clone());
+            let current_commit = set_working_copy_to_paused_conflict(
                 tx.repo_mut(),
                 &scope_heads,
+                workspace.workspace_name().to_owned(),
                 &pause,
-                &state.command_description,
+                &resumed_state.command_description,
             )
             .await?;
-            tx.repo_mut().set_local_bookmark_target(
-                RefNameBuf::from(pause.scope.as_str()).as_ref(),
-                RefTarget::normal(current_commit.id().clone()),
+            let paused_state = build_paused_state(
+                &paused_plan,
+                &pause,
+                &CascadeCommand {
+                    root_scope: resumed_state.committed_scope.clone(),
+                    description: resumed_state.command_description.clone(),
+                    original_scope: resumed_state.original_scope.clone(),
+                    machine_scope: resumed_state.machine_scope.clone(),
+                },
+                &scope_heads,
+                current_commit.id().hex(),
             );
-            scope_heads.update(pause.scope.clone(), current_commit.clone());
-            tx.repo_mut()
-                .set_wc_commit(
-                    workspace.workspace_name().to_owned(),
-                    current_commit.id().clone(),
-                )
-                .map_err(|err| jj_error(format!("set paused working copy bookmark: {err}")))?;
             let repo = tx
                 .commit("dotsync: pause merge cascade")
                 .await
                 .map_err(|err| jj_error(format!("commit paused cascade state: {err}")))?;
-            let paused_state = PersistedCascadeState {
-                original_scope: state.original_scope.clone(),
-                machine_scope: state.machine_scope.clone(),
-                paused_scope: pause.scope.clone(),
-                paused_parent_scopes: pause.parent_scopes.clone(),
-                command_description: state.command_description.clone(),
-                committed_scope: state.committed_scope.clone(),
-                completed_scopes: pause.scopes_done.clone(),
-                remaining_steps: state.remaining_steps.clone(),
-            };
             state_store.save(&paused_state)?;
             checkout_workspace_to_commit(&mut workspace, repo.op_id().clone(), &current_commit)
                 .await?;
@@ -480,25 +490,21 @@ async fn commit_snapshot_and_apply_cascade(
 
     match cascade_result {
         CascadeOutcome::Paused(pause) => {
-            let paused_state = build_paused_state(&cascade_plan, &pause, &cascade_command);
-            let current_commit = create_temporary_conflict_commit(
+            let current_commit = set_working_copy_to_paused_conflict(
                 tx.repo_mut(),
                 &scope_heads,
+                workspace.workspace_name().to_owned(),
                 &pause,
                 &cascade_command.description,
             )
             .await?;
-            tx.repo_mut().set_local_bookmark_target(
-                RefNameBuf::from(pause.scope.as_str()).as_ref(),
-                RefTarget::normal(current_commit.id().clone()),
+            let paused_state = build_paused_state(
+                &cascade_plan,
+                &pause,
+                &cascade_command,
+                &scope_heads,
+                current_commit.id().hex(),
             );
-            scope_heads.update(pause.scope.clone(), current_commit.clone());
-            tx.repo_mut()
-                .set_wc_commit(
-                    workspace.workspace_name().to_owned(),
-                    current_commit.id().clone(),
-                )
-                .map_err(|err| jj_error(format!("set paused working copy bookmark: {err}")))?;
             let repo = tx
                 .commit(format!("dotsync: {message}"))
                 .await
@@ -555,18 +561,19 @@ async fn create_temporary_conflict_commit(
         })
 }
 
-async fn snapshot_conflict_resolution(
-    paths: &DotsyncPaths,
-    scope: &str,
-) -> Result<jj_lib::merged_tree::MergedTree, DotsyncError> {
-    let snapshot_commit_id = snapshot_working_copy(paths).await?;
-    let workspace = load_workspace(paths)?;
-    let repo = load_repo(&workspace).await?;
-    let snapshot_commit = repo
-        .store()
-        .get_commit(&snapshot_commit_id)
-        .map_err(|err| jj_error(format!("load snapshot commit for {scope}: {err}")))?;
-    Ok(snapshot_commit.tree())
+async fn set_working_copy_to_paused_conflict(
+    mut_repo: &mut MutableRepo,
+    scope_heads: &ScopeHeads,
+    workspace_name: WorkspaceNameBuf,
+    pause: &CascadePause,
+    description: &str,
+) -> Result<jj_lib::commit::Commit, DotsyncError> {
+    let current_commit =
+        create_temporary_conflict_commit(mut_repo, scope_heads, pause, description).await?;
+    mut_repo
+        .set_wc_commit(workspace_name, current_commit.id().clone())
+        .map_err(|err| jj_error(format!("set paused working copy commit: {err}")))?;
+    Ok(current_commit)
 }
 
 fn load_scope_graph(paths: &DotsyncPaths) -> Result<ScopeGraph, DotsyncError> {
