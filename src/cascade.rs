@@ -398,16 +398,12 @@ pub(crate) async fn commit_resolved_pause(
     state: &PersistedCascadeState,
     resolved_tree: &jj_lib::merged_tree::MergedTree,
 ) -> Result<(), DotsyncError> {
-    let resolved_tree = resolved_tree
-        .clone()
-        .resolve()
-        .await
-        .map_err(|err| {
-            jj_error(format!(
-                "resolve paused merge tree for {}: {err}",
-                state.paused_scope
-            ))
-        })?;
+    let resolved_tree = resolved_tree.clone().resolve().await.map_err(|err| {
+        jj_error(format!(
+            "resolve paused merge tree for {}: {err}",
+            state.paused_scope
+        ))
+    })?;
     let parents = state
         .paused_parent_commit_hexes
         .iter()
@@ -437,13 +433,11 @@ pub(crate) async fn commit_resolved_pause(
 }
 
 fn paused_parent_commit_ids(scope_heads: &ScopeHeads, pause: &CascadePause) -> Vec<CommitId> {
-    let mut parent_ids = vec![
-        scope_heads
-            .require(&pause.scope)
-            .expect("paused scope head should exist")
-            .id()
-            .clone(),
-    ];
+    let mut parent_ids = vec![scope_heads
+        .require(&pause.scope)
+        .expect("paused scope head should exist")
+        .id()
+        .clone()];
     parent_ids.extend(
         pause
             .parent_scopes
@@ -583,7 +577,13 @@ impl<'a> ScopeDagRenderer<'a> {
 
         let children = self.sorted_children(scope);
         for (index, child) in children.iter().enumerate() {
-            self.render_scope(lines, child, &child_prefix, index + 1 == children.len(), false);
+            self.render_scope(
+                lines,
+                child,
+                &child_prefix,
+                index + 1 == children.len(),
+                false,
+            );
         }
     }
 
@@ -630,7 +630,11 @@ impl<'a> ScopeDagRenderer<'a> {
     }
 
     fn sorted_children(&self, scope: &str) -> Vec<String> {
-        let mut children = self.display_children.get(scope).cloned().unwrap_or_default();
+        let mut children = self
+            .display_children
+            .get(scope)
+            .cloned()
+            .unwrap_or_default();
         children.sort_by_key(|child| self.sort_key(child));
         children
     }

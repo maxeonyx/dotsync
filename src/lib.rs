@@ -116,9 +116,7 @@ impl DotsyncError {
             },
             DotsyncError::NoPausedCascade => basic_error_report("no_paused_cascade", self),
             DotsyncError::InvalidScope { .. } => basic_error_report("invalid_scope", self),
-            DotsyncError::ScopeNotAncestor { .. } => {
-                basic_error_report("scope_not_ancestor", self)
-            }
+            DotsyncError::ScopeNotAncestor { .. } => basic_error_report("scope_not_ancestor", self),
             DotsyncError::CascadeInProgress { .. } => {
                 basic_error_report("cascade_in_progress", self)
             }
@@ -541,11 +539,7 @@ async fn commit_snapshot_and_apply_cascade(
         CascadeOutcome::Paused(pause) => {
             let pause = enrich_pause_with_scope_dag(pause, &session.graph);
             let current_commit = set_working_copy_to_paused_conflict(
-                tx.repo_mut(),
-                &scope_heads,
-                workspace.workspace_name().to_owned(),
-                &pause,
-                &cascade_command.description,
+                tx.repo_mut(), &scope_heads, workspace.workspace_name().to_owned(), &pause, &cascade_command.description,
             )
             .await?;
             let paused_state = build_paused_state(
