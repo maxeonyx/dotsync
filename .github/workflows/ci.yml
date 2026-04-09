@@ -32,7 +32,9 @@ jobs:
       - name: Clippy
         run: cargo clippy -- -D warnings
       - name: Install cargo-ratchet
-        run: cargo install tdd-ratchet cargo-nextest cargo-nextest
+        run: |
+          cargo install tdd-ratchet
+          cargo install cargo-nextest --locked
       - name: Run tests (ratchet)
         run: cargo ratchet
 
