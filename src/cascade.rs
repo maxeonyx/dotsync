@@ -438,18 +438,13 @@ fn paused_parent_commit_ids(scope_heads: &ScopeHeads, pause: &CascadePause) -> V
         .expect("paused scope head should exist")
         .id()
         .clone()];
-    parent_ids.extend(
-        pause
-            .parent_scopes
-            .iter()
-            .map(|parent_scope| {
-                scope_heads
-                    .require(parent_scope)
-                    .expect("paused parent scope head should exist")
-                    .id()
-                    .clone()
-            }),
-    );
+    parent_ids.extend(pause.parent_scopes.iter().map(|parent_scope| {
+        scope_heads
+            .require(parent_scope)
+            .expect("paused parent scope head should exist")
+            .id()
+            .clone()
+    }));
     parent_ids
 }
 

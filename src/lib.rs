@@ -542,12 +542,8 @@ async fn commit_snapshot_and_apply_cascade(
                 tx.repo_mut(), &scope_heads, workspace.workspace_name().to_owned(), &pause, &cascade_command.description,
             )
             .await?;
-            let paused_state = build_paused_state(
-                &cascade_plan,
-                &pause,
-                &cascade_command,
-                &scope_heads,
-            );
+            let paused_state =
+                build_paused_state(&cascade_plan, &pause, &cascade_command, &scope_heads);
             let repo = tx
                 .commit(format!("dotsync: {message}"))
                 .await
