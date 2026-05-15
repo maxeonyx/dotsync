@@ -21,7 +21,7 @@ Working: `dotsync init`, `dotsync` (sync), `dotsync <scope> -m "msg"` (commit + 
 - [x] Fix merge-history preservation (tests 2 and 3) — pause is now workspace state + persisted intent, not history
 - [x] `--output json` on all commands — JSON on stdout for machine consumption, human text on stderr. Structured error codes for usage, drift, and runtime errors. Rich human conflict messages with ASCII DAG.
 - [x] Config discovery: repo-first with system path (`~/.config/dotsync/config.toml`) fallback. Agents can edit repo config and immediately use new scopes.
-- [ ] Manually verify conflict messages contain everything an agent needs (initial implementation done — needs Max's eye)
+- [x] Manually verify conflict messages contain everything an agent needs — approved by Max
 
 ## Key design decision: pause model
 
@@ -157,3 +157,5 @@ Config discovery tests (all passing):
 - Set up `~/dotfiles` repo with scope branches per DESIGN.md
 - Create the `dotfiles` opencode skill
 - Populate dotfiles from configs in ~/SETUP-LOG.ignore.md
+- Initial salvage from legacy `maxeonyx/dotfiles`: keep `.config/gitignore`, `.config/user-dirs.dirs`, and `mkc.fish`; drop legacy `shit.fish`, `mkclone.fish`, old bash `dotsync`, and stale fish/IPython/on-topic config
+- Later: subsume Max's opencode config itself into dotfiles
