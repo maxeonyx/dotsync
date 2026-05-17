@@ -2,8 +2,8 @@
   "$schema": "https://tdd-ratchet.maxeonyx.com/schema/test-status.v1.json",
   "tests": {
     "dotsync::dotsync$tests::tdd_ratchet_gatekeeper": "passing",
-    "dotsync::user_flows$ancestor_scope_commit_from_machine_working_copy_stays_consistent_across_stages": "pending",
-    "dotsync::user_flows$plain_dotsync_rejects_working_copy_changes": "pending",
+    "dotsync::user_flows$ancestor_scope_commit_from_machine_working_copy_stays_consistent_across_stages": "passing",
+    "dotsync::user_flows$plain_dotsync_rejects_working_copy_changes": "passing",
     "dotsync::user_flows$tdd_ratchet_gatekeeper": "passing"
   },
   "baseline": "c1136cda3733e0bdce76a4fbc38d00dc6cc35e43"

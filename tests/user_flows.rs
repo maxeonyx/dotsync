@@ -127,39 +127,6 @@ impl MachineEnvironment {
         bookmarks
     }
 
-    fn bookmark_has_file(&self, scope: &str, relative: &str) -> bool {
-        let workspace = load_workspace(&self.repo_dir);
-        let repo = load_repo(&workspace);
-        let commit_id = repo
-            .view()
-            .get_local_bookmark(RefNameBuf::from(scope).as_ref())
-            .as_normal()
-            .cloned()
-            .unwrap_or_else(|| panic!("missing bookmark `{scope}`"));
-        let commit = repo
-            .store()
-            .get_commit(&commit_id)
-            .unwrap_or_else(|err| panic!("load bookmark commit `{scope}`: {err}"));
-        let path = RepoPath::from_internal_string(relative)
-            .unwrap_or_else(|err| panic!("invalid repo path `{relative}`: {err}"));
-
-        match commit
-            .tree()
-            .path_value(path)
-            .unwrap_or_else(|err| panic!("read `{relative}` from `{scope}` tree: {err}"))
-            .into_resolved()
-        {
-            Ok(Some(TreeValue::File { .. })) => true,
-            Ok(Some(other)) => panic!(
-                "expected file at `{relative}` on `{scope}`, found different tree value: {other:?}"
-            ),
-            Ok(None) => false,
-            Err(value) => panic!(
-                "expected resolved value for `{relative}` on `{scope}`, found conflict: {value:?}"
-            ),
-        }
-    }
-
     fn bookmark_file_contents(&self, scope: &str, relative: &str) -> String {
         let workspace = load_workspace(&self.repo_dir);
         let repo = load_repo(&workspace);
@@ -197,7 +164,9 @@ impl MachineEnvironment {
             .build()
             .expect("build tokio runtime")
             .block_on(commit.store().read_file(path, &id))
-            .unwrap_or_else(|err| panic!("read file contents for `{relative}` on `{scope}`: {err}"));
+            .unwrap_or_else(|err| {
+                panic!("read file contents for `{relative}` on `{scope}`: {err}")
+            });
         let mut contents = Vec::new();
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -258,7 +227,11 @@ fn plain_dotsync_rejects_working_copy_changes() {
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_repo_file(".gitconfig", "[user]\nname = \"Max\"\n");
 
@@ -291,7 +264,11 @@ fn ancestor_scope_commit_from_machine_working_copy_stays_consistent_across_stage
     let relative = ".gitconfig";
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
     assert_eq!(machine.current_bookmarks(), vec!["mx-xps-cy".to_string()]);
     assert!(!machine.home_file_exists(relative));
 
@@ -301,14 +278,23 @@ fn ancestor_scope_commit_from_machine_working_copy_stays_consistent_across_stage
     assert!(stage_one.status.success(), "{}", render_output(&stage_one));
     assert_eq!(machine.current_bookmarks(), vec!["mx-xps-cy".to_string()]);
     assert_eq!(machine.read_home_file(relative), "[user]\nname = \"Max\"\n");
-    assert_eq!(machine.bookmark_file_contents("all", relative), "[user]\nname = \"Max\"\n");
-    assert_eq!(machine.bookmark_file_contents("linux", relative), "[user]\nname = \"Max\"\n");
+    assert_eq!(
+        machine.bookmark_file_contents("all", relative),
+        "[user]\nname = \"Max\"\n"
+    );
+    assert_eq!(
+        machine.bookmark_file_contents("linux", relative),
+        "[user]\nname = \"Max\"\n"
+    );
     assert_eq!(
         machine.bookmark_file_contents("mx-xps-cy", relative),
         "[user]\nname = \"Max\"\n"
     );
 
-    machine.write_repo_file(relative, "[user]\nname = \"Max\"\nemail = \"max@example.com\"\n");
+    machine.write_repo_file(
+        relative,
+        "[user]\nname = \"Max\"\nemail = \"max@example.com\"\n",
+    );
 
     let stage_two = machine.commit("all", "update gitconfig");
     assert!(stage_two.status.success(), "{}", render_output(&stage_two));
@@ -336,7 +322,11 @@ fn ancestor_scope_commit_from_machine_working_copy_stays_consistent_across_stage
     );
 
     let stage_three = machine.commit("all", "add signing key");
-    assert!(stage_three.status.success(), "{}", render_output(&stage_three));
+    assert!(
+        stage_three.status.success(),
+        "{}",
+        render_output(&stage_three)
+    );
     assert_eq!(machine.current_bookmarks(), vec!["mx-xps-cy".to_string()]);
     assert_eq!(
         machine.read_home_file(relative),

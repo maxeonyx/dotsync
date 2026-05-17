@@ -1,6 +1,6 @@
 mod cascade;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -14,11 +14,13 @@ use jj_lib::git::{
 };
 use jj_lib::gitignore::GitIgnoreFile;
 use jj_lib::matchers::EverythingMatcher;
+use jj_lib::merge::MergedTreeValue;
 use jj_lib::op_store::RefTarget;
 use jj_lib::ref_name::RefNameBuf;
 use jj_lib::ref_name::WorkspaceNameBuf;
 use jj_lib::refs::BookmarkPushUpdate;
 use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo as _, StoreFactories};
+use jj_lib::repo_path::RepoPathBuf;
 use jj_lib::settings::UserSettings;
 use jj_lib::str_util::StringExpression;
 use jj_lib::working_copy::SnapshotOptions;
@@ -101,6 +103,12 @@ struct CommitSession {
 }
 
 #[derive(Debug, Clone)]
+struct WorkingCopySnapshot {
+    tree: jj_lib::merged_tree::MergedTree,
+    changed_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
 pub enum CommandOutcome<T> {
     Success(T),
     Conflict(CascadePause),
@@ -114,6 +122,7 @@ impl DotsyncError {
                 message: self.to_string(),
                 drifts: drifts.clone(),
             },
+            DotsyncError::DirtyWorkingCopy { .. } => basic_error_report("dirty_working_copy", self),
             DotsyncError::NoPausedCascade => basic_error_report("no_paused_cascade", self),
             DotsyncError::InvalidScope { .. } => basic_error_report("invalid_scope", self),
             DotsyncError::ScopeNotAncestor { .. } => basic_error_report("scope_not_ancestor", self),
@@ -193,6 +202,10 @@ pub enum DotsyncError {
         count: usize,
         drifts: Vec<FileDrift>,
     },
+    #[error(
+        "working copy has uncommitted changes in {count} path(s); plain `dotsync` requires a clean working copy. Use `dotsync <scope> -m \"message\"` instead"
+    )]
+    DirtyWorkingCopy { count: usize },
     #[error("repo already exists at {path}")]
     RepoAlreadyExists { path: PathBuf },
     #[error("unable to determine machine hostname")]
@@ -262,7 +275,7 @@ pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, 
         join_existing_remote(paths, &mut workspace, repo, &identity).await?
     };
 
-    let sync = sync_repo_to_home(paths, SyncOptions { force: true }).await?;
+    let sync = sync_repo_to_home(paths, SyncOptions { force: true }, &[]).await?;
     push_scope_updates(paths).await?;
 
     Ok(InitReport {
@@ -282,10 +295,17 @@ pub async fn sync(paths: &DotsyncPaths, options: SyncOptions) -> Result<SyncRepo
         .map_err(|err| jj_error(format!("load repo at head: {err}")))?;
     let current_scope = detect_current_scope(&graph, &workspace, repo.as_ref())?;
 
+    let snapshot = snapshot_working_copy(paths).await?;
+    if !snapshot.changed_paths.is_empty() {
+        return Err(DotsyncError::DirtyWorkingCopy {
+            count: snapshot.changed_paths.len(),
+        });
+    }
+
     let _repo = fetch_origin(repo).await?;
     checkout_workspace_to_scope(paths, &mut load_workspace(paths)?, &current_scope).await?;
 
-    sync_repo_to_home(paths, options).await
+    sync_repo_to_home(paths, options, &[]).await
 }
 
 pub async fn commit_and_sync(
@@ -293,21 +313,13 @@ pub async fn commit_and_sync(
     options: CommitOptions,
 ) -> Result<CommandOutcome<CommitReport>, DotsyncError> {
     let session = prepare_commit_session(paths, &options.scope).await?;
-    let mut workspace = load_workspace(paths)?;
-    checkout_workspace_to_scope(paths, &mut workspace, &session.current_scope).await?;
-    sync_primary_config_to_home(paths)?;
-
-    let snapshot_commit_id = snapshot_working_copy(paths).await?;
+    let snapshot = snapshot_working_copy(paths).await?;
     let mut workspace = load_workspace(paths)?;
     let repo = workspace
         .repo_loader()
         .load_at_head()
         .await
         .map_err(|err| jj_error(format!("reload repo after snapshot: {err}")))?;
-    let snapshot_commit = repo
-        .store()
-        .get_commit(&snapshot_commit_id)
-        .map_err(|err| jj_error(format!("load snapshot commit: {err}")))?;
 
     match commit_snapshot_and_apply_cascade(
         paths,
@@ -315,7 +327,7 @@ pub async fn commit_and_sync(
         repo,
         &mut workspace,
         &options.scope,
-        &snapshot_commit.tree(),
+        &snapshot.tree,
         &options.message,
     )
     .await?
@@ -328,6 +340,7 @@ pub async fn commit_and_sync(
                 SyncOptions {
                     force: options.force,
                 },
+                &snapshot.changed_paths,
             )
             .await?;
             push_scope_updates(paths).await?;
@@ -348,23 +361,17 @@ pub async fn continue_after_conflict(
     let state_store = cascade_state_store(paths);
     let state = state_store.load()?.ok_or(DotsyncError::NoPausedCascade)?;
 
-    let resolved_commit_id = snapshot_working_copy(paths).await?;
+    let resolved_snapshot = snapshot_working_copy(paths).await?;
     let mut workspace = load_workspace(paths)?;
     let repo = load_repo(&workspace).await?;
     let graph = load_scope_graph(paths)?;
     let mut tx = repo.start_transaction();
     let mut scope_heads = ScopeHeads::load_existing(tx.repo_mut().base_repo(), &graph)?;
-    let resolved_commit = tx
-        .repo_mut()
-        .base_repo()
-        .store()
-        .get_commit(&resolved_commit_id)
-        .map_err(|err| jj_error(format!("load resolved snapshot commit: {err}")))?;
     commit_resolved_pause(
         tx.repo_mut(),
         &mut scope_heads,
         &state,
-        &resolved_commit.tree(),
+        &resolved_snapshot.tree,
     )
     .await?;
 
@@ -422,7 +429,7 @@ pub async fn continue_after_conflict(
             checkout_workspace_to_commit(&mut workspace, repo.op_id().clone(), &current_commit)
                 .await?;
 
-            let sync = sync_repo_to_home(paths, SyncOptions { force: true }).await?;
+            let sync = sync_repo_to_home(paths, SyncOptions { force: true }, &[]).await?;
             push_scope_updates(paths).await?;
 
             Ok(CommandOutcome::Success(ContinueReport {
@@ -870,6 +877,7 @@ fn copy_repo_file_to_home(paths: &DotsyncPaths, relative: &Path) -> Result<(), D
 async fn sync_repo_to_home(
     paths: &DotsyncPaths,
     options: SyncOptions,
+    expected_repo_changes: &[PathBuf],
 ) -> Result<SyncReport, DotsyncError> {
     let graph = load_scope_graph(paths)?;
     let workspace = load_workspace(paths)?;
@@ -881,7 +889,11 @@ async fn sync_repo_to_home(
 
     let current_scope = detect_current_scope(&graph, &workspace, repo.as_ref())?;
     let repo_files = repo_files(paths)?;
-    let drifts = detect_drifts(paths, &repo_files)?;
+    let expected_repo_changes: BTreeSet<&PathBuf> = expected_repo_changes.iter().collect();
+    let drifts = detect_drifts(paths, &repo_files)?
+        .into_iter()
+        .filter(|drift| !expected_repo_changes.contains(&drift.repo_path))
+        .collect::<Vec<_>>();
     if !drifts.is_empty() && !options.force {
         return Err(DotsyncError::DriftDetected {
             count: drifts.len(),
@@ -902,9 +914,7 @@ async fn sync_repo_to_home(
     })
 }
 
-async fn snapshot_working_copy(
-    paths: &DotsyncPaths,
-) -> Result<jj_lib::backend::CommitId, DotsyncError> {
+async fn snapshot_working_copy(paths: &DotsyncPaths) -> Result<WorkingCopySnapshot, DotsyncError> {
     let mut workspace = load_workspace(paths)?;
     let repo = workspace
         .repo_loader()
@@ -922,6 +932,7 @@ async fn snapshot_working_copy(
         force_tracking_matcher: &EverythingMatcher,
         max_new_file_size: u64::MAX,
     };
+    let old_tree = locked_ws.locked_wc().old_tree().clone();
     let (tree, _) = locked_ws
         .locked_wc()
         .snapshot(&snapshot_options)
@@ -931,35 +942,11 @@ async fn snapshot_working_copy(
         .finish(repo.op_id().clone())
         .map_err(|err| jj_error(format!("finish working copy mutation: {err}")))?;
 
-    let old_wc_commit_id = repo
-        .view()
-        .get_wc_commit_id(workspace.workspace_name())
-        .ok_or(DotsyncError::NoCurrentScope)?
-        .clone();
-    let old_wc_commit = repo
-        .store()
-        .get_commit(&old_wc_commit_id)
-        .map_err(|err| jj_error(format!("load working copy commit: {err}")))?;
-
-    let mut tx = repo.start_transaction();
-    let new_wc_commit = tx
-        .repo_mut()
-        .new_commit(vec![old_wc_commit.id().clone()], tree)
-        .set_description("dotsync: snapshot working copy")
-        .write()
-        .await
-        .map_err(|err| jj_error(format!("write working copy commit: {err}")))?;
-    tx.repo_mut()
-        .set_wc_commit(
-            workspace.workspace_name().to_owned(),
-            new_wc_commit.id().clone(),
-        )
-        .map_err(|err| jj_error(format!("set working copy commit: {err}")))?;
-    tx.commit("snapshot working copy")
-        .await
-        .map_err(|err| jj_error(format!("commit working copy snapshot: {err}")))?;
-
-    Ok(new_wc_commit.id().clone())
+    let changed_paths = changed_repo_paths(&old_tree, &tree)?;
+    Ok(WorkingCopySnapshot {
+        tree,
+        changed_paths,
+    })
 }
 
 async fn add_origin_remote(
@@ -1051,22 +1038,18 @@ async fn bootstrap_empty_remote(
     ]))?;
     write_config(paths, &render_config(&graph))?;
 
-    let snapshot_commit_id = snapshot_working_copy(paths).await?;
+    let snapshot = snapshot_working_copy(paths).await?;
     let repo = workspace
         .repo_loader()
         .load_at_head()
         .await
         .map_err(|err| jj_error(format!("reload repo after init snapshot: {err}")))?;
-    let snapshot_commit = repo
-        .store()
-        .get_commit(&snapshot_commit_id)
-        .map_err(|err| jj_error(format!("load init snapshot commit: {err}")))?;
     let root_commit = repo.store().root_commit();
 
     let mut tx = repo.start_transaction();
     let all_commit = tx
         .repo_mut()
-        .new_commit(vec![root_commit.id().clone()], snapshot_commit.tree())
+        .new_commit(vec![root_commit.id().clone()], snapshot.tree)
         .set_description("dotsync: initialize all scope")
         .write()
         .await
@@ -1154,12 +1137,8 @@ async fn join_existing_remote(
     let updated_graph = ScopeGraph::new(parents)?;
     write_config(paths, &render_config(&updated_graph))?;
 
-    let snapshot_commit_id = snapshot_working_copy(paths).await?;
+    let snapshot = snapshot_working_copy(paths).await?;
     let repo = load_repo(workspace).await?;
-    let snapshot_commit = repo
-        .store()
-        .get_commit(&snapshot_commit_id)
-        .map_err(|err| jj_error(format!("load join snapshot commit: {err}")))?;
 
     let mut tx = repo.start_transaction();
     let mut scope_heads = ScopeHeads::load_existing(tx.repo_mut().base_repo(), &updated_graph)?;
@@ -1167,7 +1146,7 @@ async fn join_existing_remote(
 
     let config_commit = tx
         .repo_mut()
-        .new_commit(vec![all_head.id().clone()], snapshot_commit.tree())
+        .new_commit(vec![all_head.id().clone()], snapshot.tree)
         .set_description("dotsync: update scope config")
         .write()
         .await
@@ -1425,8 +1404,36 @@ fn write_config(paths: &DotsyncPaths, contents: &str) -> Result<(), DotsyncError
     fs::write(&path, contents).map_err(|source| DotsyncError::Io { path, source })
 }
 
-fn sync_primary_config_to_home(paths: &DotsyncPaths) -> Result<(), DotsyncError> {
-    copy_repo_file_to_home(paths, Path::new(DOTSYNC_CONFIG_RELATIVE_PATH))
+fn changed_repo_paths(
+    old_tree: &jj_lib::merged_tree::MergedTree,
+    new_tree: &jj_lib::merged_tree::MergedTree,
+) -> Result<Vec<PathBuf>, DotsyncError> {
+    let old_entries = collect_tree_entries(old_tree)?;
+    let new_entries = collect_tree_entries(new_tree)?;
+    let all_paths = old_entries
+        .keys()
+        .chain(new_entries.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    Ok(all_paths
+        .into_iter()
+        .filter(|path| old_entries.get(path) != new_entries.get(path))
+        .map(|path| PathBuf::from(path.as_internal_file_string()))
+        .collect())
+}
+
+fn collect_tree_entries(
+    tree: &jj_lib::merged_tree::MergedTree,
+) -> Result<BTreeMap<RepoPathBuf, MergedTreeValue>, DotsyncError> {
+    tree.entries()
+        .map(|(path, value)| {
+            let display_path = path.as_internal_file_string().to_string();
+            value
+                .map(|value| (path, value))
+                .map_err(|err| jj_error(format!("read tree entry {}: {err}", display_path)))
+        })
+        .collect()
 }
 
 fn cascade_state_store(paths: &DotsyncPaths) -> JsonCascadeStateStore {
