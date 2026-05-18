@@ -447,13 +447,21 @@ fn scoped_commit_deletion_removes_file_from_fake_home() {
     machine.write_repo_file(relative, "[user]\nname = \"Max\"\n");
 
     let add_output = machine.commit("all", "add gitconfig");
-    assert!(add_output.status.success(), "{}", render_output(&add_output));
+    assert!(
+        add_output.status.success(),
+        "{}",
+        render_output(&add_output)
+    );
     assert!(machine.home_file_exists(relative));
 
     machine.delete_repo_file(relative);
 
     let delete_output = machine.commit("all", "remove gitconfig");
-    assert!(delete_output.status.success(), "{}", render_output(&delete_output));
+    assert!(
+        delete_output.status.success(),
+        "{}",
+        render_output(&delete_output)
+    );
     assert!(
         !machine.home_file_exists(relative),
         "scoped deletion should remove the managed file from fake home\n{}",
@@ -469,16 +477,28 @@ fn scoped_deletion_only_affects_homes_where_scope_applies() {
     let relative = ".config/hypr/hyprland.conf";
 
     let linux_init = linux_machine.init();
-    assert!(linux_init.status.success(), "{}", render_output(&linux_init));
+    assert!(
+        linux_init.status.success(),
+        "{}",
+        render_output(&linux_init)
+    );
 
     linux_machine.write_repo_file(relative, "monitor=,preferred,auto,1\n");
 
     let add_output = linux_machine.commit("linux", "add hyprland config");
-    assert!(add_output.status.success(), "{}", render_output(&add_output));
+    assert!(
+        add_output.status.success(),
+        "{}",
+        render_output(&add_output)
+    );
     assert!(linux_machine.home_file_exists(relative));
 
     let windows_init = windows_machine.init();
-    assert!(windows_init.status.success(), "{}", render_output(&windows_init));
+    assert!(
+        windows_init.status.success(),
+        "{}",
+        render_output(&windows_init)
+    );
     assert!(!windows_machine.home_file_exists(relative));
 
     windows_machine.write_home_file(relative, "manual local config\n");
@@ -486,11 +506,19 @@ fn scoped_deletion_only_affects_homes_where_scope_applies() {
     linux_machine.delete_repo_file(relative);
 
     let delete_output = linux_machine.commit("linux", "remove hyprland config");
-    assert!(delete_output.status.success(), "{}", render_output(&delete_output));
+    assert!(
+        delete_output.status.success(),
+        "{}",
+        render_output(&delete_output)
+    );
     assert!(!linux_machine.home_file_exists(relative));
 
     let windows_sync = windows_machine.sync();
-    assert!(windows_sync.status.success(), "{}", render_output(&windows_sync));
+    assert!(
+        windows_sync.status.success(),
+        "{}",
+        render_output(&windows_sync)
+    );
     assert_eq!(
         windows_machine.read_home_file(relative),
         "manual local config\n",
@@ -505,18 +533,30 @@ fn sync_uses_state_machine_scope_even_if_checkout_changes() {
     let relative = ".config/machine-only.txt";
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_repo_file(relative, "machine config\n");
     let commit_output = machine.commit("mx-xps-cy", "add machine config");
-    assert!(commit_output.status.success(), "{}", render_output(&commit_output));
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
     assert_eq!(machine.read_home_file(relative), "machine config\n");
 
     machine.delete_home_file(relative);
     machine.set_checkout_scope("all");
 
     let sync_output = machine.sync();
-    assert!(sync_output.status.success(), "{}", render_output(&sync_output));
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
     assert_eq!(
         machine.read_home_file(relative),
         "machine config\n",
@@ -531,18 +571,30 @@ fn missing_state_file_disables_deletion() {
     let relative = ".gitconfig";
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_repo_file(relative, "[user]\nname = \"Max\"\n");
     let add_output = machine.commit("all", "add gitconfig");
-    assert!(add_output.status.success(), "{}", render_output(&add_output));
+    assert!(
+        add_output.status.success(),
+        "{}",
+        render_output(&add_output)
+    );
     assert!(machine.home_file_exists(relative));
 
     machine.delete_sync_state();
     machine.delete_repo_file(relative);
 
     let delete_output = machine.commit("all", "remove gitconfig");
-    assert!(delete_output.status.success(), "{}", render_output(&delete_output));
+    assert!(
+        delete_output.status.success(),
+        "{}",
+        render_output(&delete_output)
+    );
     assert!(
         machine.home_file_exists(relative),
         "without sync state, dotsync should fail safe and leave the previously managed file in home"
@@ -555,7 +607,11 @@ fn invalid_state_file_returns_clear_error() {
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_sync_state_raw("not valid json\n");
 
@@ -579,12 +635,21 @@ fn dirty_working_copy_human_error_stands_alone() {
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_repo_file(".gitconfig", "[user]\nname = \"Max\"\n");
 
     let sync_output = machine.sync();
-    assert_eq!(sync_output.status.code(), Some(1), "{}", render_output(&sync_output));
+    assert_eq!(
+        sync_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&sync_output)
+    );
 
     let stderr = String::from_utf8_lossy(&sync_output.stderr);
     assert_standalone_error(
@@ -607,16 +672,29 @@ fn drift_detected_human_error_stands_alone() {
     let relative = ".gitconfig";
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_repo_file(relative, "[user]\nname = \"Repo\"\n");
     let commit_output = machine.commit("all", "add gitconfig");
-    assert!(commit_output.status.success(), "{}", render_output(&commit_output));
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
 
     machine.write_home_file(relative, "[user]\nname = \"Drifted\"\n");
 
     let sync_output = machine.sync();
-    assert_eq!(sync_output.status.code(), Some(1), "{}", render_output(&sync_output));
+    assert_eq!(
+        sync_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&sync_output)
+    );
 
     let stderr = String::from_utf8_lossy(&sync_output.stderr);
     assert_standalone_error(
@@ -640,10 +718,19 @@ fn continue_without_pause_human_error_stands_alone() {
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     let continue_output = machine.continue_command();
-    assert_eq!(continue_output.status.code(), Some(1), "{}", render_output(&continue_output));
+    assert_eq!(
+        continue_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&continue_output)
+    );
 
     let stderr = String::from_utf8_lossy(&continue_output.stderr);
     assert_standalone_error(
@@ -666,22 +753,44 @@ fn command_while_cascade_paused_human_error_stands_alone() {
     let relative = ".gitconfig";
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_repo_file(relative, "[user]\nname = \"Base\"\n");
     let base_output = machine.commit("all", "add gitconfig");
-    assert!(base_output.status.success(), "{}", render_output(&base_output));
+    assert!(
+        base_output.status.success(),
+        "{}",
+        render_output(&base_output)
+    );
 
     machine.write_repo_file(relative, "[user]\nname = \"Linux\"\n");
     let linux_output = machine.commit("linux", "linux override");
-    assert!(linux_output.status.success(), "{}", render_output(&linux_output));
+    assert!(
+        linux_output.status.success(),
+        "{}",
+        render_output(&linux_output)
+    );
 
     machine.write_repo_file(relative, "[user]\nname = \"All\"\n");
     let paused_output = machine.commit("all", "conflicting all change");
-    assert_eq!(paused_output.status.code(), Some(3), "{}", render_output(&paused_output));
+    assert_eq!(
+        paused_output.status.code(),
+        Some(3),
+        "{}",
+        render_output(&paused_output)
+    );
 
     let blocked_output = machine.commit("all", "second command while paused");
-    assert_eq!(blocked_output.status.code(), Some(1), "{}", render_output(&blocked_output));
+    assert_eq!(
+        blocked_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&blocked_output)
+    );
 
     let stderr = String::from_utf8_lossy(&blocked_output.stderr);
     assert_standalone_error(
@@ -704,12 +813,21 @@ fn invalid_scope_human_error_stands_alone() {
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_repo_file(".gitconfig", "[user]\nname = \"Max\"\n");
 
     let commit_output = machine.commit("server", "bad scope");
-    assert_eq!(commit_output.status.code(), Some(1), "{}", render_output(&commit_output));
+    assert_eq!(
+        commit_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&commit_output)
+    );
 
     let stderr = String::from_utf8_lossy(&commit_output.stderr);
     assert_standalone_error(
@@ -732,15 +850,28 @@ fn non_ancestor_scope_human_error_stands_alone() {
     let windows_machine = harness.machine("machine-windows", "windows", "mx-pc-win");
 
     let linux_init = linux_machine.init();
-    assert!(linux_init.status.success(), "{}", render_output(&linux_init));
+    assert!(
+        linux_init.status.success(),
+        "{}",
+        render_output(&linux_init)
+    );
 
     let windows_init = windows_machine.init();
-    assert!(windows_init.status.success(), "{}", render_output(&windows_init));
+    assert!(
+        windows_init.status.success(),
+        "{}",
+        render_output(&windows_init)
+    );
 
     windows_machine.write_repo_file(".gitconfig", "[user]\nname = \"Win\"\n");
 
     let commit_output = windows_machine.commit("linux", "bad scope");
-    assert_eq!(commit_output.status.code(), Some(1), "{}", render_output(&commit_output));
+    assert_eq!(
+        commit_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&commit_output)
+    );
 
     let stderr = String::from_utf8_lossy(&commit_output.stderr);
     assert_standalone_error(
@@ -762,12 +893,21 @@ fn invalid_sync_state_human_error_stands_alone() {
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_sync_state_raw("not valid json\n");
 
     let sync_output = machine.sync();
-    assert_eq!(sync_output.status.code(), Some(1), "{}", render_output(&sync_output));
+    assert_eq!(
+        sync_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&sync_output)
+    );
 
     let stderr = String::from_utf8_lossy(&sync_output.stderr);
     assert_standalone_error(
@@ -790,12 +930,21 @@ fn dirty_working_copy_json_contract_stays_compatible() {
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_repo_file(".gitconfig", "[user]\nname = \"Max\"\n");
 
     let sync_output = machine.sync_json();
-    assert_eq!(sync_output.status.code(), Some(1), "{}", render_output(&sync_output));
+    assert_eq!(
+        sync_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&sync_output)
+    );
 
     let json = parse_stdout_json(&sync_output);
     assert_eq!(json["status"], "error");
@@ -812,16 +961,29 @@ fn drift_detected_json_contract_stays_compatible() {
     let relative = ".gitconfig";
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_repo_file(relative, "[user]\nname = \"Repo\"\n");
     let commit_output = machine.commit("all", "add gitconfig");
-    assert!(commit_output.status.success(), "{}", render_output(&commit_output));
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
 
     machine.write_home_file(relative, "[user]\nname = \"Drifted\"\n");
 
     let sync_output = machine.sync_json();
-    assert_eq!(sync_output.status.code(), Some(1), "{}", render_output(&sync_output));
+    assert_eq!(
+        sync_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&sync_output)
+    );
 
     let json = parse_stdout_json(&sync_output);
     assert_eq!(json["status"], "error");
@@ -829,10 +991,15 @@ fn drift_detected_json_contract_stays_compatible() {
     assert!(json["message"].as_str().is_some());
     assert!(json["current_state"].as_str().is_some());
 
-    let drifts = json["drifts"].as_array().expect("drifts should be an array");
+    let drifts = json["drifts"]
+        .as_array()
+        .expect("drifts should be an array");
     assert_eq!(drifts.len(), 1);
     assert_eq!(drifts[0]["path"], relative);
-    assert_eq!(drifts[0]["system_path"], machine.home_dir.join(relative).display().to_string());
+    assert_eq!(
+        drifts[0]["system_path"],
+        machine.home_dir.join(relative).display().to_string()
+    );
     assert!(drifts[0]["diff"].as_str().is_some());
 }
 

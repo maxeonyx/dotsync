@@ -6,8 +6,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use jj_lib::backend::{CommitId, TreeValue};
 use gix::remote::fetch::Tags;
+use jj_lib::backend::{CommitId, TreeValue};
 use jj_lib::config::StackedConfig;
 use jj_lib::git::{
     self, GitBranchPushTargets, GitFetch, GitFetchRefExpression, GitImportOptions, GitProgress,
@@ -124,7 +124,10 @@ impl DotsyncError {
                 code: "drift_detected",
                 message: self.to_string(),
                 drifts: drifts.clone(),
-                current_state: Some("managed files in home differ from the repo version for this machine scope".to_string()),
+                current_state: Some(
+                    "managed files in home differ from the repo version for this machine scope"
+                        .to_string(),
+                ),
             },
             DotsyncError::DirtyWorkingCopy { .. } => basic_error_report("dirty_working_copy", self),
             DotsyncError::NoPausedCascade => basic_error_report("no_paused_cascade", self),
@@ -170,7 +173,9 @@ fn error_current_state(error: &DotsyncError) -> Option<String> {
         } => Some(format!(
             "requested scope: {scope}; current machine scope: {current_scope}"
         )),
-        DotsyncError::SyncState { path, .. } => Some(format!("sync state path: {}", path.display())),
+        DotsyncError::SyncState { path, .. } => {
+            Some(format!("sync state path: {}", path.display()))
+        }
         DotsyncError::DirtyWorkingCopy { count } => Some(format!(
             "working copy has uncommitted changes in {count} path(s)"
         )),
@@ -336,7 +341,13 @@ pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, 
         join_existing_remote(paths, &mut workspace, repo, &identity).await?
     };
 
-    let sync = sync_repo_to_home(paths, SyncOptions { force: true }, &[], Some(&current_scope)).await?;
+    let sync = sync_repo_to_home(
+        paths,
+        SyncOptions { force: true },
+        &[],
+        Some(&current_scope),
+    )
+    .await?;
     push_scope_updates(paths).await?;
 
     Ok(InitReport {
@@ -945,7 +956,10 @@ async fn sync_repo_to_home(
             })?;
         let previous_entries =
             collect_managed_tree_entries(&previous_commit.tree(), &internal_paths)?;
-        for removed_path in previous_entries.keys().filter(|path| !repo_entries.contains_key(*path)) {
+        for removed_path in previous_entries
+            .keys()
+            .filter(|path| !repo_entries.contains_key(*path))
+        {
             remove_home_path(paths, removed_path)?;
         }
     }
@@ -1525,27 +1539,27 @@ fn load_sync_state(
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(source) => return Err(DotsyncError::Io { path, source }),
     };
-    let payload: SyncStatePayload = serde_json::from_str(&contents).map_err(|err| {
-        DotsyncError::SyncState {
+    let payload: SyncStatePayload =
+        serde_json::from_str(&contents).map_err(|err| DotsyncError::SyncState {
             path: path.clone(),
             message: format!("failed to parse sync state: {err}"),
-        }
-    })?;
+        })?;
     if payload.machine_scope.trim().is_empty() {
         return Err(DotsyncError::SyncState {
             path,
             message: "machine_scope is empty".to_string(),
         });
     }
-    let last_synced_revision = CommitId::try_from_hex(&payload.last_synced_revision).ok_or_else(|| {
-        DotsyncError::SyncState {
-            path: path.clone(),
-            message: format!(
-                "last_synced_revision `{}` is not valid hex",
-                payload.last_synced_revision
-            ),
-        }
-    })?;
+    let last_synced_revision =
+        CommitId::try_from_hex(&payload.last_synced_revision).ok_or_else(|| {
+            DotsyncError::SyncState {
+                path: path.clone(),
+                message: format!(
+                    "last_synced_revision `{}` is not valid hex",
+                    payload.last_synced_revision
+                ),
+            }
+        })?;
     Ok(Some(SyncState {
         machine_scope: payload.machine_scope,
         last_synced_revision,
@@ -1607,7 +1621,9 @@ fn collect_managed_tree_entries(
         if excluded_paths.contains(&display_path) {
             continue;
         }
-        let value = value.map_err(|err| jj_error(format!("read tree entry {}: {err}", display_path.display())))?;
+        let value = value.map_err(|err| {
+            jj_error(format!("read tree entry {}: {err}", display_path.display()))
+        })?;
         let Some(value) = value.as_resolved() else {
             return Err(jj_error(format!(
                 "tree entry {} is conflicted during sync",
@@ -1645,17 +1661,18 @@ async fn read_tree_entry_bytes(
                 .map_err(|err| jj_error(format!("read repo file {}: {err}", relative.display())))?;
             let mut contents = Vec::new();
             use tokio::io::AsyncReadExt;
-            reader
-                .read_to_end(&mut contents)
-                .await
-                .map_err(|err| jj_error(format!("read repo file bytes {}: {err}", relative.display())))?;
+            reader.read_to_end(&mut contents).await.map_err(|err| {
+                jj_error(format!(
+                    "read repo file bytes {}: {err}",
+                    relative.display()
+                ))
+            })?;
             Ok(contents)
         }
         TreeValue::Symlink(id) => {
-            let target = store
-                .read_symlink(repo_path, id)
-                .await
-                .map_err(|err| jj_error(format!("read repo symlink {}: {err}", relative.display())))?;
+            let target = store.read_symlink(repo_path, id).await.map_err(|err| {
+                jj_error(format!("read repo symlink {}: {err}", relative.display()))
+            })?;
             Ok(target.into_bytes())
         }
         TreeValue::GitSubmodule(_) => Err(DotsyncError::NotImplemented(
