@@ -96,6 +96,7 @@ pub struct ErrorReport {
     pub code: &'static str,
     pub message: String,
     pub drifts: Vec<FileDrift>,
+    pub current_state: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +124,7 @@ impl DotsyncError {
                 code: "drift_detected",
                 message: self.to_string(),
                 drifts: drifts.clone(),
+                current_state: Some("managed files in home differ from the repo version for this machine scope".to_string()),
             },
             DotsyncError::DirtyWorkingCopy { .. } => basic_error_report("dirty_working_copy", self),
             DotsyncError::NoPausedCascade => basic_error_report("no_paused_cascade", self),
@@ -154,6 +156,26 @@ fn basic_error_report(code: &'static str, error: &DotsyncError) -> ErrorReport {
         code,
         message: error.to_string(),
         drifts: Vec::new(),
+        current_state: error_current_state(error),
+    }
+}
+
+fn error_current_state(error: &DotsyncError) -> Option<String> {
+    match error {
+        DotsyncError::CascadeInProgress { scope } => Some(format!("paused cascade scope: {scope}")),
+        DotsyncError::InvalidScope { scope } => Some(format!("requested scope: {scope}")),
+        DotsyncError::ScopeNotAncestor {
+            scope,
+            current_scope,
+        } => Some(format!(
+            "requested scope: {scope}; current machine scope: {current_scope}"
+        )),
+        DotsyncError::SyncState { path, .. } => Some(format!("sync state path: {}", path.display())),
+        DotsyncError::DirtyWorkingCopy { count } => Some(format!(
+            "working copy has uncommitted changes in {count} path(s)"
+        )),
+        DotsyncError::NoPausedCascade => Some("no cascade is currently paused".to_string()),
+        _ => None,
     }
 }
 
@@ -325,6 +347,7 @@ pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, 
 }
 
 pub async fn sync(paths: &DotsyncPaths, options: SyncOptions) -> Result<SyncReport, DotsyncError> {
+    ensure_no_paused_cascade(paths)?;
     let workspace = load_workspace(paths)?;
     let repo = workspace
         .repo_loader()
@@ -348,6 +371,7 @@ pub async fn commit_and_sync(
     paths: &DotsyncPaths,
     options: CommitOptions,
 ) -> Result<CommandOutcome<CommitReport>, DotsyncError> {
+    ensure_no_paused_cascade(paths)?;
     let session = prepare_commit_session(paths, &options.scope).await?;
     let snapshot = snapshot_working_copy(paths).await?;
     let mut workspace = load_workspace(paths)?;

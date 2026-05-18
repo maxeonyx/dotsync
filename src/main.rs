@@ -268,6 +268,7 @@ fn render_error_json(error: &ErrorReport) -> serde_json::Value {
         "error": error.code,
         "message": error.message,
         "drifts": error.drifts.iter().map(render_drift_json).collect::<Vec<_>>(),
+        "current_state": error.current_state,
     })
 }
 
@@ -289,9 +290,97 @@ fn render_drift_json(drift: &FileDrift) -> serde_json::Value {
 
 fn render_error_human(error: &ErrorReport) -> String {
     match error.code {
-        "drift_detected" => "dotsync: drift detected".to_string(),
+        "dirty_working_copy" => render_structured_error(
+            "dirty working copy",
+            "Dotsync keeps your dotfiles repo as the source of truth for your home-directory config and syncs committed repo state into the live system.",
+            "Plain `dotsync` is sync-only: it checks the repo state for your machine scope and copies that committed state into your home directory.",
+            "Plain `dotsync` expects a clean working copy with no uncommitted repo edits.",
+            error
+                .current_state
+                .as_deref()
+                .unwrap_or("working copy has uncommitted changes"),
+            "Dotsync stopped because it cannot safely sync changes that have not been assigned to a scope and committed into the scope DAG.",
+            &["Put the change in the root-est appropriate scope with `dotsync <scope> -m \"message\"`.", "Use plain `dotsync` only after the repo working copy is clean."],
+        ),
+        "drift_detected" => render_structured_error(
+            "drift detected",
+            "Dotsync keeps your dotfiles repo as the source of truth for your home-directory config: the repo is the source of truth, and dotsync syncs committed repo state into the live system.",
+            "This sync flow compares managed files in your home directory against the repo version for this machine scope before copying anything.",
+            "Sync expects managed files in your home directory to already match the repo, unless you intentionally choose to overwrite drift.",
+            "Drifted files are listed below with diffs.",
+            "Dotsync stopped before overwriting local drift so you can inspect what would be replaced.",
+            &["If the repo is correct, rerun with `dotsync --force` to overwrite the drift after reviewing the diffs.", "If the live file is the change you wanted, recreate that change in ~/dotfiles on the correct scope and then run `dotsync <scope> -m \"message\"`."]
+        ),
+        "no_paused_cascade" => render_structured_error(
+            "nothing to resume",
+            "Dotsync manages scoped dotfile changes by committing to one scope and cascading that change through descendant scopes when needed.",
+            "`dotsync continue` resumes a merge cascade after you resolve a paused conflict.",
+            "`dotsync continue` expects a previously paused cascade waiting for resolution.",
+            error
+                .current_state
+                .as_deref()
+                .unwrap_or("no cascade is currently paused"),
+            "Dotsync stopped because there is nothing to resume.",
+            &["Use `dotsync continue` only after a previous cascade paused on conflicts.", "That paused cascade usually comes from an earlier `dotsync <scope> -m \"message\"` run.", "Otherwise start a new change with `dotsync <scope> -m \"message\"` or run plain `dotsync` for sync-only mode."],
+        ),
+        "cascade_in_progress" => render_structured_error(
+            "already paused",
+            "Dotsync manages dotfiles by recording a change on one scope and cascading it through related descendant scopes until every affected machine scope is updated.",
+            "This commit flow records the working-copy change on the selected scope, continues any required cascade, then syncs the final machine-scope state into home.",
+            "This flow expects no earlier cascade to still be paused.",
+            &error.message,
+            "Dotsync stopped because another cascade is already paused and starting a new dotsync command now would mix two incomplete flows.",
+            &["resolve the paused scope in ~/dotfiles and then run `dotsync continue`.", "Do not start another dotsync command until that resume finishes."],
+        ),
+        "invalid_scope" => render_structured_error(
+            "invalid scope",
+            "Dotsync stores dotfiles in a scope DAG so shared config can live on shared ancestor scopes and machine-specific config can stay isolated on leaf scopes.",
+            "This commit flow records your working-copy change on the scope you name and then cascades it through descendant scopes.",
+            "It expects the scope you name to exist in the configured scope DAG.",
+            &error.message,
+            "Dotsync stopped because it cannot place this change onto a scope that is not configured.",
+            &["choose a real configured scope from the DAG.", "Pick the root-est appropriate ancestor scope that should own the change."],
+        ),
+        "scope_not_ancestor" => render_structured_error(
+            "not an ancestor",
+            "Dotsync uses a scope DAG so each machine inherits shared config from ancestor scopes and keeps unrelated branch lineages separate.",
+            "This commit flow records your working-copy change onto one scope in your current machine's lineage and then cascades it downward.",
+            "It expects the chosen scope to be the current machine scope or one of its ancestors.",
+            &error.message,
+            "Dotsync stopped because committing to a non-ancestor scope would let this machine write into an unrelated branch lineage.",
+            &["choose `mx-pc-win` or one of its ancestors instead.", "If the change really belongs to another lineage, make it from a machine in that lineage."],
+        ),
+        "sync_state" => render_structured_error(
+            "invalid sync state",
+            "Dotsync keeps the repo as the source of truth and uses a local sync-state file to remember which machine scope was last synced here and which revision that sync used.",
+            "This sync flow reads that local state to know which prior managed files may need removal and which machine scope should be treated as authoritative for this home.",
+            "It expects that state file, if present, to be valid and readable; it expects that state file, if present, to be valid.",
+            &error.message,
+            "Dotsync stopped because it cannot safely decide what prior sync state to trust.",
+            &["fix or delete the bad sync-state file and rerun the command.", "After that, let dotsync recreate valid sync state from a successful sync."],
+        ),
         _ => format!("dotsync: {}", error.message),
     }
+}
+
+fn render_structured_error(
+    summary: &str,
+    what_dotsync_does: &str,
+    this_flow: &str,
+    expected: &str,
+    current_state: &str,
+    why_stopped: &str,
+    correct_flow_steps: &[&str],
+) -> String {
+    let correct_flow = correct_flow_steps
+        .iter()
+        .map(|step| format!("- {step}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "dotsync: {summary}\n\nWhat dotsync does:\n{what_dotsync_does}\n\nThis flow:\n{this_flow}\n\nExpected:\n{expected}\n\nCurrent state found:\n{current_state}\n\nWhy dotsync stopped:\n{why_stopped}\n\nCorrect flow:\n{correct_flow}"
+    )
 }
 
 fn render_conflict_human(conflict: &dotsync::CascadePause) -> String {
