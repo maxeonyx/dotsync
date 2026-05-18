@@ -3,7 +3,12 @@
   "tests": {
     "dotsync::dotsync$tests::tdd_ratchet_gatekeeper": "passing",
     "dotsync::user_flows$ancestor_scope_commit_from_machine_working_copy_stays_consistent_across_stages": "passing",
+    "dotsync::user_flows$invalid_state_file_returns_clear_error": "pending",
+    "dotsync::user_flows$missing_state_file_disables_deletion": "pending",
     "dotsync::user_flows$plain_dotsync_rejects_working_copy_changes": "passing",
+    "dotsync::user_flows$scoped_commit_deletion_removes_file_from_fake_home": "pending",
+    "dotsync::user_flows$scoped_deletion_only_affects_homes_where_scope_applies": "pending",
+    "dotsync::user_flows$sync_uses_state_machine_scope_even_if_checkout_changes": "pending",
     "dotsync::user_flows$tdd_ratchet_gatekeeper": "passing"
   },
   "baseline": "c1136cda3733e0bdce76a4fbc38d00dc6cc35e43"

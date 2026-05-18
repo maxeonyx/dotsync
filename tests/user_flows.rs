@@ -94,6 +94,18 @@ impl MachineEnvironment {
         self.write_file(self.repo_dir.join(relative), contents);
     }
 
+    fn delete_repo_file(&self, relative: &str) {
+        fs::remove_file(self.repo_dir.join(relative)).expect("delete repo file");
+    }
+
+    fn write_home_file(&self, relative: &str, contents: &str) {
+        self.write_file(self.home_dir.join(relative), contents);
+    }
+
+    fn delete_home_file(&self, relative: &str) {
+        fs::remove_file(self.home_dir.join(relative)).expect("delete home file");
+    }
+
     fn write_file(&self, path: PathBuf, contents: &str) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("create parent dir");
@@ -107,6 +119,65 @@ impl MachineEnvironment {
 
     fn home_file_exists(&self, relative: &str) -> bool {
         self.home_dir.join(relative).exists()
+    }
+
+    fn sync_state_relative_path(&self) -> PathBuf {
+        let config = fs::read_to_string(self.repo_dir.join(".config/dotsync/config.toml"))
+            .expect("read dotsync config");
+        let value: toml::Value = toml::from_str(&config).expect("parse dotsync config");
+        PathBuf::from(
+            value["sync"]["state_path"]
+                .as_str()
+                .expect("sync.state_path should be configured"),
+        )
+    }
+
+    fn sync_state_path(&self) -> PathBuf {
+        self.home_dir.join(self.sync_state_relative_path())
+    }
+
+    fn delete_sync_state(&self) {
+        fs::remove_file(self.sync_state_path()).expect("delete sync state file");
+    }
+
+    fn write_sync_state_raw(&self, contents: &str) {
+        self.write_file(self.sync_state_path(), contents);
+    }
+
+    fn set_checkout_scope(&self, scope: &str) {
+        let mut workspace = load_workspace(&self.repo_dir);
+        let repo = load_repo(&workspace);
+        let commit_id = repo
+            .view()
+            .get_local_bookmark(RefNameBuf::from(scope).as_ref())
+            .as_normal()
+            .cloned()
+            .unwrap_or_else(|| panic!("missing bookmark `{scope}`"));
+        let commit = repo
+            .store()
+            .get_commit(&commit_id)
+            .unwrap_or_else(|err| panic!("load commit for `{scope}`: {err}"));
+
+        let repo = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime")
+            .block_on(async {
+                let mut tx = repo.start_transaction();
+                tx.repo_mut()
+                    .set_wc_commit(workspace.workspace_name().to_owned(), commit.id().clone())
+                    .expect("set working copy commit");
+                tx.commit(format!("test: checkout {scope}"))
+                    .await
+                    .expect("commit working copy update")
+            });
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime")
+            .block_on(workspace.check_out(repo.op_id().clone(), None, &commit))
+            .expect("check out scope");
     }
 
     fn current_bookmarks(&self) -> Vec<String> {
@@ -343,6 +414,148 @@ fn ancestor_scope_commit_from_machine_working_copy_stays_consistent_across_stage
     assert_eq!(
         machine.bookmark_file_contents("mx-xps-cy", relative),
         "[user]\nname = \"Max\"\nemail = \"max@example.com\"\nsigningkey = \"abc123\"\n"
+    );
+}
+
+#[test]
+fn scoped_commit_deletion_removes_file_from_fake_home() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    let relative = ".gitconfig";
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_repo_file(relative, "[user]\nname = \"Max\"\n");
+
+    let add_output = machine.commit("all", "add gitconfig");
+    assert!(add_output.status.success(), "{}", render_output(&add_output));
+    assert!(machine.home_file_exists(relative));
+
+    machine.delete_repo_file(relative);
+
+    let delete_output = machine.commit("all", "remove gitconfig");
+    assert!(delete_output.status.success(), "{}", render_output(&delete_output));
+    assert!(
+        !machine.home_file_exists(relative),
+        "scoped deletion should remove the managed file from fake home\n{}",
+        render_output(&delete_output)
+    );
+}
+
+#[test]
+fn scoped_deletion_only_affects_homes_where_scope_applies() {
+    let harness = TestHarness::new();
+    let linux_machine = harness.machine("machine-linux", "linux", "mx-xps-cy");
+    let windows_machine = harness.machine("machine-windows", "windows", "mx-pc-win");
+    let relative = ".config/hypr/hyprland.conf";
+
+    let linux_init = linux_machine.init();
+    assert!(linux_init.status.success(), "{}", render_output(&linux_init));
+
+    linux_machine.write_repo_file(relative, "monitor=,preferred,auto,1\n");
+
+    let add_output = linux_machine.commit("linux", "add hyprland config");
+    assert!(add_output.status.success(), "{}", render_output(&add_output));
+    assert!(linux_machine.home_file_exists(relative));
+
+    let windows_init = windows_machine.init();
+    assert!(windows_init.status.success(), "{}", render_output(&windows_init));
+    assert!(!windows_machine.home_file_exists(relative));
+
+    windows_machine.write_home_file(relative, "manual local config\n");
+
+    linux_machine.delete_repo_file(relative);
+
+    let delete_output = linux_machine.commit("linux", "remove hyprland config");
+    assert!(delete_output.status.success(), "{}", render_output(&delete_output));
+    assert!(!linux_machine.home_file_exists(relative));
+
+    let windows_sync = windows_machine.sync();
+    assert!(windows_sync.status.success(), "{}", render_output(&windows_sync));
+    assert_eq!(
+        windows_machine.read_home_file(relative),
+        "manual local config\n",
+        "deleting a linux-scoped file should not remove the same path from a windows home"
+    );
+}
+
+#[test]
+fn sync_uses_state_machine_scope_even_if_checkout_changes() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    let relative = ".config/machine-only.txt";
+
+    let init_output = machine.init();
+    assert!(init_output.status.success(), "{}", render_output(&init_output));
+
+    machine.write_repo_file(relative, "machine config\n");
+    let commit_output = machine.commit("mx-xps-cy", "add machine config");
+    assert!(commit_output.status.success(), "{}", render_output(&commit_output));
+    assert_eq!(machine.read_home_file(relative), "machine config\n");
+
+    machine.delete_home_file(relative);
+    machine.set_checkout_scope("all");
+
+    let sync_output = machine.sync();
+    assert!(sync_output.status.success(), "{}", render_output(&sync_output));
+    assert_eq!(
+        machine.read_home_file(relative),
+        "machine config\n",
+        "sync state machine scope should govern sync even if checkout moved to another scope"
+    );
+}
+
+#[test]
+fn missing_state_file_disables_deletion() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    let relative = ".gitconfig";
+
+    let init_output = machine.init();
+    assert!(init_output.status.success(), "{}", render_output(&init_output));
+
+    machine.write_repo_file(relative, "[user]\nname = \"Max\"\n");
+    let add_output = machine.commit("all", "add gitconfig");
+    assert!(add_output.status.success(), "{}", render_output(&add_output));
+    assert!(machine.home_file_exists(relative));
+
+    machine.delete_sync_state();
+    machine.delete_repo_file(relative);
+
+    let delete_output = machine.commit("all", "remove gitconfig");
+    assert!(delete_output.status.success(), "{}", render_output(&delete_output));
+    assert!(
+        machine.home_file_exists(relative),
+        "without sync state, dotsync should fail safe and leave the previously managed file in home"
+    );
+}
+
+#[test]
+fn invalid_state_file_returns_clear_error() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(init_output.status.success(), "{}", render_output(&init_output));
+
+    machine.write_sync_state_raw("not valid json\n");
+
+    let sync_output = machine.sync();
+    assert!(
+        !sync_output.status.success(),
+        "sync should fail when the sync state file is corrupt\n{}",
+        render_output(&sync_output)
+    );
+    let stderr = String::from_utf8_lossy(&sync_output.stderr);
+    assert!(
+        stderr.contains("sync state") || stderr.contains("state") || stderr.contains("parse"),
+        "sync should report a clear sync state error\n{}",
+        render_output(&sync_output)
     );
 }
 
