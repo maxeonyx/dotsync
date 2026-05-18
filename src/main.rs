@@ -267,7 +267,7 @@ fn render_error_json(error: &ErrorReport) -> serde_json::Value {
         "status": "error",
         "error": error.code,
         "message": error.message,
-        "drifts": error.drifts.iter().map(render_drift_json).collect::<Vec<_>>()
+        "drifts": error.drifts.iter().map(render_drift_json).collect::<Vec<_>>(),
     })
 }
 

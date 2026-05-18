@@ -76,8 +76,16 @@ impl MachineEnvironment {
         self.run_dotsync(&[])
     }
 
+    fn sync_json(&self) -> Output {
+        self.run_dotsync_json(&[])
+    }
+
     fn commit(&self, scope: &str, message: &str) -> Output {
         self.run_dotsync(&[scope, "-m", message])
+    }
+
+    fn continue_command(&self) -> Output {
+        self.run_dotsync(&["continue"])
     }
 
     fn run_dotsync(&self, args: &[&str]) -> Output {
@@ -88,6 +96,12 @@ impl MachineEnvironment {
         command.env("DOTSYNC_OS", &self.os);
         command.env("DOTSYNC_HOSTNAME", &self.hostname);
         command.output().expect("run dotsync")
+    }
+
+    fn run_dotsync_json(&self, args: &[&str]) -> Output {
+        let mut all_args = vec!["--output", "json"];
+        all_args.extend_from_slice(args);
+        self.run_dotsync(&all_args)
     }
 
     fn write_repo_file(&self, relative: &str, contents: &str) {
@@ -557,6 +571,298 @@ fn invalid_state_file_returns_clear_error() {
         "sync should report a clear sync state error\n{}",
         render_output(&sync_output)
     );
+}
+
+#[test]
+fn dirty_working_copy_human_error_stands_alone() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(init_output.status.success(), "{}", render_output(&init_output));
+
+    machine.write_repo_file(".gitconfig", "[user]\nname = \"Max\"\n");
+
+    let sync_output = machine.sync();
+    assert_eq!(sync_output.status.code(), Some(1), "{}", render_output(&sync_output));
+
+    let stderr = String::from_utf8_lossy(&sync_output.stderr);
+    assert_standalone_error(
+        &stderr,
+        &[
+            "dirty",
+            "Plain `dotsync` is sync-only",
+            "working copy has uncommitted changes",
+            "cannot safely sync changes that have not been assigned to a scope",
+            "dotsync <scope> -m \"message\"",
+        ],
+        &sync_output,
+    );
+}
+
+#[test]
+fn drift_detected_human_error_stands_alone() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    let relative = ".gitconfig";
+
+    let init_output = machine.init();
+    assert!(init_output.status.success(), "{}", render_output(&init_output));
+
+    machine.write_repo_file(relative, "[user]\nname = \"Repo\"\n");
+    let commit_output = machine.commit("all", "add gitconfig");
+    assert!(commit_output.status.success(), "{}", render_output(&commit_output));
+
+    machine.write_home_file(relative, "[user]\nname = \"Drifted\"\n");
+
+    let sync_output = machine.sync();
+    assert_eq!(sync_output.status.code(), Some(1), "{}", render_output(&sync_output));
+
+    let stderr = String::from_utf8_lossy(&sync_output.stderr);
+    assert_standalone_error(
+        &stderr,
+        &[
+            "drift",
+            "repo is the source of truth",
+            "expects managed files in your home directory to already match the repo",
+            "Drifted files are listed below with diffs.",
+            "stopped before overwriting",
+            "--force",
+            relative,
+        ],
+        &sync_output,
+    );
+}
+
+#[test]
+fn continue_without_pause_human_error_stands_alone() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(init_output.status.success(), "{}", render_output(&init_output));
+
+    let continue_output = machine.continue_command();
+    assert_eq!(continue_output.status.code(), Some(1), "{}", render_output(&continue_output));
+
+    let stderr = String::from_utf8_lossy(&continue_output.stderr);
+    assert_standalone_error(
+        &stderr,
+        &[
+            "nothing to resume",
+            "`dotsync continue` resumes a merge cascade",
+            "no cascade is currently paused",
+            "Use `dotsync continue` only after a previous cascade paused",
+            "dotsync <scope> -m \"message\"",
+        ],
+        &continue_output,
+    );
+}
+
+#[test]
+fn command_while_cascade_paused_human_error_stands_alone() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    let relative = ".gitconfig";
+
+    let init_output = machine.init();
+    assert!(init_output.status.success(), "{}", render_output(&init_output));
+
+    machine.write_repo_file(relative, "[user]\nname = \"Base\"\n");
+    let base_output = machine.commit("all", "add gitconfig");
+    assert!(base_output.status.success(), "{}", render_output(&base_output));
+
+    machine.write_repo_file(relative, "[user]\nname = \"Linux\"\n");
+    let linux_output = machine.commit("linux", "linux override");
+    assert!(linux_output.status.success(), "{}", render_output(&linux_output));
+
+    machine.write_repo_file(relative, "[user]\nname = \"All\"\n");
+    let paused_output = machine.commit("all", "conflicting all change");
+    assert_eq!(paused_output.status.code(), Some(3), "{}", render_output(&paused_output));
+
+    let blocked_output = machine.commit("all", "second command while paused");
+    assert_eq!(blocked_output.status.code(), Some(1), "{}", render_output(&blocked_output));
+
+    let stderr = String::from_utf8_lossy(&blocked_output.stderr);
+    assert_standalone_error(
+        &stderr,
+        &[
+            "already paused",
+            "commit flow records the working-copy change on the selected scope",
+            "expects no earlier cascade to still be paused",
+            "cascade already in progress on `linux`",
+            "resolve the paused scope in ~/dotfiles and then run `dotsync continue`",
+            "Do not start another dotsync command until that resume finishes.",
+        ],
+        &blocked_output,
+    );
+}
+
+#[test]
+fn invalid_scope_human_error_stands_alone() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(init_output.status.success(), "{}", render_output(&init_output));
+
+    machine.write_repo_file(".gitconfig", "[user]\nname = \"Max\"\n");
+
+    let commit_output = machine.commit("server", "bad scope");
+    assert_eq!(commit_output.status.code(), Some(1), "{}", render_output(&commit_output));
+
+    let stderr = String::from_utf8_lossy(&commit_output.stderr);
+    assert_standalone_error(
+        &stderr,
+        &[
+            "invalid scope",
+            "expects the scope you name to exist in the configured scope DAG",
+            "scope `server` does not exist in config",
+            "choose a real configured scope",
+            "root-est appropriate ancestor scope",
+        ],
+        &commit_output,
+    );
+}
+
+#[test]
+fn non_ancestor_scope_human_error_stands_alone() {
+    let harness = TestHarness::new();
+    let linux_machine = harness.machine("machine-linux", "linux", "mx-xps-cy");
+    let windows_machine = harness.machine("machine-windows", "windows", "mx-pc-win");
+
+    let linux_init = linux_machine.init();
+    assert!(linux_init.status.success(), "{}", render_output(&linux_init));
+
+    let windows_init = windows_machine.init();
+    assert!(windows_init.status.success(), "{}", render_output(&windows_init));
+
+    windows_machine.write_repo_file(".gitconfig", "[user]\nname = \"Win\"\n");
+
+    let commit_output = windows_machine.commit("linux", "bad scope");
+    assert_eq!(commit_output.status.code(), Some(1), "{}", render_output(&commit_output));
+
+    let stderr = String::from_utf8_lossy(&commit_output.stderr);
+    assert_standalone_error(
+        &stderr,
+        &[
+            "not an ancestor",
+            "expects the chosen scope to be the current machine scope or one of its ancestors",
+            "scope `linux` is not an ancestor of `mx-pc-win`",
+            "would let this machine write into an unrelated branch lineage",
+            "choose `mx-pc-win` or one of its ancestors instead",
+        ],
+        &commit_output,
+    );
+}
+
+#[test]
+fn invalid_sync_state_human_error_stands_alone() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(init_output.status.success(), "{}", render_output(&init_output));
+
+    machine.write_sync_state_raw("not valid json\n");
+
+    let sync_output = machine.sync();
+    assert_eq!(sync_output.status.code(), Some(1), "{}", render_output(&sync_output));
+
+    let stderr = String::from_utf8_lossy(&sync_output.stderr);
+    assert_standalone_error(
+        &stderr,
+        &[
+            "invalid sync state",
+            "uses a local sync-state file to remember which machine scope was last synced",
+            "expects that state file, if present, to be valid",
+            "failed to parse sync state",
+            "cannot safely decide what prior sync state to trust",
+            "fix or delete the bad sync-state file",
+        ],
+        &sync_output,
+    );
+}
+
+#[test]
+fn dirty_working_copy_json_contract_stays_compatible() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(init_output.status.success(), "{}", render_output(&init_output));
+
+    machine.write_repo_file(".gitconfig", "[user]\nname = \"Max\"\n");
+
+    let sync_output = machine.sync_json();
+    assert_eq!(sync_output.status.code(), Some(1), "{}", render_output(&sync_output));
+
+    let json = parse_stdout_json(&sync_output);
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"], "dirty_working_copy");
+    assert!(json["message"].as_str().is_some());
+    assert_eq!(json["drifts"], serde_json::json!([]));
+    assert!(json["current_state"].as_str().is_some());
+}
+
+#[test]
+fn drift_detected_json_contract_stays_compatible() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    let relative = ".gitconfig";
+
+    let init_output = machine.init();
+    assert!(init_output.status.success(), "{}", render_output(&init_output));
+
+    machine.write_repo_file(relative, "[user]\nname = \"Repo\"\n");
+    let commit_output = machine.commit("all", "add gitconfig");
+    assert!(commit_output.status.success(), "{}", render_output(&commit_output));
+
+    machine.write_home_file(relative, "[user]\nname = \"Drifted\"\n");
+
+    let sync_output = machine.sync_json();
+    assert_eq!(sync_output.status.code(), Some(1), "{}", render_output(&sync_output));
+
+    let json = parse_stdout_json(&sync_output);
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"], "drift_detected");
+    assert!(json["message"].as_str().is_some());
+    assert!(json["current_state"].as_str().is_some());
+
+    let drifts = json["drifts"].as_array().expect("drifts should be an array");
+    assert_eq!(drifts.len(), 1);
+    assert_eq!(drifts[0]["path"], relative);
+    assert_eq!(drifts[0]["system_path"], machine.home_dir.join(relative).display().to_string());
+    assert!(drifts[0]["diff"].as_str().is_some());
+}
+
+fn assert_standalone_error(stderr: &str, expected_fragments: &[&str], output: &Output) {
+    assert!(stderr.starts_with("dotsync:"), "{}", render_output(output));
+    for heading in [
+        "What dotsync does:",
+        "This flow:",
+        "Expected:",
+        "Current state found:",
+        "Why dotsync stopped:",
+        "Correct flow:",
+    ] {
+        assert!(
+            stderr.contains(heading),
+            "missing heading `{heading}`\n{}",
+            render_output(output)
+        );
+    }
+    for fragment in expected_fragments {
+        assert!(
+            stderr.contains(fragment),
+            "missing fragment `{fragment}`\n{}",
+            render_output(output)
+        );
+    }
+}
+
+fn parse_stdout_json(output: &Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout).expect("stdout should be valid json")
 }
 
 fn render_output(output: &Output) -> String {
