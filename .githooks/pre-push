@@ -1,4 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-exec python3 scripts/check_main_version_bump.py pre-push
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+updates="$(cat)"
+
+if [[ -z "$updates" ]]; then
+    exit 0
+fi
+
+pushes_main=0
+while IFS=' ' read -r _local_ref _local_oid remote_ref _remote_oid; do
+    if [[ -z "${remote_ref:-}" ]]; then
+        continue
+    fi
+    if [[ "$remote_ref" == "refs/heads/main" ]]; then
+        pushes_main=1
+        break
+    fi
+done <<<"$updates"
+
+if [[ "$pushes_main" -eq 0 ]]; then
+    exit 0
+fi
+
+printf '%s\n' 'dotsync pre-push: validating main push version bump...'
+python3 scripts/check_main_version_bump.py pre-push <<<"$updates"
+
+printf '%s\n' 'dotsync pre-push: running cargo clippy -- -D warnings...'
+cargo clippy -- -D warnings
+
+printf '%s\n' 'dotsync pre-push: running cargo ratchet...'
+cargo ratchet

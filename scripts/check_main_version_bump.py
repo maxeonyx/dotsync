@@ -121,7 +121,7 @@ def ensure_release_tag_unused(package: PackageVersion, head_ref: str) -> None:
     if git_ref_exists(tag_ref):
         raise VersionCheckError(
             f"{head_ref} sets {package.name} to version {package.version}, but tag v{package.version} already exists. "
-            "Every push to main must use a fresh crate version so CI creates a new release instead of mutating an existing one."
+            "Every push to main must use a fresh crate version so CI publishes these changes as a new release."
         )
 
 
@@ -136,7 +136,7 @@ def ensure_main_version_bumped(base_ref: str, head_ref: str) -> None:
     if base_package.version == head_package.version:
         raise VersionCheckError(
             f"main push would keep {head_package.name} at version {head_package.version}. "
-            "Every push to main must bump Cargo.toml and Cargo.lock first so CI releases a new version instead of mutating existing assets."
+            "Every push to main must bump Cargo.toml and Cargo.lock first so CI publishes the new changes as a new release."
         )
 
 
@@ -178,7 +178,7 @@ def handle_range(base_ref: str, head_ref: str) -> None:
         raise VersionCheckError(
             f"cannot read rewritten main base {base_ref}; fallback baseline {fallback.ref} still has "
             f"{head_package.name} at version {head_package.version}. Every push to main must bump Cargo.toml "
-            "and Cargo.lock first so CI releases a new version instead of mutating existing assets."
+            "and Cargo.lock first so CI publishes the new changes as a new release."
         )
 
 

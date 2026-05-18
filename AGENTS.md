@@ -35,8 +35,8 @@ This project uses strict TDD via [tdd-ratchet](https://tdd-ratchet.maxeonyx.com)
 
 ## CI and Release
 
-Single `ci.yml` workflow: main-version-bump guard, format, lint, check, test, build matrix (6 targets), GitHub Release (version from Cargo.toml, no tags), Pages deploy (docs + binaries combined at dotsync.maxeonyx.com).
+Single `ci.yml` workflow: main-version-bump guard, format, lint, check, test, build matrix (6 targets), GitHub Release (version from Cargo.toml, fails if that release already exists), Pages deploy (docs + binaries combined at dotsync.maxeonyx.com).
 
-Every push to `main` must bump the crate version in both `Cargo.toml` and `Cargo.lock`. The repo-local guard lives in `scripts/check_main_version_bump.py`; CI runs it on `main`, and the repo-local `pre-push` hook in `.githooks/pre-push` runs the same check if the clone has hooks wired up.
+Every push to `main` must bump the crate version in both `Cargo.toml` and `Cargo.lock` so CI publishes that push as a new release. The repo-local guard lives in `scripts/check_main_version_bump.py`; CI runs it on `main`, and the repo-local `pre-push` hook in `.githooks/pre-push` runs that version check plus `cargo clippy -- -D warnings` and `cargo ratchet` for `main` pushes if the clone has hooks wired up.
 
 When preparing a clone for local release work, set `git config core.hooksPath .githooks` so the repo-local `pre-push` hook actually runs.
