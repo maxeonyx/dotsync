@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
     commit_and_sync, continue_after_conflict, init, sync, CommandOutcome, CommitOptions,
-    DotsyncError, DotsyncPaths, ErrorReport, FileDrift, SyncOptions,
+    CommitSelection, DotsyncError, DotsyncPaths, ErrorReport, FileDrift, SyncOptions,
 };
 use serde_json::json;
 use std::env;
@@ -33,6 +33,13 @@ struct Cli {
     /// Proceed even when drift is detected
     #[arg(long)]
     force: bool,
+
+    /// Commit every working-copy change
+    #[arg(long)]
+    all: bool,
+
+    /// Repo-relative file or directory paths to commit
+    paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -52,7 +59,7 @@ struct SuccessOutput {
 
 #[derive(Debug, Clone)]
 struct UsageError {
-    message: &'static str,
+    message: String,
 }
 
 #[derive(Debug, Clone)]
@@ -71,19 +78,40 @@ async fn main() {
     let outcome = match (cli.command, cli.scope, cli.message) {
         (Some(Command::Init { remote_url }), None, None) => run_init(remote_url).await,
         (Some(Command::Continue), None, None) => run_continue(cli.force).await,
-        (None, None, None) => run_sync(cli.force).await,
-        (None, Some(scope), Some(message)) => run_commit(scope, message, cli.force).await,
+        (None, None, None) if !cli.all && cli.paths.is_empty() => run_sync(cli.force).await,
+        (None, Some(scope), Some(message)) => {
+            if cli.all && !cli.paths.is_empty() {
+                Ok(CliOutput::Usage(UsageError {
+                    message: "commit mode accepts explicit paths or --all, not both".to_string(),
+                }))
+            } else if !cli.all && cli.paths.is_empty() {
+                Ok(CliOutput::Usage(UsageError {
+                    message: "commit mode requires explicit file/directory paths or --all"
+                        .to_string(),
+                }))
+            } else {
+                let selection = if cli.all {
+                    CommitSelection::All
+                } else {
+                    CommitSelection::Paths(cli.paths)
+                };
+                run_commit(scope, message, cli.force, selection).await
+            }
+        }
         (None, Some(_), None) => Ok(CliOutput::Usage(UsageError {
-            message: "<scope> requires -m/--message",
+            message: "<scope> requires -m/--message".to_string(),
+        })),
+        (None, None, None) => Ok(CliOutput::Usage(UsageError {
+            message: "sync mode does not accept commit path arguments or --all".to_string(),
         })),
         (Some(Command::Init { .. }), Some(_), _) | (Some(Command::Init { .. }), None, Some(_)) => {
             Ok(CliOutput::Usage(UsageError {
-                message: "`init` does not take scope or message arguments",
+                message: "`init` does not take scope or message arguments".to_string(),
             }))
         }
         (Some(Command::Continue), Some(_), _) | (Some(Command::Continue), None, Some(_)) => {
             Ok(CliOutput::Usage(UsageError {
-                message: "`continue` does not take scope or message arguments",
+                message: "`continue` does not take scope or message arguments".to_string(),
             }))
         }
         (None, None, Some(_)) => unreachable!("clap requires scope when message is set"),
@@ -161,6 +189,7 @@ async fn run_commit(
     scope: String,
     message: String,
     force: bool,
+    selection: CommitSelection,
 ) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     match commit_and_sync(
@@ -169,6 +198,7 @@ async fn run_commit(
             scope,
             message,
             force,
+            selection,
         },
     )
     .await?
@@ -290,6 +320,63 @@ fn render_drift_json(drift: &FileDrift) -> serde_json::Value {
 
 fn render_error_human(error: &ErrorReport) -> String {
     match error.code {
+        "commit_selection_required" => render_structured_error(
+            "commit selection required",
+            "Dotsync keeps your dotfiles repo as the source of truth and commit mode records only the change you explicitly assign to a scope.",
+            "This commit flow records selected working-copy paths on the chosen scope, cascades them through descendants, then syncs the resulting machine-scope state into home.",
+            "Commit mode expects either explicit repo-relative file/directory paths or `--all`.",
+            error
+                .current_state
+                .as_deref()
+                .unwrap_or("commit mode requires explicit file/directory paths or --all"),
+            "Dotsync stopped because implicitly committing the whole working tree is no longer allowed.",
+            &["Pass one or more repo-relative paths to say exactly what should be committed.", "Use `--all` only when you intentionally want every working-copy change committed."],
+        ),
+        "conflicting_commit_selection" => render_structured_error(
+            "conflicting commit selection",
+            "Dotsync commit mode requires explicit intent about which working-copy changes belong to the scoped commit.",
+            "This commit flow accepts either explicit paths or `--all` for the commit selection.",
+            "Commit mode expects one selection style, not both at once.",
+            error.current_state.as_deref().unwrap_or(&error.message),
+            "Dotsync stopped because `--all` and explicit paths conflict: one means the whole tree, the other means a subset.",
+            &["Keep the explicit paths if you want a selective commit.", "Remove the paths and use only `--all` if you intentionally want the whole working tree."],
+        ),
+        "commit_selection_empty" => render_structured_error(
+            "empty commit selection",
+            "Dotsync commit mode records only the paths you selected into the target scope, leaving unrelated dirty paths alone.",
+            "This flow matches your explicit selection against current working-copy changes before creating the scoped commit.",
+            "It expects the selection to cover at least one changed repo path.",
+            error.current_state.as_deref().unwrap_or(&error.message),
+            "Dotsync stopped because nothing in your selection would be committed.",
+            &["Choose paths that actually changed in ~/dotfiles.", "If you intended to commit every change, rerun with `--all`."],
+        ),
+        "commit_path_outside_repo" => render_structured_error(
+            "commit path outside repo",
+            "Dotsync commit mode only records paths from the dotfiles repo, because the repo is the source of truth.",
+            "This flow resolves each selected path against ~/dotfiles before building the scoped commit.",
+            "It expects every selected path to stay inside the repo root.",
+            error.current_state.as_deref().unwrap_or(&error.message),
+            "Dotsync stopped because one selected path points outside the repo and cannot be part of a repo-backed commit.",
+            &["Pass repo-relative paths from inside ~/dotfiles.", "If you meant a home path, translate it to the matching path inside ~/dotfiles first."],
+        ),
+        "commit_path_missing" => render_structured_error(
+            "commit path missing",
+            "Dotsync commit mode records only real repo paths from the current working-copy change set.",
+            "This flow resolves your selected path against ~/dotfiles and the current dirty paths before creating the commit.",
+            "It expects each selected path to exist in the repo or be a currently deleted repo path.",
+            error.current_state.as_deref().unwrap_or(&error.message),
+            "Dotsync stopped because one selected path does not correspond to any current repo path change.",
+            &["Check the path spelling and make sure the file or directory is inside ~/dotfiles.", "If you are selecting a deletion, pass the deleted repo-relative path exactly."],
+        ),
+        "config_base_scope_only" => render_structured_error(
+            "config is base-scope only",
+            "Dotsync stores the scope DAG in `.config/dotsync/config.toml`, so that file defines how every scope relates to every other scope.",
+            "This commit flow allows that config file to be changed only on the base scope `all`.",
+            "It expects non-`all` scope commits to avoid the scope-model config path entirely.",
+            error.current_state.as_deref().unwrap_or(&error.message),
+            "Dotsync stopped because committing the scope-model config on another scope would make branch-local scope definitions possible, which breaks the product model.",
+            &["Commit `.config/dotsync/config.toml` on `all`.", "Keep non-`all` scope commits focused on ordinary dotfiles, not scope-model changes."],
+        ),
         "dirty_working_copy" => render_structured_error(
             "dirty working copy",
             "Dotsync keeps your dotfiles repo as the source of truth for your home-directory config and syncs committed repo state into the live system.",

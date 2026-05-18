@@ -653,7 +653,7 @@ fn ancestor_scope_commit_from_machine_working_copy_stays_consistent_across_stage
 
     machine.write_repo_file(relative, "[user]\nname = \"Max\"\n");
 
-    let stage_one = machine.commit("all", "add gitconfig");
+    let stage_one = machine.commit_all("all", "add gitconfig");
     assert!(stage_one.status.success(), "{}", render_output(&stage_one));
     assert_eq!(machine.current_bookmarks(), vec!["mx-xps-cy".to_string()]);
     assert_eq!(machine.read_home_file(relative), "[user]\nname = \"Max\"\n");
@@ -675,7 +675,7 @@ fn ancestor_scope_commit_from_machine_working_copy_stays_consistent_across_stage
         "[user]\nname = \"Max\"\nemail = \"max@example.com\"\n",
     );
 
-    let stage_two = machine.commit("all", "update gitconfig");
+    let stage_two = machine.commit_all("all", "update gitconfig");
     assert!(stage_two.status.success(), "{}", render_output(&stage_two));
     assert_eq!(machine.current_bookmarks(), vec!["mx-xps-cy".to_string()]);
     assert_eq!(
@@ -700,7 +700,7 @@ fn ancestor_scope_commit_from_machine_working_copy_stays_consistent_across_stage
         "[user]\nname = \"Max\"\nemail = \"max@example.com\"\nsigningkey = \"abc123\"\n",
     );
 
-    let stage_three = machine.commit("all", "add signing key");
+    let stage_three = machine.commit_all("all", "add signing key");
     assert!(
         stage_three.status.success(),
         "{}",
@@ -740,7 +740,7 @@ fn scoped_commit_deletion_removes_file_from_fake_home() {
 
     machine.write_repo_file(relative, "[user]\nname = \"Max\"\n");
 
-    let add_output = machine.commit("all", "add gitconfig");
+    let add_output = machine.commit_all("all", "add gitconfig");
     assert!(
         add_output.status.success(),
         "{}",
@@ -750,7 +750,7 @@ fn scoped_commit_deletion_removes_file_from_fake_home() {
 
     machine.delete_repo_file(relative);
 
-    let delete_output = machine.commit("all", "remove gitconfig");
+    let delete_output = machine.commit_all("all", "remove gitconfig");
     assert!(
         delete_output.status.success(),
         "{}",
@@ -779,7 +779,7 @@ fn scoped_deletion_only_affects_homes_where_scope_applies() {
 
     linux_machine.write_repo_file(relative, "monitor=,preferred,auto,1\n");
 
-    let add_output = linux_machine.commit("linux", "add hyprland config");
+    let add_output = linux_machine.commit_all("linux", "add hyprland config");
     assert!(
         add_output.status.success(),
         "{}",
@@ -799,7 +799,7 @@ fn scoped_deletion_only_affects_homes_where_scope_applies() {
 
     linux_machine.delete_repo_file(relative);
 
-    let delete_output = linux_machine.commit("linux", "remove hyprland config");
+    let delete_output = linux_machine.commit_all("linux", "remove hyprland config");
     assert!(
         delete_output.status.success(),
         "{}",
@@ -834,7 +834,7 @@ fn sync_uses_state_machine_scope_even_if_checkout_changes() {
     );
 
     machine.write_repo_file(relative, "machine config\n");
-    let commit_output = machine.commit("mx-xps-cy", "add machine config");
+    let commit_output = machine.commit_all("mx-xps-cy", "add machine config");
     assert!(
         commit_output.status.success(),
         "{}",
@@ -872,7 +872,7 @@ fn missing_state_file_disables_deletion() {
     );
 
     machine.write_repo_file(relative, "[user]\nname = \"Max\"\n");
-    let add_output = machine.commit("all", "add gitconfig");
+    let add_output = machine.commit_all("all", "add gitconfig");
     assert!(
         add_output.status.success(),
         "{}",
@@ -883,7 +883,7 @@ fn missing_state_file_disables_deletion() {
     machine.delete_sync_state();
     machine.delete_repo_file(relative);
 
-    let delete_output = machine.commit("all", "remove gitconfig");
+    let delete_output = machine.commit_all("all", "remove gitconfig");
     assert!(
         delete_output.status.success(),
         "{}",
@@ -973,7 +973,7 @@ fn drift_detected_human_error_stands_alone() {
     );
 
     machine.write_repo_file(relative, "[user]\nname = \"Repo\"\n");
-    let commit_output = machine.commit("all", "add gitconfig");
+    let commit_output = machine.commit_all("all", "add gitconfig");
     assert!(
         commit_output.status.success(),
         "{}",
@@ -1054,7 +1054,7 @@ fn command_while_cascade_paused_human_error_stands_alone() {
     );
 
     machine.write_repo_file(relative, "[user]\nname = \"Base\"\n");
-    let base_output = machine.commit("all", "add gitconfig");
+    let base_output = machine.commit_all("all", "add gitconfig");
     assert!(
         base_output.status.success(),
         "{}",
@@ -1062,7 +1062,7 @@ fn command_while_cascade_paused_human_error_stands_alone() {
     );
 
     machine.write_repo_file(relative, "[user]\nname = \"Linux\"\n");
-    let linux_output = machine.commit("linux", "linux override");
+    let linux_output = machine.commit_all("linux", "linux override");
     assert!(
         linux_output.status.success(),
         "{}",
@@ -1070,7 +1070,7 @@ fn command_while_cascade_paused_human_error_stands_alone() {
     );
 
     machine.write_repo_file(relative, "[user]\nname = \"All\"\n");
-    let paused_output = machine.commit("all", "conflicting all change");
+    let paused_output = machine.commit_all("all", "conflicting all change");
     assert_eq!(
         paused_output.status.code(),
         Some(3),
@@ -1078,7 +1078,7 @@ fn command_while_cascade_paused_human_error_stands_alone() {
         render_output(&paused_output)
     );
 
-    let blocked_output = machine.commit("all", "second command while paused");
+    let blocked_output = machine.commit_all("all", "second command while paused");
     assert_eq!(
         blocked_output.status.code(),
         Some(1),
@@ -1115,7 +1115,7 @@ fn invalid_scope_human_error_stands_alone() {
 
     machine.write_repo_file(".gitconfig", "[user]\nname = \"Max\"\n");
 
-    let commit_output = machine.commit("server", "bad scope");
+    let commit_output = machine.commit_all("server", "bad scope");
     assert_eq!(
         commit_output.status.code(),
         Some(1),
@@ -1159,7 +1159,7 @@ fn non_ancestor_scope_human_error_stands_alone() {
 
     windows_machine.write_repo_file(".gitconfig", "[user]\nname = \"Win\"\n");
 
-    let commit_output = windows_machine.commit("linux", "bad scope");
+    let commit_output = windows_machine.commit_all("linux", "bad scope");
     assert_eq!(
         commit_output.status.code(),
         Some(1),
@@ -1262,7 +1262,7 @@ fn drift_detected_json_contract_stays_compatible() {
     );
 
     machine.write_repo_file(relative, "[user]\nname = \"Repo\"\n");
-    let commit_output = machine.commit("all", "add gitconfig");
+    let commit_output = machine.commit_all("all", "add gitconfig");
     assert!(
         commit_output.status.success(),
         "{}",
