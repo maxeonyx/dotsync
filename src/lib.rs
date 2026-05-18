@@ -6,6 +6,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use jj_lib::backend::{CommitId, TreeValue};
 use gix::remote::fetch::Tags;
 use jj_lib::config::StackedConfig;
 use jj_lib::git::{
@@ -15,6 +16,7 @@ use jj_lib::git::{
 use jj_lib::gitignore::GitIgnoreFile;
 use jj_lib::matchers::EverythingMatcher;
 use jj_lib::merge::MergedTreeValue;
+use jj_lib::object_id::ObjectId;
 use jj_lib::op_store::RefTarget;
 use jj_lib::ref_name::RefNameBuf;
 use jj_lib::ref_name::WorkspaceNameBuf;
@@ -25,9 +27,8 @@ use jj_lib::settings::UserSettings;
 use jj_lib::str_util::StringExpression;
 use jj_lib::working_copy::SnapshotOptions;
 use jj_lib::workspace::{default_working_copy_factories, Workspace};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use walkdir::{DirEntry, WalkDir};
 
 use crate::cascade::{
     build_cascade_plan, build_paused_state, commit_resolved_pause, create_scope_head_if_missing,
@@ -36,6 +37,7 @@ use crate::cascade::{
 };
 
 const DOTSYNC_CONFIG_RELATIVE_PATH: &str = ".config/dotsync/config.toml";
+const DEFAULT_SYNC_STATE_RELATIVE_PATH: &str = ".config/dotsync/sync-state.json";
 
 #[derive(Debug, Clone)]
 pub struct DotsyncPaths {
@@ -137,6 +139,7 @@ impl DotsyncError {
             DotsyncError::ScopeCycle { .. } => basic_error_report("scope_cycle", self),
             DotsyncError::ConfigParse { .. } => basic_error_report("config_parse", self),
             DotsyncError::CascadeState { .. } => basic_error_report("cascade_state", self),
+            DotsyncError::SyncState { .. } => basic_error_report("sync_state", self),
             DotsyncError::RepoAlreadyExists { .. } => basic_error_report("repo_exists", self),
             DotsyncError::MissingHostname => basic_error_report("missing_hostname", self),
             DotsyncError::Io { .. } => basic_error_report("io", self),
@@ -197,6 +200,8 @@ pub enum DotsyncError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("sync state error at {path}: {message}")]
+    SyncState { path: PathBuf, message: String },
     #[error("detected drift in {count} file(s)")]
     DriftDetected {
         count: usize,
@@ -217,12 +222,46 @@ pub enum DotsyncError {
 #[derive(Debug, Deserialize)]
 struct RawConfig {
     scopes: HashMap<String, RawScope>,
+    #[serde(default)]
+    sync: RawSyncConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct RawScope {
     #[serde(default)]
     parents: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawSyncConfig {
+    #[serde(default = "default_sync_state_relative_path")]
+    state_path: String,
+}
+
+impl Default for RawSyncConfig {
+    fn default() -> Self {
+        Self {
+            state_path: default_sync_state_relative_path(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DotsyncConfig {
+    graph: ScopeGraph,
+    sync_state_relative_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SyncStatePayload {
+    machine_scope: String,
+    last_synced_revision: String,
+}
+
+#[derive(Debug, Clone)]
+struct SyncState {
+    machine_scope: String,
+    last_synced_revision: CommitId,
 }
 
 #[derive(Debug, Clone)]
@@ -275,7 +314,7 @@ pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, 
         join_existing_remote(paths, &mut workspace, repo, &identity).await?
     };
 
-    let sync = sync_repo_to_home(paths, SyncOptions { force: true }, &[]).await?;
+    let sync = sync_repo_to_home(paths, SyncOptions { force: true }, &[], Some(&current_scope)).await?;
     push_scope_updates(paths).await?;
 
     Ok(InitReport {
@@ -286,14 +325,12 @@ pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, 
 }
 
 pub async fn sync(paths: &DotsyncPaths, options: SyncOptions) -> Result<SyncReport, DotsyncError> {
-    let graph = load_scope_graph(paths)?;
     let workspace = load_workspace(paths)?;
     let repo = workspace
         .repo_loader()
         .load_at_head()
         .await
         .map_err(|err| jj_error(format!("load repo at head: {err}")))?;
-    let current_scope = detect_current_scope(&graph, &workspace, repo.as_ref())?;
 
     let snapshot = snapshot_working_copy(paths).await?;
     if !snapshot.changed_paths.is_empty() {
@@ -303,9 +340,8 @@ pub async fn sync(paths: &DotsyncPaths, options: SyncOptions) -> Result<SyncRepo
     }
 
     let _repo = fetch_origin(repo).await?;
-    checkout_workspace_to_scope(paths, &mut load_workspace(paths)?, &current_scope).await?;
 
-    sync_repo_to_home(paths, options, &[]).await
+    sync_repo_to_home(paths, options, &[], None).await
 }
 
 pub async fn commit_and_sync(
@@ -341,6 +377,7 @@ pub async fn commit_and_sync(
                     force: options.force,
                 },
                 &snapshot.changed_paths,
+                Some(&session.current_scope),
             )
             .await?;
             push_scope_updates(paths).await?;
@@ -429,7 +466,7 @@ pub async fn continue_after_conflict(
             checkout_workspace_to_commit(&mut workspace, repo.op_id().clone(), &current_commit)
                 .await?;
 
-            let sync = sync_repo_to_home(paths, SyncOptions { force: true }, &[]).await?;
+            let sync = sync_repo_to_home(paths, SyncOptions { force: true }, &[], None).await?;
             push_scope_updates(paths).await?;
 
             Ok(CommandOutcome::Success(ContinueReport {
@@ -627,21 +664,7 @@ async fn set_working_copy_to_paused_conflict(
 }
 
 fn load_scope_graph(paths: &DotsyncPaths) -> Result<ScopeGraph, DotsyncError> {
-    let config_path = discover_scope_graph_path(paths)?;
-    let contents = fs::read_to_string(&config_path).map_err(|source| DotsyncError::Io {
-        path: config_path.clone(),
-        source,
-    })?;
-    let raw: RawConfig = toml::from_str(&contents).map_err(|source| DotsyncError::ConfigParse {
-        path: config_path,
-        source,
-    })?;
-    ScopeGraph::new(
-        raw.scopes
-            .into_iter()
-            .map(|(name, scope)| (name, scope.parents))
-            .collect(),
-    )
+    Ok(load_config(paths)?.graph)
 }
 
 impl ScopeGraph {
@@ -782,48 +805,15 @@ fn scope_depth(
     Ok(depth)
 }
 
-fn repo_files(paths: &DotsyncPaths) -> Result<Vec<PathBuf>, DotsyncError> {
-    let mut files = Vec::new();
-    for entry in WalkDir::new(&paths.repo_root)
-        .into_iter()
-        .filter_entry(|entry| should_walk(paths, entry))
-    {
-        let entry = entry.map_err(|err| jj_error(format!("walk repo: {err}")))?;
-        if entry.file_type().is_file() {
-            let relative = entry
-                .path()
-                .strip_prefix(&paths.repo_root)
-                .expect("walked path is within repo root")
-                .to_path_buf();
-            files.push(relative);
-        }
-    }
-    files.sort();
-    Ok(files)
-}
-
-fn should_walk(paths: &DotsyncPaths, entry: &DirEntry) -> bool {
-    if entry.depth() == 0 {
-        return true;
-    }
-    let Ok(relative) = entry.path().strip_prefix(&paths.repo_root) else {
-        return false;
-    };
-    relative != Path::new(".git") && relative != Path::new(".jj")
-}
-
-fn detect_drifts(
+async fn detect_drifts(
     paths: &DotsyncPaths,
-    repo_files: &[PathBuf],
+    repo: &dyn jj_lib::repo::Repo,
+    managed_entries: &BTreeMap<PathBuf, TreeValue>,
 ) -> Result<Vec<FileDrift>, DotsyncError> {
     let mut drifts = Vec::new();
-    for relative in repo_files {
-        let repo_path = paths.repo_root.join(relative);
+    for (relative, value) in managed_entries {
         let system_path = paths.home_dir.join(relative);
-        let repo_bytes = fs::read(&repo_path).map_err(|source| DotsyncError::Io {
-            path: repo_path.clone(),
-            source,
-        })?;
+        let repo_bytes = read_tree_entry_bytes(repo.store(), relative, value).await?;
         let system_bytes = match fs::read(&system_path) {
             Ok(bytes) => bytes,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
@@ -855,8 +845,12 @@ fn render_diff(repo_bytes: &[u8], system_bytes: &[u8]) -> String {
     }
 }
 
-fn copy_repo_file_to_home(paths: &DotsyncPaths, relative: &Path) -> Result<(), DotsyncError> {
-    let repo_path = paths.repo_root.join(relative);
+async fn copy_repo_file_to_home(
+    paths: &DotsyncPaths,
+    repo: &dyn jj_lib::repo::Repo,
+    relative: &Path,
+    value: &TreeValue,
+) -> Result<(), DotsyncError> {
     let system_path = paths.home_dir.join(relative);
     if let Some(parent) = system_path.parent() {
         fs::create_dir_all(parent).map_err(|source| DotsyncError::Io {
@@ -864,10 +858,7 @@ fn copy_repo_file_to_home(paths: &DotsyncPaths, relative: &Path) -> Result<(), D
             source,
         })?;
     }
-    let contents = fs::read(&repo_path).map_err(|source| DotsyncError::Io {
-        path: repo_path,
-        source,
-    })?;
+    let contents = read_tree_entry_bytes(repo.store(), relative, value).await?;
     fs::write(&system_path, contents).map_err(|source| DotsyncError::Io {
         path: system_path,
         source,
@@ -878,8 +869,10 @@ async fn sync_repo_to_home(
     paths: &DotsyncPaths,
     options: SyncOptions,
     expected_repo_changes: &[PathBuf],
+    machine_scope_hint: Option<&str>,
 ) -> Result<SyncReport, DotsyncError> {
-    let graph = load_scope_graph(paths)?;
+    let config = load_config(paths)?;
+    let graph = config.graph.clone();
     let workspace = load_workspace(paths)?;
     let repo = workspace
         .repo_loader()
@@ -887,10 +880,18 @@ async fn sync_repo_to_home(
         .await
         .map_err(|err| jj_error(format!("load repo at head: {err}")))?;
 
-    let current_scope = detect_current_scope(&graph, &workspace, repo.as_ref())?;
-    let repo_files = repo_files(paths)?;
+    let sync_state = load_sync_state(paths, &config)?;
+    let current_scope = match (&sync_state, machine_scope_hint) {
+        (Some(state), _) => state.machine_scope.clone(),
+        (None, Some(scope)) => scope.to_string(),
+        (None, None) => detect_current_scope(&graph, &workspace, repo.as_ref())?,
+    };
+    let current_commit = load_scope_commit(repo.as_ref(), &current_scope)?;
+    let internal_paths = internal_repo_paths(&config);
+    let repo_entries = collect_managed_tree_entries(&current_commit.tree(), &internal_paths)?;
     let expected_repo_changes: BTreeSet<&PathBuf> = expected_repo_changes.iter().collect();
-    let drifts = detect_drifts(paths, &repo_files)?
+    let drifts = detect_drifts(paths, repo.as_ref(), &repo_entries)
+        .await?
         .into_iter()
         .filter(|drift| !expected_repo_changes.contains(&drift.repo_path))
         .collect::<Vec<_>>();
@@ -901,11 +902,31 @@ async fn sync_repo_to_home(
         });
     }
 
-    let mut synced_paths = Vec::with_capacity(repo_files.len());
-    for relative in &repo_files {
-        copy_repo_file_to_home(paths, relative)?;
+    let mut synced_paths = Vec::with_capacity(repo_entries.len());
+    for (relative, value) in &repo_entries {
+        copy_repo_file_to_home(paths, repo.as_ref(), relative, value).await?;
         synced_paths.push(relative.clone());
     }
+
+    if let Some(state) = &sync_state {
+        let previous_commit = repo
+            .store()
+            .get_commit(&state.last_synced_revision)
+            .map_err(|err| DotsyncError::SyncState {
+                path: sync_state_path(paths, &config),
+                message: format!(
+                    "last_synced_revision `{}` does not resolve to a commit: {err}",
+                    state.last_synced_revision.hex()
+                ),
+            })?;
+        let previous_entries =
+            collect_managed_tree_entries(&previous_commit.tree(), &internal_paths)?;
+        for removed_path in previous_entries.keys().filter(|path| !repo_entries.contains_key(*path)) {
+            remove_home_path(paths, removed_path)?;
+        }
+    }
+
+    save_sync_state(paths, &config, &current_scope, current_commit.id())?;
 
     Ok(SyncReport {
         current_scope,
@@ -1390,6 +1411,11 @@ fn render_config(graph: &ScopeGraph) -> String {
             rendered.push_str(&format!("{scope} = {{ parents = [{parents}] }}\n"));
         }
     }
+    rendered.push_str("\n[sync]\n");
+    rendered.push_str(&format!(
+        "state_path = \"{}\"\n",
+        default_sync_state_relative_path()
+    ));
     rendered
 }
 
@@ -1436,6 +1462,215 @@ fn collect_tree_entries(
         .collect()
 }
 
+fn load_config(paths: &DotsyncPaths) -> Result<DotsyncConfig, DotsyncError> {
+    let config_path = repo_config_path(paths);
+    let contents = fs::read_to_string(&config_path).map_err(|source| DotsyncError::Io {
+        path: config_path.clone(),
+        source,
+    })?;
+    parse_config(&config_path, &contents)
+}
+
+fn parse_config(path: &Path, contents: &str) -> Result<DotsyncConfig, DotsyncError> {
+    let raw: RawConfig = toml::from_str(contents).map_err(|source| DotsyncError::ConfigParse {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(DotsyncConfig {
+        graph: ScopeGraph::new(
+            raw.scopes
+                .into_iter()
+                .map(|(name, scope)| (name, scope.parents))
+                .collect(),
+        )?,
+        sync_state_relative_path: PathBuf::from(raw.sync.state_path),
+    })
+}
+
+fn internal_repo_paths(config: &DotsyncConfig) -> BTreeSet<PathBuf> {
+    BTreeSet::from([config.sync_state_relative_path.clone()])
+}
+
+fn load_sync_state(
+    paths: &DotsyncPaths,
+    config: &DotsyncConfig,
+) -> Result<Option<SyncState>, DotsyncError> {
+    let path = sync_state_path(paths, config);
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(DotsyncError::Io { path, source }),
+    };
+    let payload: SyncStatePayload = serde_json::from_str(&contents).map_err(|err| {
+        DotsyncError::SyncState {
+            path: path.clone(),
+            message: format!("failed to parse sync state: {err}"),
+        }
+    })?;
+    if payload.machine_scope.trim().is_empty() {
+        return Err(DotsyncError::SyncState {
+            path,
+            message: "machine_scope is empty".to_string(),
+        });
+    }
+    let last_synced_revision = CommitId::try_from_hex(&payload.last_synced_revision).ok_or_else(|| {
+        DotsyncError::SyncState {
+            path: path.clone(),
+            message: format!(
+                "last_synced_revision `{}` is not valid hex",
+                payload.last_synced_revision
+            ),
+        }
+    })?;
+    Ok(Some(SyncState {
+        machine_scope: payload.machine_scope,
+        last_synced_revision,
+    }))
+}
+
+fn save_sync_state(
+    paths: &DotsyncPaths,
+    config: &DotsyncConfig,
+    machine_scope: &str,
+    last_synced_revision: &CommitId,
+) -> Result<(), DotsyncError> {
+    let path = sync_state_path(paths, config);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| DotsyncError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let payload = SyncStatePayload {
+        machine_scope: machine_scope.to_string(),
+        last_synced_revision: last_synced_revision.hex(),
+    };
+    let contents = serde_json::to_vec_pretty(&payload).map_err(|err| DotsyncError::SyncState {
+        path: path.clone(),
+        message: format!("failed to serialize sync state: {err}"),
+    })?;
+    fs::write(&path, contents).map_err(|source| DotsyncError::Io { path, source })
+}
+
+fn sync_state_path(paths: &DotsyncPaths, config: &DotsyncConfig) -> PathBuf {
+    paths.home_dir.join(&config.sync_state_relative_path)
+}
+
+fn load_scope_commit(
+    repo: &dyn jj_lib::repo::Repo,
+    scope: &str,
+) -> Result<jj_lib::commit::Commit, DotsyncError> {
+    let commit_id = repo
+        .view()
+        .get_local_bookmark(RefNameBuf::from(scope).as_ref())
+        .as_normal()
+        .cloned()
+        .ok_or_else(|| DotsyncError::MissingScopeBookmark {
+            scope: scope.to_string(),
+        })?;
+    repo.store()
+        .get_commit(&commit_id)
+        .map_err(|err| jj_error(format!("load scope commit for {scope}: {err}")))
+}
+
+fn collect_managed_tree_entries(
+    tree: &jj_lib::merged_tree::MergedTree,
+    excluded_paths: &BTreeSet<PathBuf>,
+) -> Result<BTreeMap<PathBuf, TreeValue>, DotsyncError> {
+    let mut entries = BTreeMap::new();
+    for (path, value) in tree.entries() {
+        let display_path = PathBuf::from(path.as_internal_file_string());
+        if excluded_paths.contains(&display_path) {
+            continue;
+        }
+        let value = value.map_err(|err| jj_error(format!("read tree entry {}: {err}", display_path.display())))?;
+        let Some(value) = value.as_resolved() else {
+            return Err(jj_error(format!(
+                "tree entry {} is conflicted during sync",
+                display_path.display()
+            )));
+        };
+        let Some(value) = value.clone() else {
+            continue;
+        };
+        match value {
+            TreeValue::Tree(_) => {}
+            other => {
+                entries.insert(display_path, other);
+            }
+        }
+    }
+    Ok(entries)
+}
+
+async fn read_tree_entry_bytes(
+    store: &std::sync::Arc<jj_lib::store::Store>,
+    relative: &Path,
+    value: &TreeValue,
+) -> Result<Vec<u8>, DotsyncError> {
+    let relative_str = relative.to_str().ok_or(DotsyncError::NotImplemented(
+        "non-utf8 repo paths are not supported yet",
+    ))?;
+    let repo_path = jj_lib::repo_path::RepoPath::from_internal_string(relative_str)
+        .map_err(|err| jj_error(format!("invalid repo path {}: {err}", relative.display())))?;
+    match value {
+        TreeValue::File { id, .. } => {
+            let mut reader = store
+                .read_file(repo_path, id)
+                .await
+                .map_err(|err| jj_error(format!("read repo file {}: {err}", relative.display())))?;
+            let mut contents = Vec::new();
+            use tokio::io::AsyncReadExt;
+            reader
+                .read_to_end(&mut contents)
+                .await
+                .map_err(|err| jj_error(format!("read repo file bytes {}: {err}", relative.display())))?;
+            Ok(contents)
+        }
+        TreeValue::Symlink(id) => {
+            let target = store
+                .read_symlink(repo_path, id)
+                .await
+                .map_err(|err| jj_error(format!("read repo symlink {}: {err}", relative.display())))?;
+            Ok(target.into_bytes())
+        }
+        TreeValue::GitSubmodule(_) => Err(DotsyncError::NotImplemented(
+            "git submodule sync is not supported yet",
+        )),
+        TreeValue::Tree(_) => unreachable!("tree entries are filtered out before copying"),
+    }
+}
+
+fn remove_home_path(paths: &DotsyncPaths, relative: &Path) -> Result<(), DotsyncError> {
+    let path = paths.home_dir.join(relative);
+    match fs::remove_file(&path) {
+        Ok(()) => remove_empty_parent_dirs(paths, &path),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(DotsyncError::Io { path, source }),
+    }
+}
+
+fn remove_empty_parent_dirs(paths: &DotsyncPaths, path: &Path) -> Result<(), DotsyncError> {
+    let mut current = path.parent();
+    while let Some(dir) = current {
+        if dir == paths.home_dir {
+            break;
+        }
+        match fs::remove_dir(dir) {
+            Ok(()) => current = dir.parent(),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => break,
+            Err(err) if err.kind() == io::ErrorKind::DirectoryNotEmpty => break,
+            Err(source) => {
+                return Err(DotsyncError::Io {
+                    path: dir.to_path_buf(),
+                    source,
+                })
+            }
+        }
+    }
+    Ok(())
+}
+
 fn cascade_state_store(paths: &DotsyncPaths) -> JsonCascadeStateStore {
     JsonCascadeStateStore::new(paths.repo_root.join(".jj/dotsync/cascade-state.json"))
 }
@@ -1444,25 +1679,8 @@ fn repo_config_path(paths: &DotsyncPaths) -> PathBuf {
     paths.repo_root.join(DOTSYNC_CONFIG_RELATIVE_PATH)
 }
 
-fn system_config_path(paths: &DotsyncPaths) -> PathBuf {
-    paths.home_dir.join(DOTSYNC_CONFIG_RELATIVE_PATH)
-}
-
-fn discover_scope_graph_path(paths: &DotsyncPaths) -> Result<PathBuf, DotsyncError> {
-    let repo_path = repo_config_path(paths);
-    if repo_path.exists() {
-        return Ok(repo_path);
-    }
-
-    let system_path = system_config_path(paths);
-    if system_path.exists() {
-        return Ok(system_path);
-    }
-
-    Err(DotsyncError::Io {
-        path: repo_path,
-        source: io::Error::from(io::ErrorKind::NotFound),
-    })
+fn default_sync_state_relative_path() -> String {
+    DEFAULT_SYNC_STATE_RELATIVE_PATH.to_string()
 }
 
 fn detect_machine() -> Result<MachineIdentity, DotsyncError> {

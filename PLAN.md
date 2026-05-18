@@ -2,26 +2,103 @@
 
 ## Current state
 
-20 passing black-box CLI tests. Ratchet clean. Clippy clean.
+4 passing black-box CLI tests. Ratchet clean.
 
-Working: `dotsync init`, `dotsync` (sync), `dotsync <scope> -m "msg"` (commit + cascade + sync + push), `--force`, `--output json` on all commands, drift detection, scope isolation, multi-machine via shared remote, merge cascade with conflict pause/resume via `dotsync continue`, full DAG traversal (all machines), return to home branch after cascade, structured JSON error/usage/drift/conflict output, rich human conflict messages with ASCII DAG rendering, config discovery from repo (primary) with system path fallback.
+Working: `dotsync init`, `dotsync` (sync), `dotsync <scope> -m "msg"` (commit + cascade + sync + push), `--force`, `--output json` on all commands, drift detection, scope isolation, multi-machine via shared remote, merge cascade with conflict pause/resume via `dotsync continue`, full DAG traversal (all machines), return to home branch after cascade, structured JSON error/usage/drift/conflict output, rich human conflict messages with ASCII DAG rendering.
 
 ### Code structure
 - `src/cascade.rs`: cascade domain model (`CascadeOutcome::{Completed, Paused}`), traversal, merge execution, `PersistedCascadeState`, `CascadeStateStore`, `ScopeDagRenderer` for human conflict messages
 - `src/lib.rs`: command orchestration split into `prepare_commit_session()`, `validate_commit_scope()`, `commit_snapshot_and_apply_cascade()`, plus `continue_after_conflict()`. Structured `ErrorReport` for machine-facing errors with stable codes and drift details.
 - `src/main.rs`: centralized output rendering — commands return typed payloads, one emitter handles JSON/human split. `continue` command wired up, exit code 3 for conflicts
 
-## Immediate TODO
+## May 17 refactor
 
-- [x] Fix ratchet history (rewrote git history so tests go through pending → passing)
-- [x] Update 3 pending tests to use `--output json` instead of parsing stderr
-- [x] Write conflict message requirements (see below)
-- [x] Pre-implementation refactoring: extract cascade engine into `src/cascade.rs`, split `commit_and_sync()` into phases
-- [x] Diamond cascade test passing (basic pause/resume works)
-- [x] Fix merge-history preservation (tests 2 and 3) — pause is now workspace state + persisted intent, not history
-- [x] `--output json` on all commands — JSON on stdout for machine consumption, human text on stderr. Structured error codes for usage, drift, and runtime errors. Rich human conflict messages with ASCII DAG.
-- [x] Config discovery: repo-first with system path (`~/.config/dotsync/config.toml`) fallback. Agents can edit repo config and immediately use new scopes.
-- [x] Manually verify conflict messages contain everything an agent needs — approved by Max
+### Goal
+
+Make `dotsync` the cleanest, most user-friendly, most straightforward, and most robust implementation of its core promise:
+
+- the repo is the source of truth
+- scopes are how shared vs specific config is expressed
+- `dotsync` should let an agent make a change on one machine, commit it to the right ancestor scope, propagate it correctly, and materialize the right final config in each machine's home directory
+- multi-machine changes to shared scopes like `all` must behave like normal repo history, never silently dropping or masking changes
+
+The primary end-to-end thing we care about is **final config in home directories**, not internal branch mechanics. Branch/bookmark assertions matter, but they are secondary evidence. The main product test is: after a realistic series of scoped changes, do the right machines end up with the right config files in their virtual home directories?
+
+### Background
+
+The first real attempt to use dotsync on a single config migration exposed that the old tests were not trustworthy enough. We replaced them with black-box CLI tests and found real workflow bugs:
+
+- plain `dotsync` was syncing dirty working-copy changes instead of rejecting them
+- repeated ancestor-scope commits from a machine working copy hit incorrect drift detection on the second stage
+
+Those bugs were fixed in the first sync-state refactor. The repo is now in a better place, but it still needs cleanup so the implementation matches the product story instead of depending on worktree accidents or overcomplicated jj state choreography.
+
+### Current refactor priorities
+
+- [x] Add failing black-box workflow tests for dirty sync rejection and repeated ancestor-scope commits from a machine working copy
+- [x] Fix sync state handling so those black-box tests pass
+- [ ] Make sync semantics fully repo → home, including deletions from home when files are removed from the repo
+- [ ] Stop reading scope/config state from mutable filesystem fallbacks; read committed repo state instead
+- [ ] Introduce machine-local sync metadata so dotsync knows what it last applied to a given home directory
+- [ ] Improve error messages so each one stands alone and explains:
+  - what dotsync is doing
+  - what this flow expects
+  - what current state it found
+  - why it stopped
+  - what correct flow to use next
+- [ ] Add stronger black-box config-flow tests as the primary confidence story
+- [ ] Review and harden multi-machine shared-scope behavior, especially concurrent/separate machine changes to `all`
+
+### Primary test direction
+
+The primary test suite should be black-box CLI flows that assert **config outcomes in virtual home directories** across scopes and machines.
+
+Important flows to cover:
+
+- add/update/delete config on `all`, `linux`, and machine scopes, then assert final home state
+- commit a realistic sequence of changes from a machine working copy to an ancestor scope, asserting home state at each stage
+- sync multiple machines with different scope paths and assert their homes differ only where they should
+- multi-machine changes to `all`, including separate files, non-overlapping edits to the same file, and overlapping edits
+- joining a repo after config/scopes changed elsewhere
+
+### Conflict-flow tests
+
+We need real black-box conflict tests, not just branch-shape assertions.
+
+Required conflict flows:
+
+- scope conflict flows where changes to different scopes produce a real merge conflict that must be resolved through the filesystem, followed by `dotsync continue`
+- multi-machine conflict flows where different machines make conflicting changes and the pause/resolve/continue loop is exercised end-to-end
+
+Those tests should assert, primarily, the final config in virtual home directories after resolution. Branch/bookmark state is secondary supporting evidence.
+
+### Deletion and drift model
+
+Deletion should be based on **previously managed paths**, not on naive absence alone.
+
+Planned direction:
+
+- dotsync should keep a machine-local metadata file in the home directory describing the last state it synced there
+- that metadata is **not** a second config source; it is sync bookkeeping only
+- the metadata file path itself should be configured in `config.toml`, because its location is part of dotsync correctness and should live with the rest of dotsync config
+- the metadata file should be special-cased like internal dotsync state: never synced and never treated as managed dotfile content
+- dotsync should only delete files from home when they were present in the last synced managed-path set for that home and are now absent from the desired machine-scope state
+- drift detection should compare home state against the **last synced machine-scope state**, so dotsync can distinguish:
+  - expected divergence because the repo advanced elsewhere since the last sync
+  - unexpected local edits in home that differ from what dotsync last applied
+
+This should make multi-machine behavior saner too: a machine should not treat "repo changed on another machine" as the same thing as "home drifted locally".
+
+Refinement: keep the sync-state file itself minimal. It should store the last synced machine-scope revision, not duplicate managed paths, because managed paths should be derivable from the repo at that revision.
+
+### Multi-machine review target
+
+`dotsync` must naturally support multiple machines changing the same shared scopes by merging remote changes and then propagating those merges through descendants like any other scope change. This is not an edge case — it is a core workflow, especially for `all`.
+
+Before trusting this workflow, we need both:
+
+- black-box tests for machine A / machine B changes to `all`
+- review of the fetch / local bookmark sync / commit / push flow to ensure remote changes cannot be silently dropped or overwritten by stale local state
 
 ## Key design decision: pause model
 
@@ -115,25 +192,18 @@ Stable error codes include: `invalid_scope`, `drift_detected`, `no_paused_cascad
 }
 ```
 
-## Test coverage (20 tests)
+## Test coverage (current top-level black-box flows)
 
-Cascade conflict tests (all passing):
-1. `diamond_cascade_resolves_conflicts_across_multi_parent_merge` — diamond scope graph, conflicting changes, resolve on machine
-2. `recorded_conflict_resolution_survives_subsequent_cascade` — chain with merge history preservation
-3. `multi_machine_cascade_resolves_other_machines_conflicts_and_returns_home` — two machines, cross-machine conflict resolution
+Currently passing black-box workflow tests:
 
-JSON output contract tests (all passing):
-4. `json_usage_error_is_emitted_for_missing_commit_message` — usage errors emit structured JSON
-5. `json_continue_without_pause_reports_structured_error` — runtime errors have stable codes
-6. `json_drift_error_includes_drift_details` — drift errors include per-file detail
+1. `plain_dotsync_rejects_working_copy_changes`
+2. `ancestor_scope_commit_from_machine_working_copy_stays_consistent_across_stages`
 
-Config discovery tests (all passing):
-7. `sync_reads_scope_graph_from_home_config_when_repo_copy_is_missing` — system path fallback works
-8. `commit_sees_new_scope_added_in_repo_before_home_config_is_synced` — repo-first discovery for immediate use
+This is a much better baseline than the older synthetic suite, but it is still far from enough. The next test work should expand black-box config flows across scopes, machines, deletions, and conflict resolution.
 
 ## Design decisions
 
-- **`--output json`** on all commands. Tests use JSON to check mechanical state. Human-readable messages are the default and are verified manually, not in automated tests.
+- **`--output json`** on all commands. JSON is agent-facing product surface and needs black-box contract tests.
 - **Conflict cascade flow** is interactive, like `git rebase` but walks the entire scope DAG:
   1. Cascade starts, walks descendants in topological order
   2. On conflict: pause, exit 3, print rich explanation + JSON
@@ -142,6 +212,7 @@ Config discovery tests (all passing):
   5. End on the current machine's branch
 - **Branches created on first commit to a scope** — scope must be in config, branch is created lazily.
 - **All machines' branches get cascaded**, not just the current machine's path. Agent on machA may resolve conflicts on machB's branch.
+- **Primary confidence signal is final home config**, not internal branch shape. Branch assertions support the home-config story; they do not replace it.
 
 ## Architecture notes
 
@@ -154,6 +225,11 @@ Config discovery tests (all passing):
 
 ## Future work
 
+- Delete the remaining filesystem-fallback/config-discovery assumptions that violate repo-is-source-of-truth
+- Add deletion semantics so repo removals remove managed files from home
+- Add black-box tests for multi-machine `all` changes, including explicit conflict cases and resolution with `dotsync continue`
+- Add black-box tests for scoped config composition across multiple machines and multiple scope combinations
+- Improve user-facing errors so each one teaches the correct mental model in isolation
 - Set up `~/dotfiles` repo with scope branches per DESIGN.md
 - Create the `dotfiles` opencode skill
 - Populate dotfiles from configs in ~/SETUP-LOG.ignore.md
