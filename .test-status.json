@@ -18,7 +18,16 @@
     "dotsync::user_flows$scoped_commit_deletion_removes_file_from_fake_home": "passing",
     "dotsync::user_flows$scoped_deletion_only_affects_homes_where_scope_applies": "passing",
     "dotsync::user_flows$sync_uses_state_machine_scope_even_if_checkout_changes": "passing",
-    "dotsync::user_flows$tdd_ratchet_gatekeeper": "passing"
+    "dotsync::user_flows$tdd_ratchet_gatekeeper": "passing",
+    "dotsync::user_flows$pending_scoped_commit_requires_paths_or_all_in_human_and_json_modes": "pending",
+    "dotsync::user_flows$pending_commit_mode_rejects_all_plus_paths": "pending",
+    "dotsync::user_flows$pending_explicit_path_commit_only_commits_selected_paths_and_leaves_other_changes_dirty": "pending",
+    "dotsync::user_flows$pending_commit_all_preserves_whole_tree_commit_behavior": "pending",
+    "dotsync::user_flows$pending_selected_add_modify_and_delete_are_applied_without_touching_unselected_changes": "pending",
+    "dotsync::user_flows$pending_config_path_is_rejected_for_non_all_scope_commits": "pending",
+    "dotsync::user_flows$pending_sync_loads_config_from_committed_all_scope_not_working_copy_edit": "pending",
+    "dotsync::user_flows$pending_selective_commit_preserves_unselected_dirty_paths_when_cascade_pauses": "pending",
+    "dotsync::user_flows$pending_joining_existing_remote_creates_new_scope_and_first_commit_works": "pending"
   },
   "baseline": "c1136cda3733e0bdce76a4fbc38d00dc6cc35e43"
 }
