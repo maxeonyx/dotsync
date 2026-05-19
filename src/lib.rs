@@ -15,8 +15,8 @@ use jj_lib::git::{
 };
 use jj_lib::gitignore::GitIgnoreFile;
 use jj_lib::matchers::EverythingMatcher;
-use jj_lib::merged_tree_builder::MergedTreeBuilder;
 use jj_lib::merge::MergedTreeValue;
+use jj_lib::merged_tree_builder::MergedTreeBuilder;
 use jj_lib::object_id::ObjectId;
 use jj_lib::op_store::RefTarget;
 use jj_lib::ref_name::RefNameBuf;
@@ -806,7 +806,8 @@ fn resolve_commit_selection(
                 return Err(DotsyncError::CommitSelectionRequired);
             }
 
-            let normalized_paths = normalize_selected_repo_paths(paths, requested_paths, changed_paths)?;
+            let normalized_paths =
+                normalize_selected_repo_paths(paths, requested_paths, changed_paths)?;
             let mut selected = changed_paths
                 .iter()
                 .filter(|changed| path_matches_selection(&normalized_paths, changed))
@@ -890,11 +891,16 @@ fn normalize_selected_repo_paths(
 
 fn path_matches_selection(selected_paths: &[PathBuf], changed_path: &Path) -> bool {
     selected_paths.iter().any(|selected| {
-        changed_path == selected || changed_path.starts_with(selected) || selected.starts_with(changed_path)
+        changed_path == selected
+            || changed_path.starts_with(selected)
+            || selected.starts_with(changed_path)
     })
 }
 
-fn validate_config_commit_scope(selected_paths: &[PathBuf], scope: &str) -> Result<(), DotsyncError> {
+fn validate_config_commit_scope(
+    selected_paths: &[PathBuf],
+    scope: &str,
+) -> Result<(), DotsyncError> {
     let config_path = PathBuf::from(DOTSYNC_CONFIG_RELATIVE_PATH);
     if scope != "all"
         && selected_paths
@@ -916,8 +922,9 @@ async fn project_selected_paths(
 ) -> Result<jj_lib::merged_tree::MergedTree, DotsyncError> {
     let mut builder = MergedTreeBuilder::new(base_tree.clone());
     for path in selected_paths {
-        let repo_path = RepoPathBuf::from_internal_string(path.to_string_lossy().replace('\\', "/"))
-            .map_err(|err| jj_error(format!("invalid repo path {}: {err}", path.display())))?;
+        let repo_path =
+            RepoPathBuf::from_internal_string(path.to_string_lossy().replace('\\', "/"))
+                .map_err(|err| jj_error(format!("invalid repo path {}: {err}", path.display())))?;
         let value = selected_tree
             .path_value(repo_path.as_ref())
             .map_err(|err| jj_error(format!("read selected path {}: {err}", path.display())))?;
@@ -935,15 +942,20 @@ async fn restore_working_copy_paths(
     restore_paths: &[PathBuf],
 ) -> Result<(), DotsyncError> {
     for path in restore_paths {
-        let repo_path = RepoPathBuf::from_internal_string(path.to_string_lossy().replace('\\', "/"))
-            .map_err(|err| jj_error(format!("invalid restore path {}: {err}", path.display())))?;
+        let repo_path = RepoPathBuf::from_internal_string(
+            path.to_string_lossy().replace('\\', "/"),
+        )
+        .map_err(|err| jj_error(format!("invalid restore path {}: {err}", path.display())))?;
         let value = snapshot_tree
             .path_value(repo_path.as_ref())
             .map_err(|err| jj_error(format!("read restore path {}: {err}", path.display())))?;
         let system_path = paths.repo_root.join(path);
-        let resolved = value
-            .into_resolved()
-            .map_err(|conflict| jj_error(format!("restore path {} is conflicted: {conflict:?}", path.display())))?;
+        let resolved = value.into_resolved().map_err(|conflict| {
+            jj_error(format!(
+                "restore path {} is conflicted: {conflict:?}",
+                path.display()
+            ))
+        })?;
 
         match resolved {
             Some(TreeValue::Tree(_)) => {
@@ -1357,21 +1369,26 @@ fn sync_local_bookmarks_from_remote(
         .collect();
 
     for (name, remote_id) in &updates {
-        let Some(local_id) = mut_repo.view().get_local_bookmark(name.as_ref()).as_normal() else {
+        let Some(local_id) = mut_repo
+            .view()
+            .get_local_bookmark(name.as_ref())
+            .as_normal()
+        else {
             continue;
         };
         if local_id == remote_id {
             continue;
         }
-        let local_is_ancestor = mut_repo
-            .index()
-            .is_ancestor(local_id, remote_id)
-            .map_err(|err| {
-                jj_error(format!(
-                    "check bookmark ancestry for {}: {err}",
-                    name.as_str()
-                ))
-            })?;
+        let local_is_ancestor =
+            mut_repo
+                .index()
+                .is_ancestor(local_id, remote_id)
+                .map_err(|err| {
+                    jj_error(format!(
+                        "check bookmark ancestry for {}: {err}",
+                        name.as_str()
+                    ))
+                })?;
         if !local_is_ancestor {
             return Err(DotsyncError::FetchWouldOverwriteLocalBookmark {
                 bookmark: name.as_str().to_string(),
@@ -1827,8 +1844,12 @@ async fn load_config(paths: &DotsyncPaths) -> Result<DotsyncConfig, DotsyncError
             path: repo_config_path(paths),
             source: io::Error::new(io::ErrorKind::NotFound, "config missing on all scope"),
         })?;
-    let contents = read_tree_entry_bytes(repo.store(), Path::new(DOTSYNC_CONFIG_RELATIVE_PATH), &value)
-        .await?;
+    let contents = read_tree_entry_bytes(
+        repo.store(),
+        Path::new(DOTSYNC_CONFIG_RELATIVE_PATH),
+        &value,
+    )
+    .await?;
     let contents = String::from_utf8(contents)
         .map_err(|err| jj_error(format!("config file is not valid utf-8: {err}")))?;
     parse_config(&repo_config_path(paths), &contents)
