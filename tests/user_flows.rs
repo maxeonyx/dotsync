@@ -7,10 +7,10 @@ use jj_lib::config::StackedConfig;
 use jj_lib::merge::Merge;
 use jj_lib::merged_tree_builder::MergedTreeBuilder;
 use jj_lib::object_id::ObjectId;
-use jj_lib::repo_path::RepoPathBuf;
 use jj_lib::ref_name::RefNameBuf;
 use jj_lib::repo::{Repo as _, StoreFactories};
 use jj_lib::repo_path::RepoPath;
+use jj_lib::repo_path::RepoPathBuf;
 use jj_lib::settings::UserSettings;
 use jj_lib::workspace::{default_working_copy_factories, Workspace};
 use tempfile::TempDir;
@@ -371,7 +371,12 @@ fn git_rev_parse(dir: &Path, rev: &str) -> String {
         .to_string()
 }
 
-fn advance_local_bookmark_without_push(machine: &MachineEnvironment, scope: &str, relative: &str, contents: &str) {
+fn advance_local_bookmark_without_push(
+    machine: &MachineEnvironment,
+    scope: &str,
+    relative: &str,
+    contents: &str,
+) {
     let mut workspace = load_workspace(&machine.repo_dir);
     let repo = load_repo(&workspace);
     let bookmark_name = RefNameBuf::from(scope);
@@ -432,16 +437,23 @@ fn advance_local_bookmark_without_push(machine: &MachineEnvironment, scope: &str
                 jj_lib::op_store::RefTarget::normal(new_commit.id().clone()),
             );
             tx.repo_mut()
-                .set_wc_commit(workspace.workspace_name().to_owned(), new_commit.id().clone())
+                .set_wc_commit(
+                    workspace.workspace_name().to_owned(),
+                    new_commit.id().clone(),
+                )
                 .expect("set working copy to unpublished commit");
             let repo = tx
                 .commit(format!("test: advance local bookmark {scope} without push"))
                 .await
-                .unwrap_or_else(|err| panic!("commit unpublished local bookmark advance `{scope}`: {err}"));
+                .unwrap_or_else(|err| {
+                    panic!("commit unpublished local bookmark advance `{scope}`: {err}")
+                });
             workspace
                 .check_out(repo.op_id().clone(), None, &new_commit)
                 .await
-                .unwrap_or_else(|err| panic!("check out unpublished local commit `{scope}`: {err}"));
+                .unwrap_or_else(|err| {
+                    panic!("check out unpublished local commit `{scope}`: {err}")
+                });
         });
 }
 
@@ -487,12 +499,21 @@ fn pending_scoped_commit_requires_paths_or_all_in_human_and_json_modes() {
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_repo_file(".gitconfig", "[user]\nname = \"Max\"\n");
 
     let human_output = machine.commit("all", "missing selection");
-    assert_eq!(human_output.status.code(), Some(2), "{}", render_output(&human_output));
+    assert_eq!(
+        human_output.status.code(),
+        Some(2),
+        "{}",
+        render_output(&human_output)
+    );
     let human_stderr = String::from_utf8_lossy(&human_output.stderr);
     assert!(
         human_stderr.contains("requires explicit file/directory paths or --all"),
@@ -501,7 +522,12 @@ fn pending_scoped_commit_requires_paths_or_all_in_human_and_json_modes() {
     );
 
     let json_output = machine.commit_json("all", "missing selection", &[]);
-    assert_eq!(json_output.status.code(), Some(2), "{}", render_output(&json_output));
+    assert_eq!(
+        json_output.status.code(),
+        Some(2),
+        "{}",
+        render_output(&json_output)
+    );
     let json = parse_stdout_json(&json_output);
     assert_eq!(json["status"], "error");
     assert_eq!(json["error"], "usage");
@@ -517,17 +543,16 @@ fn pending_commit_mode_rejects_all_plus_paths() {
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_repo_file(".gitconfig", "[user]\nname = \"Max\"\n");
 
-    let output = machine.run_dotsync_json(&[
-        "all",
-        "--all",
-        "-m",
-        "conflicting selection",
-        ".gitconfig",
-    ]);
+    let output =
+        machine.run_dotsync_json(&["all", "--all", "-m", "conflicting selection", ".gitconfig"]);
     assert_eq!(output.status.code(), Some(2), "{}", render_output(&output));
     let json = parse_stdout_json(&output);
     assert_eq!(json["status"], "error");
@@ -544,15 +569,26 @@ fn pending_explicit_path_commit_only_commits_selected_paths_and_leaves_other_cha
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_repo_file(".gitconfig", "[user]\nname = \"Max\"\n");
     machine.write_repo_file(".config/fish/config.fish", "set -g fish_greeting hi\n");
 
     let commit_output = machine.commit_paths("all", "commit only gitconfig", &[".gitconfig"]);
-    assert!(commit_output.status.success(), "{}", render_output(&commit_output));
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
 
-    assert_eq!(machine.read_home_file(".gitconfig"), "[user]\nname = \"Max\"\n");
+    assert_eq!(
+        machine.read_home_file(".gitconfig"),
+        "[user]\nname = \"Max\"\n"
+    );
     assert!(
         !machine.home_file_exists(".config/fish/config.fish"),
         "unselected path should stay unsynced\n{}",
@@ -560,9 +596,18 @@ fn pending_explicit_path_commit_only_commits_selected_paths_and_leaves_other_cha
     );
 
     let sync_output = machine.sync();
-    assert_eq!(sync_output.status.code(), Some(1), "{}", render_output(&sync_output));
+    assert_eq!(
+        sync_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&sync_output)
+    );
     let stderr = String::from_utf8_lossy(&sync_output.stderr);
-    assert!(stderr.contains("working copy has uncommitted changes"), "{}", render_output(&sync_output));
+    assert!(
+        stderr.contains("working copy has uncommitted changes"),
+        "{}",
+        render_output(&sync_output)
+    );
     assert_eq!(
         machine.read_repo_file(".config/fish/config.fish"),
         "set -g fish_greeting hi\n"
@@ -575,14 +620,25 @@ fn pending_commit_all_preserves_whole_tree_commit_behavior() {
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_repo_file(".gitconfig", "[user]\nname = \"Max\"\n");
     machine.write_repo_file(".config/fish/config.fish", "set -g fish_greeting hi\n");
 
     let commit_output = machine.commit_all("all", "commit whole tree");
-    assert!(commit_output.status.success(), "{}", render_output(&commit_output));
-    assert_eq!(machine.read_home_file(".gitconfig"), "[user]\nname = \"Max\"\n");
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
+    assert_eq!(
+        machine.read_home_file(".gitconfig"),
+        "[user]\nname = \"Max\"\n"
+    );
     assert_eq!(
         machine.read_home_file(".config/fish/config.fish"),
         "set -g fish_greeting hi\n"
@@ -595,17 +651,31 @@ fn pending_selected_add_modify_and_delete_are_applied_without_touching_unselecte
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_repo_file(".gitconfig", "[user]\nname = \"Max\"\n");
     machine.write_repo_file(".config/fish/config.fish", "set -g fish_greeting hi\n");
     let seed_output = machine.commit_all("all", "seed files");
-    assert!(seed_output.status.success(), "{}", render_output(&seed_output));
+    assert!(
+        seed_output.status.success(),
+        "{}",
+        render_output(&seed_output)
+    );
 
-    machine.write_repo_file(".gitconfig", "[user]\nname = \"Max\"\nemail = \"max@example.com\"\n");
+    machine.write_repo_file(
+        ".gitconfig",
+        "[user]\nname = \"Max\"\nemail = \"max@example.com\"\n",
+    );
     machine.delete_repo_file(".config/fish/config.fish");
     machine.write_repo_file(".config/starship.toml", "command_timeout = 500\n");
-    machine.write_repo_file(".config/alacritty/alacritty.toml", "[window]\nopacity = 0.9\n");
+    machine.write_repo_file(
+        ".config/alacritty/alacritty.toml",
+        "[window]\nopacity = 0.9\n",
+    );
 
     let commit_output = machine.commit_paths(
         "all",
@@ -616,7 +686,11 @@ fn pending_selected_add_modify_and_delete_are_applied_without_touching_unselecte
             ".config/starship.toml",
         ],
     );
-    assert!(commit_output.status.success(), "{}", render_output(&commit_output));
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
 
     assert_eq!(
         machine.read_home_file(".gitconfig"),
@@ -630,7 +704,12 @@ fn pending_selected_add_modify_and_delete_are_applied_without_touching_unselecte
     assert!(!machine.home_file_exists(".config/alacritty/alacritty.toml"));
 
     let sync_output = machine.sync();
-    assert_eq!(sync_output.status.code(), Some(1), "{}", render_output(&sync_output));
+    assert_eq!(
+        sync_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&sync_output)
+    );
     assert_eq!(
         machine.read_repo_file(".config/alacritty/alacritty.toml"),
         "[window]\nopacity = 0.9\n"
@@ -643,7 +722,11 @@ fn pending_config_path_is_rejected_for_non_all_scope_commits() {
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_repo_file(
         ".config/dotsync/config.toml",
@@ -655,9 +738,18 @@ fn pending_config_path_is_rejected_for_non_all_scope_commits() {
         "bad config commit",
         &[".config/dotsync/config.toml"],
     );
-    assert_eq!(commit_output.status.code(), Some(1), "{}", render_output(&commit_output));
+    assert_eq!(
+        commit_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&commit_output)
+    );
     let stderr = String::from_utf8_lossy(&commit_output.stderr);
-    assert!(stderr.contains("Commit `.config/dotsync/config.toml` on `all`."), "{}", render_output(&commit_output));
+    assert!(
+        stderr.contains("Commit `.config/dotsync/config.toml` on `all`."),
+        "{}",
+        render_output(&commit_output)
+    );
 }
 
 #[test]
@@ -666,11 +758,19 @@ fn pending_sync_loads_config_from_committed_all_scope_not_working_copy_edit() {
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_repo_file(".gitconfig", "[user]\nname = \"Max\"\n");
     let commit_output = machine.commit_paths("all", "add gitconfig", &[".gitconfig"]);
-    assert!(commit_output.status.success(), "{}", render_output(&commit_output));
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
 
     machine.delete_home_file(".gitconfig");
     machine.write_repo_file(
@@ -679,15 +779,27 @@ fn pending_sync_loads_config_from_committed_all_scope_not_working_copy_edit() {
     );
 
     let sync_output = machine.sync();
-    assert_eq!(sync_output.status.code(), Some(1), "{}", render_output(&sync_output));
+    assert_eq!(
+        sync_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&sync_output)
+    );
     let stderr = String::from_utf8_lossy(&sync_output.stderr);
-    assert!(stderr.contains("working copy has uncommitted changes"), "{}", render_output(&sync_output));
+    assert!(
+        stderr.contains("working copy has uncommitted changes"),
+        "{}",
+        render_output(&sync_output)
+    );
     assert!(
         machine.home_file_exists(".config/dotsync/sync-state.json"),
         "committed base-scope config should still define the original state path"
     );
     assert!(
-        !machine.home_dir.join(".config/dotsync/other-state.json").exists(),
+        !machine
+            .home_dir
+            .join(".config/dotsync/other-state.json")
+            .exists(),
         "mutable working-tree config edit should not affect config loading"
     );
 }
@@ -700,21 +812,38 @@ fn pending_selective_commit_preserves_unselected_dirty_paths_when_cascade_pauses
     let unselected = ".config/fish/config.fish";
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_repo_file(selected, "[user]\nname = \"Base\"\n");
     let base_output = machine.commit_all("all", "add base gitconfig");
-    assert!(base_output.status.success(), "{}", render_output(&base_output));
+    assert!(
+        base_output.status.success(),
+        "{}",
+        render_output(&base_output)
+    );
 
     machine.write_repo_file(selected, "[user]\nname = \"Linux\"\n");
     let linux_output = machine.commit_all("linux", "linux override");
-    assert!(linux_output.status.success(), "{}", render_output(&linux_output));
+    assert!(
+        linux_output.status.success(),
+        "{}",
+        render_output(&linux_output)
+    );
 
     machine.write_repo_file(selected, "[user]\nname = \"All\"\n");
     machine.write_repo_file(unselected, "set -g fish_greeting keep-me\n");
 
     let paused_output = machine.commit_paths("all", "conflicting all change", &[selected]);
-    assert_eq!(paused_output.status.code(), Some(3), "{}", render_output(&paused_output));
+    assert_eq!(
+        paused_output.status.code(),
+        Some(3),
+        "{}",
+        render_output(&paused_output)
+    );
 
     assert_eq!(
         machine.read_repo_file(unselected),
@@ -723,9 +852,18 @@ fn pending_selective_commit_preserves_unselected_dirty_paths_when_cascade_pauses
     );
 
     let sync_output = machine.sync();
-    assert_eq!(sync_output.status.code(), Some(1), "{}", render_output(&sync_output));
+    assert_eq!(
+        sync_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&sync_output)
+    );
     let stderr = String::from_utf8_lossy(&sync_output.stderr);
-    assert!(stderr.contains("cascade already in progress") || stderr.contains("already paused"), "{}", render_output(&sync_output));
+    assert!(
+        stderr.contains("cascade already in progress") || stderr.contains("already paused"),
+        "{}",
+        render_output(&sync_output)
+    );
 }
 
 #[test]
@@ -735,20 +873,38 @@ fn pending_joining_existing_remote_creates_new_scope_and_first_commit_works() {
     let windows_machine = harness.machine("machine-windows", "windows", "mx-pc-win");
 
     let linux_init = linux_machine.init();
-    assert!(linux_init.status.success(), "{}", render_output(&linux_init));
+    assert!(
+        linux_init.status.success(),
+        "{}",
+        render_output(&linux_init)
+    );
 
     let windows_init = windows_machine.init();
-    assert!(windows_init.status.success(), "{}", render_output(&windows_init));
     assert!(
-        windows_machine.current_bookmarks().contains(&"mx-pc-win".to_string()),
+        windows_init.status.success(),
+        "{}",
+        render_output(&windows_init)
+    );
+    assert!(
+        windows_machine
+            .current_bookmarks()
+            .contains(&"mx-pc-win".to_string()),
         "windows machine scope should be created on join\n{}",
         render_output(&windows_init)
     );
 
     windows_machine.write_repo_file(".gitconfig", "[user]\nname = \"Win\"\n");
-    let first_commit = windows_machine.commit_paths("windows", "first windows commit", &[".gitconfig"]);
-    assert!(first_commit.status.success(), "{}", render_output(&first_commit));
-    assert_eq!(windows_machine.read_home_file(".gitconfig"), "[user]\nname = \"Win\"\n");
+    let first_commit =
+        windows_machine.commit_paths("windows", "first windows commit", &[".gitconfig"]);
+    assert!(
+        first_commit.status.success(),
+        "{}",
+        render_output(&first_commit)
+    );
+    assert_eq!(
+        windows_machine.read_home_file(".gitconfig"),
+        "[user]\nname = \"Win\"\n"
+    );
     assert_eq!(
         windows_machine.bookmark_file_contents("windows", ".gitconfig"),
         "[user]\nname = \"Win\"\n"
@@ -761,11 +917,19 @@ fn pending_fetch_stops_when_remote_would_reset_local_bookmark() {
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_repo_file(".gitconfig", "[user]\nname = \"Base\"\n");
     let base_output = machine.commit_all("all", "seed base gitconfig");
-    assert!(base_output.status.success(), "{}", render_output(&base_output));
+    assert!(
+        base_output.status.success(),
+        "{}",
+        render_output(&base_output)
+    );
 
     let remote_clone = harness.root_dir.join("remote-reset");
     clone_remote_to(&remote_clone, &harness.remote_dir);
@@ -779,11 +943,19 @@ fn pending_fetch_stops_when_remote_would_reset_local_bookmark() {
     let local_before = machine.bookmark_revision("all");
 
     let reset_target = git_rev_parse(&remote_clone, "HEAD");
-    let push = git_in(&remote_clone, &["push", "origin", &format!("{reset_target}:all")]);
+    let push = git_in(
+        &remote_clone,
+        &["push", "origin", &format!("{reset_target}:all")],
+    );
     assert!(push.status.success(), "{}", render_output(&push));
 
     let sync_output = machine.sync();
-    assert_eq!(sync_output.status.code(), Some(1), "{}", render_output(&sync_output));
+    assert_eq!(
+        sync_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&sync_output)
+    );
     let stderr = String::from_utf8_lossy(&sync_output.stderr);
     assert_standalone_error(
         &stderr,
