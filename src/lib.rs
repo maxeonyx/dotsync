@@ -162,6 +162,9 @@ impl DotsyncError {
             DotsyncError::ConfigOnlyAllowedOnBaseScope { .. } => {
                 basic_error_report("config_base_scope_only", self)
             }
+            DotsyncError::FetchWouldOverwriteLocalBookmark { .. } => {
+                basic_error_report("fetch_would_overwrite_local_bookmark", self)
+            }
             DotsyncError::NoCurrentScope => basic_error_report("no_current_scope", self),
             DotsyncError::MissingScopeBookmark { .. } => {
                 basic_error_report("missing_scope_bookmark", self)
@@ -207,6 +210,13 @@ fn error_current_state(error: &DotsyncError) -> Option<String> {
         }
         DotsyncError::ConfigOnlyAllowedOnBaseScope { config_path, scope } => Some(format!(
             "requested scope: {scope}; restricted path: {config_path}"
+        )),
+        DotsyncError::FetchWouldOverwriteLocalBookmark {
+            bookmark,
+            local_target,
+            remote_target,
+        } => Some(format!(
+            "bookmark: {bookmark}; local target: {local_target}; remote target: {remote_target}"
         )),
         DotsyncError::DirtyWorkingCopy { count } => Some(format!(
             "working copy has uncommitted changes in {count} path(s)"
@@ -254,6 +264,14 @@ pub enum DotsyncError {
     CommitSelectionEmpty,
     #[error("{config_path} may only be committed to scope `all`; requested scope `{scope}`")]
     ConfigOnlyAllowedOnBaseScope { config_path: String, scope: String },
+    #[error(
+        "fetch would overwrite local bookmark `{bookmark}` by moving it from {local_target} to {remote_target}"
+    )]
+    FetchWouldOverwriteLocalBookmark {
+        bookmark: String,
+        local_target: String,
+        remote_target: String,
+    },
     #[error("scope `{scope}` is not an ancestor of `{current_scope}`")]
     ScopeNotAncestor {
         scope: String,
@@ -1317,7 +1335,7 @@ async fn fetch_origin(
     fetch
         .import_refs()
         .map_err(|err| jj_error(format!("import fetched refs: {err}")))?;
-    sync_local_bookmarks_from_remote(tx.repo_mut(), "origin".as_ref());
+    sync_local_bookmarks_from_remote(tx.repo_mut(), "origin".as_ref())?;
     tx.commit("dotsync: fetch origin")
         .await
         .map_err(|err| jj_error(format!("commit fetch operation: {err}")))
@@ -1326,7 +1344,7 @@ async fn fetch_origin(
 fn sync_local_bookmarks_from_remote(
     mut_repo: &mut MutableRepo,
     remote_name: &jj_lib::ref_name::RemoteName,
-) {
+) -> Result<(), DotsyncError> {
     let updates: Vec<(RefNameBuf, jj_lib::backend::CommitId)> = mut_repo
         .view()
         .remote_bookmarks(remote_name)
@@ -1338,9 +1356,36 @@ fn sync_local_bookmarks_from_remote(
         })
         .collect();
 
+    for (name, remote_id) in &updates {
+        let Some(local_id) = mut_repo.view().get_local_bookmark(name.as_ref()).as_normal() else {
+            continue;
+        };
+        if local_id == remote_id {
+            continue;
+        }
+        let local_is_ancestor = mut_repo
+            .index()
+            .is_ancestor(local_id, remote_id)
+            .map_err(|err| {
+                jj_error(format!(
+                    "check bookmark ancestry for {}: {err}",
+                    name.as_str()
+                ))
+            })?;
+        if !local_is_ancestor {
+            return Err(DotsyncError::FetchWouldOverwriteLocalBookmark {
+                bookmark: name.as_str().to_string(),
+                local_target: local_id.hex(),
+                remote_target: remote_id.hex(),
+            });
+        }
+    }
+
     for (name, id) in updates {
         mut_repo.set_local_bookmark_target(name.as_ref(), RefTarget::normal(id));
     }
+
+    Ok(())
 }
 
 async fn bootstrap_empty_remote(

@@ -7,7 +7,7 @@ Use this skill when editing dotfiles on a machine managed by dotsync.
 1. Edit files in `~/dotfiles/`, not in `~/`.
 2. Read `~/dotfiles/.config/dotsync/config.toml` first to discover available scopes; its comments explain what each scope is for.
 3. Choose the root-est appropriate scope for the change (the highest scope that still semantically owns the edit).
-4. Run `dotsync <scope> -m "message"` after edits are complete.
+4. Run `dotsync <scope> -m "message" <path>...` after edits are complete, or `dotsync <scope> --all -m "message"` only when you intentionally want every repo edit committed.
 5. Run plain `dotsync` only when there are no local repo edits and you only want repo-to-system sync.
 
 ## Notes

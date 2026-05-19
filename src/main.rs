@@ -377,6 +377,15 @@ fn render_error_human(error: &ErrorReport) -> String {
             "Dotsync stopped because committing the scope-model config on another scope would make branch-local scope definitions possible, which breaks the product model.",
             &["Commit `.config/dotsync/config.toml` on `all`.", "Keep non-`all` scope commits focused on ordinary dotfiles, not scope-model changes."],
         ),
+        "fetch_would_overwrite_local_bookmark" => render_structured_error(
+            "fetch would overwrite local bookmark",
+            "Dotsync fetches remote scope bookmarks before syncing or preparing a scoped commit so each machine sees published scope history from the shared repo.",
+            "This fetch flow may fast-forward a local bookmark when the remote simply advances it, but it must not rewrite local bookmark history.",
+            "It expects every remote bookmark update to either match the local bookmark or move it forward; dotsync must not move a local bookmark backward or sideways or lose unpublished local state.",
+            error.current_state.as_deref().unwrap_or(&error.message),
+            "Dotsync stopped because this remote update would move a local bookmark backward or sideways, which would discard or bypass unpublished local state.",
+            &["Publish or intentionally discard the local-only bookmark state before syncing.", "If the remote bookmark was rewritten intentionally, reconcile that history explicitly instead of letting dotsync reset the local bookmark."],
+        ),
         "dirty_working_copy" => render_structured_error(
             "dirty working copy",
             "Dotsync keeps your dotfiles repo as the source of truth for your home-directory config and syncs committed repo state into the live system.",

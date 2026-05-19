@@ -18,7 +18,7 @@
     "dotsync::user_flows$pending_commit_mode_rejects_all_plus_paths": "passing",
     "dotsync::user_flows$pending_config_path_is_rejected_for_non_all_scope_commits": "passing",
     "dotsync::user_flows$pending_explicit_path_commit_only_commits_selected_paths_and_leaves_other_changes_dirty": "passing",
-    "dotsync::user_flows$pending_fetch_stops_when_remote_would_reset_local_bookmark": "pending",
+    "dotsync::user_flows$pending_fetch_stops_when_remote_would_reset_local_bookmark": "passing",
     "dotsync::user_flows$pending_joining_existing_remote_creates_new_scope_and_first_commit_works": "passing",
     "dotsync::user_flows$pending_scoped_commit_requires_paths_or_all_in_human_and_json_modes": "passing",
     "dotsync::user_flows$pending_selected_add_modify_and_delete_are_applied_without_touching_unselected_changes": "passing",

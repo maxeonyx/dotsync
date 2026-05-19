@@ -134,7 +134,9 @@ There is one command: `dotsync`.
 
 **`dotsync`** (no arguments): Sync repo -> system. If there are uncommitted local changes, errors and directs you to use `dotsync <scope> -m "message"` instead (because those changes need a scope to be committed to).
 
-**`dotsync <scope> -m "message"`**: Commit the current changes to the named scope branch, merge cascade through all descendant scopes, sync repo -> system, push to remote.
+**`dotsync <scope> -m "message" <path>...`**: Commit the selected repo-relative file/directory paths to the named scope branch, merge cascade through all descendant scopes, sync repo -> system, push to remote.
+
+**`dotsync <scope> --all -m "message"`**: Commit the whole current working tree to the named scope branch when you intentionally want the old whole-tree behavior.
 
 Both forms diff system files against the repo before syncing. If any system file has drifted from what the repo expects, dotsync stops, shows the diff, and warns. `--force` still shows the diffs but proceeds anyway — so you always see what's being overwritten, even if you've chosen not to stop for it.
 
