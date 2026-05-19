@@ -4,6 +4,10 @@ use std::process::{Command, Output};
 
 use jj_lib::backend::TreeValue;
 use jj_lib::config::StackedConfig;
+use jj_lib::merge::Merge;
+use jj_lib::merged_tree_builder::MergedTreeBuilder;
+use jj_lib::object_id::ObjectId;
+use jj_lib::repo_path::RepoPathBuf;
 use jj_lib::ref_name::RefNameBuf;
 use jj_lib::repo::{Repo as _, StoreFactories};
 use jj_lib::repo_path::RepoPath;
@@ -286,6 +290,16 @@ impl MachineEnvironment {
             });
         String::from_utf8(contents).expect("bookmark file should be utf-8")
     }
+
+    fn bookmark_revision(&self, scope: &str) -> String {
+        let workspace = load_workspace(&self.repo_dir);
+        let repo = load_repo(&workspace);
+        repo.view()
+            .get_local_bookmark(RefNameBuf::from(scope).as_ref())
+            .as_normal()
+            .unwrap_or_else(|| panic!("missing bookmark `{scope}`"))
+            .hex()
+    }
 }
 
 fn load_workspace(repo_dir: &Path) -> Workspace {
@@ -324,6 +338,111 @@ fn init_bare_remote(remote_dir: &Path) {
         "git init --bare failed: {}",
         render_output(&output)
     );
+}
+
+fn clone_remote_to(path: &Path, remote_dir: &Path) {
+    let output = Command::new("git")
+        .args(["clone", "--branch", "all", "--single-branch"])
+        .arg(remote_dir)
+        .arg(path)
+        .output()
+        .expect("run git clone");
+    assert!(
+        output.status.success(),
+        "git clone failed: {}",
+        render_output(&output)
+    );
+}
+
+fn git_in(dir: &Path, args: &[&str]) -> Output {
+    Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap_or_else(|err| panic!("run git {:?}: {err}", args))
+}
+
+fn git_rev_parse(dir: &Path, rev: &str) -> String {
+    let output = git_in(dir, &["rev-parse", rev]);
+    assert!(output.status.success(), "{}", render_output(&output));
+    String::from_utf8(output.stdout)
+        .expect("rev-parse stdout should be utf-8")
+        .trim()
+        .to_string()
+}
+
+fn advance_local_bookmark_without_push(machine: &MachineEnvironment, scope: &str, relative: &str, contents: &str) {
+    let mut workspace = load_workspace(&machine.repo_dir);
+    let repo = load_repo(&workspace);
+    let bookmark_name = RefNameBuf::from(scope);
+    let bookmark_id = repo
+        .view()
+        .get_local_bookmark(bookmark_name.as_ref())
+        .as_normal()
+        .cloned()
+        .unwrap_or_else(|| panic!("missing bookmark `{scope}`"));
+    let bookmark_commit = repo
+        .store()
+        .get_commit(&bookmark_id)
+        .unwrap_or_else(|err| panic!("load bookmark commit `{scope}`: {err}"));
+    let path = RepoPathBuf::from_internal_string(relative)
+        .unwrap_or_else(|err| panic!("invalid repo path `{relative}`: {err}"));
+
+    let new_tree = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime")
+        .block_on(async {
+            let mut reader = contents.as_bytes();
+            let file_id = repo
+                .store()
+                .write_file(path.as_ref(), &mut reader)
+                .await
+                .unwrap_or_else(|err| panic!("write file for local bookmark advance: {err}"));
+            let mut builder = MergedTreeBuilder::new(bookmark_commit.tree());
+            builder.set_or_remove(
+                path.clone(),
+                Merge::normal(TreeValue::File {
+                    id: file_id,
+                    executable: false,
+                    copy_id: jj_lib::backend::CopyId::placeholder(),
+                }),
+            );
+            builder
+                .write_tree()
+                .await
+                .unwrap_or_else(|err| panic!("write local bookmark tree: {err}"))
+        });
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime")
+        .block_on(async {
+            let mut tx = repo.start_transaction();
+            let new_commit = tx
+                .repo_mut()
+                .new_commit(vec![bookmark_commit.id().clone()], new_tree)
+                .set_description(format!("test: unpublished {scope} advance"))
+                .write()
+                .await
+                .unwrap_or_else(|err| panic!("write unpublished local commit `{scope}`: {err}"));
+            tx.repo_mut().set_local_bookmark_target(
+                bookmark_name.as_ref(),
+                jj_lib::op_store::RefTarget::normal(new_commit.id().clone()),
+            );
+            tx.repo_mut()
+                .set_wc_commit(workspace.workspace_name().to_owned(), new_commit.id().clone())
+                .expect("set working copy to unpublished commit");
+            let repo = tx
+                .commit(format!("test: advance local bookmark {scope} without push"))
+                .await
+                .unwrap_or_else(|err| panic!("commit unpublished local bookmark advance `{scope}`: {err}"));
+            workspace
+                .check_out(repo.op_id().clone(), None, &new_commit)
+                .await
+                .unwrap_or_else(|err| panic!("check out unpublished local commit `{scope}`: {err}"));
+        });
 }
 
 #[test]
@@ -633,6 +752,59 @@ fn pending_joining_existing_remote_creates_new_scope_and_first_commit_works() {
     assert_eq!(
         windows_machine.bookmark_file_contents("windows", ".gitconfig"),
         "[user]\nname = \"Win\"\n"
+    );
+}
+
+#[test]
+fn pending_fetch_stops_when_remote_would_reset_local_bookmark() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(init_output.status.success(), "{}", render_output(&init_output));
+
+    machine.write_repo_file(".gitconfig", "[user]\nname = \"Base\"\n");
+    let base_output = machine.commit_all("all", "seed base gitconfig");
+    assert!(base_output.status.success(), "{}", render_output(&base_output));
+
+    let remote_clone = harness.root_dir.join("remote-reset");
+    clone_remote_to(&remote_clone, &harness.remote_dir);
+
+    advance_local_bookmark_without_push(
+        &machine,
+        "all",
+        ".gitconfig",
+        "[user]\nname = \"Local unpublished\"\n",
+    );
+    let local_before = machine.bookmark_revision("all");
+
+    let reset_target = git_rev_parse(&remote_clone, "HEAD");
+    let push = git_in(&remote_clone, &["push", "origin", &format!("{reset_target}:all")]);
+    assert!(push.status.success(), "{}", render_output(&push));
+
+    let sync_output = machine.sync();
+    assert_eq!(sync_output.status.code(), Some(1), "{}", render_output(&sync_output));
+    let stderr = String::from_utf8_lossy(&sync_output.stderr);
+    assert_standalone_error(
+        &stderr,
+        &[
+            "fetch would overwrite local bookmark",
+            "must not move a local bookmark backward or sideways",
+            "discard or bypass unpublished local state",
+            "bookmark: all",
+            &local_before,
+            &reset_target,
+        ],
+        &sync_output,
+    );
+    assert_eq!(
+        machine.bookmark_revision("all"),
+        local_before,
+        "unsafe fetch must leave the local bookmark untouched"
+    );
+    assert_eq!(
+        machine.bookmark_file_contents("all", ".gitconfig"),
+        "[user]\nname = \"Local unpublished\"\n"
     );
 }
 

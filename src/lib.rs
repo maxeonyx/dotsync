@@ -1337,6 +1337,7 @@ fn sync_local_bookmarks_from_remote(
                 .map(|id| (RefNameBuf::from(name.as_str()), id.clone()))
         })
         .collect();
+
     for (name, id) in updates {
         mut_repo.set_local_bookmark_target(name.as_ref(), RefTarget::normal(id));
     }
