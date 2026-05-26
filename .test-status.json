@@ -9,6 +9,7 @@
     "dotsync::user_flows$dirty_working_copy_json_contract_stays_compatible": "passing",
     "dotsync::user_flows$drift_detected_human_error_stands_alone": "passing",
     "dotsync::user_flows$drift_detected_json_contract_stays_compatible": "passing",
+    "dotsync::user_flows$init_creates_no_visible_git_directory": "pending",
     "dotsync::user_flows$invalid_scope_human_error_stands_alone": "passing",
     "dotsync::user_flows$invalid_state_file_returns_clear_error": "passing",
     "dotsync::user_flows$invalid_sync_state_human_error_stands_alone": "passing",
@@ -29,6 +30,5 @@
     "dotsync::user_flows$scoped_deletion_only_affects_homes_where_scope_applies": "passing",
     "dotsync::user_flows$sync_uses_state_machine_scope_even_if_checkout_changes": "passing",
     "dotsync::user_flows$tdd_ratchet_gatekeeper": "passing"
-  },
-  "baseline": "c1136cda3733e0bdce76a4fbc38d00dc6cc35e43"
+  }
 }

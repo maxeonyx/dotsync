@@ -458,6 +458,28 @@ fn advance_local_bookmark_without_push(
 }
 
 #[test]
+fn init_creates_no_visible_git_directory() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    assert!(
+        !machine.repo_dir.join(".git").exists(),
+        "dotsync init should not create a .git directory — agents must not see git and assume they can commit directly"
+    );
+    assert!(
+        machine.repo_dir.join(".jj").exists(),
+        "dotsync init should create a .jj directory for internal state"
+    );
+}
+
+#[test]
 fn plain_dotsync_rejects_working_copy_changes() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
