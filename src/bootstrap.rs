@@ -1,0 +1,290 @@
+use std::collections::HashMap;
+
+use jj_lib::op_store::RefTarget;
+use jj_lib::ref_name::RefNameBuf;
+use jj_lib::repo::Repo as _;
+use jj_lib::workspace::Workspace;
+
+use crate::cascade::{build_cascade_plan, execute_cascade_plan, CascadeCommand, CascadeOutcome, ScopeHeads};
+use crate::config::{load_config, render_config, write_config, DotsyncPaths};
+use crate::error::{jj_error, DotsyncError};
+use crate::machine::{detect_machine, MachineIdentity};
+use crate::repo::{
+    add_origin_remote, checkout_workspace_to_scope, default_settings, fetch_origin, load_repo,
+    load_workspace, push_scope_updates, snapshot_working_copy,
+};
+use crate::scope_graph::ScopeGraph;
+use crate::sync::{sync_repo_to_home, SyncOptions, SyncReport};
+
+#[derive(Debug, Clone, Default)]
+pub struct InitReport {
+    pub current_scope: String,
+    pub created_scopes: Vec<String>,
+    pub sync: SyncReport,
+}
+
+pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, DotsyncError> {
+    if paths.repo_root.exists() {
+        return Err(DotsyncError::RepoAlreadyExists {
+            path: paths.repo_root.clone(),
+        });
+    }
+    if let Some(parent) = paths.repo_root.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| DotsyncError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    std::fs::create_dir_all(&paths.repo_root).map_err(|source| DotsyncError::Io {
+        path: paths.repo_root.clone(),
+        source,
+    })?;
+
+    let settings = default_settings()?;
+    let (_workspace, repo) = Workspace::init_internal_git(&settings, &paths.repo_root)
+        .await
+        .map_err(|err| jj_error(format!("init repo: {err}")))?;
+    let _repo = add_origin_remote(repo, remote_url).await?;
+    let mut workspace = load_workspace(paths)?;
+    let repo = workspace
+        .repo_loader()
+        .load_at_head()
+        .await
+        .map_err(|err| jj_error(format!("reload repo after adding origin: {err}")))?;
+    let repo = fetch_origin(repo).await?;
+    let identity = detect_machine()?;
+
+    let remote_empty = repo.view().all_remote_bookmarks().next().is_none();
+    let (created_scopes, current_scope) = if remote_empty {
+        bootstrap_empty_remote(paths, &mut workspace, &identity).await?
+    } else {
+        join_existing_remote(paths, &mut workspace, repo, &identity).await?
+    };
+
+    let sync = sync_repo_to_home(
+        paths,
+        SyncOptions { force: true },
+        &[],
+        Some(&current_scope),
+    )
+    .await?;
+    push_scope_updates(paths).await?;
+
+    Ok(InitReport {
+        current_scope,
+        created_scopes,
+        sync,
+    })
+}
+
+pub(crate) async fn bootstrap_empty_remote(
+    paths: &DotsyncPaths,
+    workspace: &mut Workspace,
+    identity: &MachineIdentity,
+) -> Result<(Vec<String>, String), DotsyncError> {
+    let graph = ScopeGraph::new(HashMap::from([
+        ("all".to_string(), vec![]),
+        (identity.os_scope.clone(), vec!["all".to_string()]),
+        (
+            identity.machine_scope.clone(),
+            vec![identity.os_scope.clone()],
+        ),
+    ]))?;
+    write_config(paths, &render_config(&graph))?;
+
+    let snapshot = snapshot_working_copy(paths).await?;
+    let repo = workspace
+        .repo_loader()
+        .load_at_head()
+        .await
+        .map_err(|err| jj_error(format!("reload repo after init snapshot: {err}")))?;
+    let root_commit = repo.store().root_commit();
+
+    let mut tx = repo.start_transaction();
+    let all_commit = tx
+        .repo_mut()
+        .new_commit(vec![root_commit.id().clone()], snapshot.tree)
+        .set_description("dotsync: initialize all scope")
+        .write()
+        .await
+        .map_err(|err| jj_error(format!("write all scope commit: {err}")))?;
+    tx.repo_mut()
+        .set_local_bookmark_target("all".as_ref(), RefTarget::normal(all_commit.id().clone()));
+
+    let os_commit = tx
+        .repo_mut()
+        .new_commit(vec![all_commit.id().clone()], all_commit.tree())
+        .set_description(format!("dotsync: create {} scope", identity.os_scope))
+        .write()
+        .await
+        .map_err(|err| jj_error(format!("write os scope commit: {err}")))?;
+    tx.repo_mut().set_local_bookmark_target(
+        RefNameBuf::from(identity.os_scope.as_str()).as_ref(),
+        RefTarget::normal(os_commit.id().clone()),
+    );
+
+    let machine_commit = tx
+        .repo_mut()
+        .new_commit(vec![os_commit.id().clone()], os_commit.tree())
+        .set_description(format!("dotsync: create {} scope", identity.machine_scope))
+        .write()
+        .await
+        .map_err(|err| jj_error(format!("write machine scope commit: {err}")))?;
+    tx.repo_mut().set_local_bookmark_target(
+        RefNameBuf::from(identity.machine_scope.as_str()).as_ref(),
+        RefTarget::normal(machine_commit.id().clone()),
+    );
+    tx.repo_mut()
+        .set_wc_commit(
+            workspace.workspace_name().to_owned(),
+            machine_commit.id().clone(),
+        )
+        .map_err(|err| jj_error(format!("set init working copy commit: {err}")))?;
+    let repo = tx
+        .commit("dotsync: initialize scopes")
+        .await
+        .map_err(|err| jj_error(format!("commit init scopes: {err}")))?;
+
+    workspace
+        .check_out(repo.op_id().clone(), None, &machine_commit)
+        .await
+        .map_err(|err| jj_error(format!("check out machine scope: {err}")))?;
+
+    Ok((
+        vec![
+            "all".to_string(),
+            identity.os_scope.clone(),
+            identity.machine_scope.clone(),
+        ],
+        identity.machine_scope.clone(),
+    ))
+}
+
+pub(crate) async fn join_existing_remote(
+    paths: &DotsyncPaths,
+    workspace: &mut Workspace,
+    _repo: std::sync::Arc<jj_lib::repo::ReadonlyRepo>,
+    identity: &MachineIdentity,
+) -> Result<(Vec<String>, String), DotsyncError> {
+    checkout_workspace_to_scope(paths, workspace, "all").await?;
+    let graph = load_config(paths).await?.graph;
+
+    let mut parents = graph.parents.clone();
+    let mut created_scopes = Vec::new();
+    if !parents.contains_key(&identity.os_scope) {
+        parents.insert(identity.os_scope.clone(), vec!["all".to_string()]);
+        created_scopes.push(identity.os_scope.clone());
+    }
+    if !parents.contains_key(&identity.machine_scope) {
+        parents.insert(
+            identity.machine_scope.clone(),
+            vec![identity.os_scope.clone()],
+        );
+        created_scopes.push(identity.machine_scope.clone());
+    }
+
+    if created_scopes.is_empty() {
+        checkout_workspace_to_scope(paths, workspace, &identity.machine_scope).await?;
+        return Ok((created_scopes, identity.machine_scope.clone()));
+    }
+
+    let updated_graph = ScopeGraph::new(parents)?;
+    write_config(paths, &render_config(&updated_graph))?;
+
+    let snapshot = snapshot_working_copy(paths).await?;
+    let repo = load_repo(workspace).await?;
+
+    let mut tx = repo.start_transaction();
+    let mut scope_heads = ScopeHeads::load_existing(tx.repo_mut().base_repo(), &updated_graph)?;
+    let all_head = scope_heads.require("all")?;
+
+    let config_commit = tx
+        .repo_mut()
+        .new_commit(vec![all_head.id().clone()], snapshot.tree)
+        .set_description("dotsync: update scope config")
+        .write()
+        .await
+        .map_err(|err| jj_error(format!("write config update commit: {err}")))?;
+    tx.repo_mut().set_local_bookmark_target(
+        "all".as_ref(),
+        RefTarget::normal(config_commit.id().clone()),
+    );
+    scope_heads.update("all".to_string(), config_commit.clone());
+
+    let cascade_command = CascadeCommand {
+        root_scope: "all".to_string(),
+        description: "dotsync: cascade init config".to_string(),
+        original_scope: "all".to_string(),
+        machine_scope: identity.machine_scope.clone(),
+    };
+    let cascade_plan = build_cascade_plan(&updated_graph, &scope_heads, &cascade_command);
+    let descendant_scopes = match execute_cascade_plan(
+        tx.repo_mut(),
+        &mut scope_heads,
+        &cascade_plan,
+        &cascade_command,
+    )
+    .await?
+    {
+        CascadeOutcome::Completed(success) => success.progress.completed_scopes,
+        CascadeOutcome::Paused(_pause) => {
+            return Err(DotsyncError::Jj {
+                message: "unexpected conflict while cascading init config".to_string(),
+            })
+        }
+    };
+
+    if !scope_heads.contains(&identity.os_scope) {
+        let parent = scope_heads.require("all")?;
+        let commit = tx
+            .repo_mut()
+            .new_commit(vec![parent.id().clone()], parent.tree())
+            .set_description(format!("dotsync: create {} scope", identity.os_scope))
+            .write()
+            .await
+            .map_err(|err| jj_error(format!("write new os scope: {err}")))?;
+        tx.repo_mut().set_local_bookmark_target(
+            RefNameBuf::from(identity.os_scope.as_str()).as_ref(),
+            RefTarget::normal(commit.id().clone()),
+        );
+        scope_heads.update(identity.os_scope.clone(), commit);
+    }
+
+    if !scope_heads.contains(&identity.machine_scope) {
+        let parent = scope_heads.require(&identity.os_scope)?;
+        let commit = tx
+            .repo_mut()
+            .new_commit(vec![parent.id().clone()], parent.tree())
+            .set_description(format!("dotsync: create {} scope", identity.machine_scope))
+            .write()
+            .await
+            .map_err(|err| jj_error(format!("write new machine scope: {err}")))?;
+        tx.repo_mut().set_local_bookmark_target(
+            RefNameBuf::from(identity.machine_scope.as_str()).as_ref(),
+            RefTarget::normal(commit.id().clone()),
+        );
+        scope_heads.update(identity.machine_scope.clone(), commit);
+    }
+
+    let machine_commit = scope_heads.require(&identity.machine_scope)?;
+    tx.repo_mut()
+        .set_wc_commit(
+            workspace.workspace_name().to_owned(),
+            machine_commit.id().clone(),
+        )
+        .map_err(|err| jj_error(format!("set join working copy commit: {err}")))?;
+    let repo = tx
+        .commit("dotsync: initialize machine scope")
+        .await
+        .map_err(|err| jj_error(format!("commit join scope changes: {err}")))?;
+    workspace
+        .check_out(repo.op_id().clone(), None, &machine_commit)
+        .await
+        .map_err(|err| jj_error(format!("check out joined machine scope: {err}")))?;
+
+    let mut created = descendant_scopes;
+    created.extend(created_scopes);
+    created.sort();
+    created.dedup();
+    Ok((created, identity.machine_scope.clone()))
+}
