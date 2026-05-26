@@ -9,7 +9,7 @@
     "dotsync::user_flows$dirty_working_copy_json_contract_stays_compatible": "passing",
     "dotsync::user_flows$drift_detected_human_error_stands_alone": "passing",
     "dotsync::user_flows$drift_detected_json_contract_stays_compatible": "passing",
-    "dotsync::user_flows$init_creates_no_visible_git_directory": "pending",
+    "dotsync::user_flows$init_creates_no_visible_git_directory": "passing",
     "dotsync::user_flows$invalid_scope_human_error_stands_alone": "passing",
     "dotsync::user_flows$invalid_state_file_returns_clear_error": "passing",
     "dotsync::user_flows$invalid_sync_state_human_error_stands_alone": "passing",

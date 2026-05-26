@@ -383,9 +383,9 @@ pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, 
     })?;
 
     let settings = default_settings()?;
-    let (_workspace, repo) = Workspace::init_colocated_git(&settings, &paths.repo_root)
+    let (_workspace, repo) = Workspace::init_internal_git(&settings, &paths.repo_root)
         .await
-        .map_err(|err| jj_error(format!("init colocated repo: {err}")))?;
+        .map_err(|err| jj_error(format!("init repo: {err}")))?;
     let _repo = add_origin_remote(repo, remote_url).await?;
     let mut workspace = load_workspace(paths)?;
     let repo = workspace
