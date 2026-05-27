@@ -1,14 +1,14 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
     commit_and_sync, continue_after_conflict, init, sync, CommandOutcome, CommitOptions,
-    CommitSelection, DotsyncError, DotsyncPaths, ErrorReport, FileDrift, SyncOptions,
+    CommitSelection, DotsyncError, DotsyncPaths, FileDrift, SyncOptions,
 };
 mod render;
 use serde_json::json;
 use std::env;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum OutputFormat {
     Human,
     Json,
@@ -82,18 +82,18 @@ struct UsageError {
     message: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum CliOutput {
     Success(SuccessOutput),
     Conflict(dotsync::CascadePause),
-    Error(ErrorReport),
+    Error(DotsyncError),
     Usage(UsageError),
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let output_format = cli.output_format.clone();
+    let output_format = cli.output_format;
     let outcome = match Action::try_from(cli) {
         Ok(action) => dispatch(action).await,
         Err(error) => Ok(CliOutput::Usage(error)),
@@ -101,7 +101,7 @@ async fn main() {
 
     let exit_code = match outcome {
         Ok(output) => emit_output(&output_format, output),
-        Err(error) => emit_output(&output_format, CliOutput::Error(error.to_error_report())),
+        Err(error) => emit_output(&output_format, CliOutput::Error(error)),
     };
     std::process::exit(exit_code);
 }
@@ -312,11 +312,12 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
         }
         CliOutput::Error(error) => {
             eprintln!("{}", render::render_error_human(&error));
-            if !error.drifts.is_empty() {
-                print_drifts(&error.drifts);
+            let error_report = error.to_error_report();
+            if !error_report.drifts.is_empty() {
+                print_drifts(&error_report.drifts);
             }
             if matches!(output_format, OutputFormat::Json) {
-                println!("{}", render::render_error_json(&error));
+                println!("{}", render::render_error_json(&error_report));
             }
             1
         }
