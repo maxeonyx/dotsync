@@ -12,7 +12,8 @@ use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo as _};
 use jj_lib::rewrite::merge_commit_trees;
 use serde::{Deserialize, Serialize};
 
-use crate::{jj_error, DotsyncError, ScopeGraph};
+use crate::error::{jj_error, DotsyncError};
+use crate::scope_graph::ScopeGraph;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CascadeCommand {

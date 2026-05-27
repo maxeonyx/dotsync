@@ -42,6 +42,25 @@ struct Cli {
     paths: Vec<PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+enum Action {
+    Sync {
+        force: bool,
+    },
+    Commit {
+        scope: String,
+        message: String,
+        force: bool,
+        selection: CommitSelection,
+    },
+    Init {
+        remote_url: String,
+    },
+    Continue {
+        force: bool,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Clone or join a dotsync remote
@@ -74,47 +93,9 @@ enum CliOutput {
 async fn main() {
     let cli = Cli::parse();
     let output_format = cli.output_format.clone();
-
-    let outcome = match (cli.command, cli.scope, cli.message) {
-        (Some(Command::Init { remote_url }), None, None) => run_init(remote_url).await,
-        (Some(Command::Continue), None, None) => run_continue(cli.force).await,
-        (None, None, None) if !cli.all && cli.paths.is_empty() => run_sync(cli.force).await,
-        (None, Some(scope), Some(message)) => {
-            if cli.all && !cli.paths.is_empty() {
-                Ok(CliOutput::Usage(UsageError {
-                    message: "commit mode accepts explicit paths or --all, not both".to_string(),
-                }))
-            } else if !cli.all && cli.paths.is_empty() {
-                Ok(CliOutput::Usage(UsageError {
-                    message: "commit mode requires explicit file/directory paths or --all"
-                        .to_string(),
-                }))
-            } else {
-                let selection = if cli.all {
-                    CommitSelection::All
-                } else {
-                    CommitSelection::Paths(cli.paths)
-                };
-                run_commit(scope, message, cli.force, selection).await
-            }
-        }
-        (None, Some(_), None) => Ok(CliOutput::Usage(UsageError {
-            message: "<scope> requires -m/--message".to_string(),
-        })),
-        (None, None, None) => Ok(CliOutput::Usage(UsageError {
-            message: "sync mode does not accept commit path arguments or --all".to_string(),
-        })),
-        (Some(Command::Init { .. }), Some(_), _) | (Some(Command::Init { .. }), None, Some(_)) => {
-            Ok(CliOutput::Usage(UsageError {
-                message: "`init` does not take scope or message arguments".to_string(),
-            }))
-        }
-        (Some(Command::Continue), Some(_), _) | (Some(Command::Continue), None, Some(_)) => {
-            Ok(CliOutput::Usage(UsageError {
-                message: "`continue` does not take scope or message arguments".to_string(),
-            }))
-        }
-        (None, None, Some(_)) => unreachable!("clap requires scope when message is set"),
+    let outcome = match Action::try_from(cli) {
+        Ok(action) => dispatch(action).await,
+        Err(error) => Ok(CliOutput::Usage(error)),
     };
 
     let exit_code = match outcome {
@@ -122,6 +103,75 @@ async fn main() {
         Err(error) => emit_output(&output_format, CliOutput::Error(error.to_error_report())),
     };
     std::process::exit(exit_code);
+}
+
+impl TryFrom<Cli> for Action {
+    type Error = UsageError;
+
+    fn try_from(cli: Cli) -> Result<Self, Self::Error> {
+        match (cli.command, cli.scope, cli.message) {
+            (Some(Command::Init { remote_url }), None, None) => Ok(Self::Init { remote_url }),
+            (Some(Command::Continue), None, None) => Ok(Self::Continue { force: cli.force }),
+            (None, None, None) if !cli.all && cli.paths.is_empty() => {
+                Ok(Self::Sync { force: cli.force })
+            }
+            (None, Some(scope), Some(message)) => {
+                let selection = match (cli.all, cli.paths.is_empty()) {
+                    (true, false) => {
+                        return Err(usage_error(
+                            "commit mode accepts explicit paths or --all, not both",
+                        ));
+                    }
+                    (false, true) => {
+                        return Err(usage_error(
+                            "commit mode requires explicit file/directory paths or --all",
+                        ));
+                    }
+                    (true, true) => CommitSelection::All,
+                    (false, false) => CommitSelection::Paths(cli.paths),
+                };
+
+                Ok(Self::Commit {
+                    scope,
+                    message,
+                    force: cli.force,
+                    selection,
+                })
+            }
+            (None, Some(_), None) => Err(usage_error("<scope> requires -m/--message")),
+            (None, None, None) => Err(usage_error(
+                "sync mode does not accept commit path arguments or --all",
+            )),
+            (Some(Command::Init { .. }), Some(_), _) | (Some(Command::Init { .. }), None, Some(_)) => {
+                Err(usage_error("`init` does not take scope or message arguments"))
+            }
+            (Some(Command::Continue), Some(_), _)
+            | (Some(Command::Continue), None, Some(_)) => Err(usage_error(
+                "`continue` does not take scope or message arguments",
+            )),
+            (None, None, Some(_)) => unreachable!("clap requires scope when message is set"),
+        }
+    }
+}
+
+async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
+    match action {
+        Action::Sync { force } => run_sync(force).await,
+        Action::Commit {
+            scope,
+            message,
+            force,
+            selection,
+        } => run_commit(scope, message, force, selection).await,
+        Action::Init { remote_url } => run_init(remote_url).await,
+        Action::Continue { force } => run_continue(force).await,
+    }
+}
+
+fn usage_error(message: &str) -> UsageError {
+    UsageError {
+        message: message.to_string(),
+    }
 }
 
 async fn run_init(remote_url: String) -> Result<CliOutput, DotsyncError> {
