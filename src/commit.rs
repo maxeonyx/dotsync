@@ -83,6 +83,12 @@ pub async fn commit_and_sync(
             project_selected_paths(&snapshot.tree, &base_tree, &selected_paths).await?
         }
     };
+    let unselected_paths = snapshot
+        .changed_paths
+        .iter()
+        .filter(|path| !selected_paths.contains(path))
+        .cloned()
+        .collect::<Vec<_>>();
 
     match commit_snapshot_and_apply_cascade(
         paths,
@@ -96,23 +102,11 @@ pub async fn commit_and_sync(
     .await?
     {
         CommandOutcome::Conflict(pause) => {
-            let unselected_paths = snapshot
-                .changed_paths
-                .iter()
-                .filter(|path| !selected_paths.contains(path))
-                .cloned()
-                .collect::<Vec<_>>();
             restore_working_copy_paths(paths, &snapshot.tree, &unselected_paths).await?;
             Ok(CommandOutcome::Conflict(pause))
         }
         CommandOutcome::Success(cascaded_scopes) => {
             checkout_workspace_to_scope(paths, &mut workspace, &session.current_scope).await?;
-            let unselected_paths = snapshot
-                .changed_paths
-                .iter()
-                .filter(|path| !selected_paths.contains(path))
-                .cloned()
-                .collect::<Vec<_>>();
             restore_working_copy_paths(paths, &snapshot.tree, &unselected_paths).await?;
             let sync = sync_repo_to_home(
                 paths,

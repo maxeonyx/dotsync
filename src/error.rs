@@ -189,7 +189,21 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
             "working copy has uncommitted changes in {count} path(s)"
         )),
         DotsyncError::NoPausedCascade => Some("no cascade is currently paused".to_string()),
-        _ => None,
+        DotsyncError::NotImplemented(_)
+        | DotsyncError::Io { .. }
+        | DotsyncError::ConfigParse { .. }
+        | DotsyncError::MissingParent { .. }
+        | DotsyncError::ScopeCycle { .. }
+        | DotsyncError::NoCurrentScope
+        | DotsyncError::MissingScopeBookmark { .. }
+        | DotsyncError::CascadeState { .. }
+        | DotsyncError::DriftDetected { .. }
+        | DotsyncError::RepoAlreadyExists { .. }
+        | DotsyncError::MissingHostname
+        | DotsyncError::Jj { .. }
+        | DotsyncError::CommitSelectionRequired
+        | DotsyncError::ConflictingCommitSelection
+        | DotsyncError::CommitSelectionEmpty => None,
     }
 }
 
