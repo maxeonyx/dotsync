@@ -110,11 +110,17 @@ The cost: to contribute a system change, you must first recreate it in the repo.
 
 An open question: some config files may end up with sections that shouldn't be checked in (e.g. secrets injected by an application). We don't have a strategy for this yet. Hopefully it doesn't come up, but if it does we'll need something — possibly `.gitignore` patterns for sections, or splitting the file.
 
-### Drift detection without tracking state
+### Drift detection and sync state
 
-An early design considered tracking "last synced commit hash" to distinguish "repo advanced" from "system drifted." But this is unnecessary complexity. The check is just: does the system file match repo HEAD? If yes, nothing to do. If no, show a diff. The diff itself tells you whether it's a repo change to apply or unexpected drift.
+dotsync tracks a minimal machine-local sync state file recording which machine scope was last synced and at which commit. This enables two things:
 
-We briefly worried about the case where you edit a file in the repo, sync it, edit it again, and sync again — the second sync would see the system (matching the first edit) differs from the repo (now with the second edit). But this isn't a problem because jj auto-commits the working copy before comparison. The repo HEAD always reflects the latest intended state.
+1. **Deletion semantics** — when a file is removed from the repo, dotsync can detect that it was previously synced to home and should be removed. Without state, dotsync couldn't distinguish "this file was never managed" from "this file was managed and was removed."
+
+2. **Drift attribution** — comparing home state against the last-synced revision rather than repo HEAD would allow distinguishing "repo advanced elsewhere" from "home drifted locally." (This distinction is not yet fully implemented but the state supports it.)
+
+The sync state file path is configured in `config.toml` under `[sync] state_path` and lives in the home directory (not the repo). It is never synced as a managed dotfile.
+
+An earlier design rejected state tracking as unnecessary complexity. That was wrong — deletion semantics require it. The cost is one small JSON file per machine; the benefit is correct file removal and a path toward smarter drift handling.
 
 ## The jj decision
 
