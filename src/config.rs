@@ -3,8 +3,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
 use jj_lib::repo::Repo as _;
+use serde::Deserialize;
 
 use crate::error::{jj_error, DotsyncError};
 use crate::repo::{load_scope_commit, load_workspace, read_tree_entry_bytes};

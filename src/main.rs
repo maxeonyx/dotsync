@@ -142,13 +142,15 @@ impl TryFrom<Cli> for Action {
             (None, None, None) => Err(usage_error(
                 "sync mode does not accept commit path arguments or --all",
             )),
-            (Some(Command::Init { .. }), Some(_), _) | (Some(Command::Init { .. }), None, Some(_)) => {
-                Err(usage_error("`init` does not take scope or message arguments"))
-            }
-            (Some(Command::Continue), Some(_), _)
-            | (Some(Command::Continue), None, Some(_)) => Err(usage_error(
-                "`continue` does not take scope or message arguments",
+            (Some(Command::Init { .. }), Some(_), _)
+            | (Some(Command::Init { .. }), None, Some(_)) => Err(usage_error(
+                "`init` does not take scope or message arguments",
             )),
+            (Some(Command::Continue), Some(_), _) | (Some(Command::Continue), None, Some(_)) => {
+                Err(usage_error(
+                    "`continue` does not take scope or message arguments",
+                ))
+            }
             (None, None, Some(_)) => unreachable!("clap requires scope when message is set"),
         }
     }

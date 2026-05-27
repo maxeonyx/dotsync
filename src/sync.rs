@@ -181,7 +181,8 @@ pub(crate) async fn sync_repo_to_home(
                     state.last_synced_revision.hex()
                 ),
             })?;
-        let previous_entries = collect_managed_tree_entries(&previous_commit.tree(), &internal_paths)?;
+        let previous_entries =
+            collect_managed_tree_entries(&previous_commit.tree(), &internal_paths)?;
         for removed_path in previous_entries
             .keys()
             .filter(|path| !repo_entries.contains_key(*path))
@@ -221,12 +222,14 @@ pub(crate) fn load_sync_state(
         });
     }
     let last_synced_revision =
-        CommitId::try_from_hex(&payload.last_synced_revision).ok_or_else(|| DotsyncError::SyncState {
-            path: path.clone(),
-            message: format!(
-                "last_synced_revision `{}` is not valid hex",
-                payload.last_synced_revision
-            ),
+        CommitId::try_from_hex(&payload.last_synced_revision).ok_or_else(|| {
+            DotsyncError::SyncState {
+                path: path.clone(),
+                message: format!(
+                    "last_synced_revision `{}` is not valid hex",
+                    payload.last_synced_revision
+                ),
+            }
         })?;
     Ok(Some(SyncState {
         machine_scope: payload.machine_scope,
@@ -271,7 +274,10 @@ pub(crate) fn remove_home_path(paths: &DotsyncPaths, relative: &Path) -> Result<
     }
 }
 
-pub(crate) fn remove_empty_parent_dirs(paths: &DotsyncPaths, path: &Path) -> Result<(), DotsyncError> {
+pub(crate) fn remove_empty_parent_dirs(
+    paths: &DotsyncPaths,
+    path: &Path,
+) -> Result<(), DotsyncError> {
     let mut current = path.parent();
     while let Some(dir) = current {
         if dir == paths.home_dir {

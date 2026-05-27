@@ -1,15 +1,9 @@
-use std::collections::BTreeSet;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use jj_lib::backend::TreeValue;
-use jj_lib::merged_tree_builder::MergedTreeBuilder;
 use jj_lib::op_store::RefTarget;
-use jj_lib::ref_name::{RefNameBuf, WorkspaceNameBuf};
-use jj_lib::repo::{MutableRepo, ReadonlyRepo};
-use jj_lib::repo_path::RepoPathBuf;
+use jj_lib::ref_name::RefNameBuf;
+use jj_lib::repo::ReadonlyRepo;
 use jj_lib::workspace::Workspace;
 
 use crate::cascade::{
@@ -17,14 +11,17 @@ use crate::cascade::{
     enrich_pause_with_scope_dag, execute_cascade_plan, resume_cascade, CascadeCommand,
     CascadeOutcome, CascadePlan, CascadeStateStore, JsonCascadeStateStore, ScopeHeads,
 };
-use crate::config::{load_config, DotsyncPaths, DOTSYNC_CONFIG_RELATIVE_PATH};
+use crate::config::{load_config, DotsyncPaths};
 use crate::error::{jj_error, DotsyncError};
 use crate::repo::{
     checkout_workspace_to_commit, checkout_workspace_to_scope, fetch_origin, load_repo,
-    load_scope_commit, load_workspace, read_tree_entry_bytes, snapshot_working_copy,
+    load_scope_commit, load_workspace, project_selected_paths, restore_working_copy_paths,
+    set_working_copy_to_paused_conflict, snapshot_working_copy,
 };
 use crate::scope_graph::{is_ancestor_scope, ScopeGraph};
 use crate::sync::{sync_repo_to_home, SyncOptions, SyncReport};
+
+use self::selection::resolve_commit_selection;
 
 #[derive(Debug, Clone)]
 pub struct CommitOptions {
@@ -137,6 +134,7 @@ pub async fn commit_and_sync(
     }
 }
 
+// Continue flow: resume a previously paused cascade after conflicts are resolved.
 pub async fn continue_after_conflict(
     paths: &DotsyncPaths,
     _options: SyncOptions,
@@ -223,6 +221,7 @@ pub async fn continue_after_conflict(
     }
 }
 
+// Shared commit/cascade machinery used by both `commit` and `continue` flows.
 pub(crate) async fn prepare_commit_session(
     paths: &DotsyncPaths,
     target_scope: &str,
@@ -234,7 +233,8 @@ pub(crate) async fn prepare_commit_session(
         .await
         .map_err(|err| jj_error(format!("load repo at head: {err}")))?;
     let initial_graph = load_config(paths).await?.graph;
-    let current_scope = crate::repo::detect_current_scope(&initial_graph, &workspace, repo.as_ref())?;
+    let current_scope =
+        crate::repo::detect_current_scope(&initial_graph, &workspace, repo.as_ref())?;
 
     let _repo = fetch_origin(repo).await?;
     let graph = load_config(paths).await?.graph;
@@ -336,7 +336,8 @@ pub(crate) async fn commit_snapshot_and_apply_cascade(
                 &cascade_command.description,
             )
             .await?;
-            let paused_state = build_paused_state(&cascade_plan, &pause, &cascade_command, &scope_heads);
+            let paused_state =
+                build_paused_state(&cascade_plan, &pause, &cascade_command, &scope_heads);
             let repo = tx
                 .commit(format!("dotsync: {message}"))
                 .await
@@ -364,249 +365,144 @@ pub(crate) async fn commit_snapshot_and_apply_cascade(
     }
 }
 
-async fn create_temporary_conflict_commit(
-    mut_repo: &mut MutableRepo,
-    scope_heads: &ScopeHeads,
-    pause: &crate::cascade::CascadePause,
-    description: &str,
-) -> Result<jj_lib::commit::Commit, DotsyncError> {
-    let mut parents = vec![scope_heads.require(&pause.scope)?];
-    for parent_scope in &pause.parent_scopes {
-        parents.push(scope_heads.require(parent_scope)?);
-    }
-    let merged_tree = jj_lib::rewrite::merge_commit_trees(mut_repo, &parents)
-        .await
-        .map_err(|err| jj_error(format!("recreate conflict tree for {}: {err}", pause.scope)))?;
-    mut_repo
-        .new_commit(
-            parents.iter().map(|commit| commit.id().clone()).collect(),
-            merged_tree,
-        )
-        .set_description(description)
-        .write()
-        .await
-        .map_err(|err| {
-            jj_error(format!(
-                "write temporary conflict commit for {}: {err}",
-                pause.scope
-            ))
-        })
-}
-
-async fn set_working_copy_to_paused_conflict(
-    mut_repo: &mut MutableRepo,
-    scope_heads: &ScopeHeads,
-    workspace_name: WorkspaceNameBuf,
-    pause: &crate::cascade::CascadePause,
-    description: &str,
-) -> Result<jj_lib::commit::Commit, DotsyncError> {
-    let current_commit = create_temporary_conflict_commit(mut_repo, scope_heads, pause, description).await?;
-
-    mut_repo
-        .set_wc_commit(workspace_name, current_commit.id().clone())
-        .map_err(|err| jj_error(format!("set paused working copy commit: {err}")))?;
-    Ok(current_commit)
-}
-
-pub(crate) fn resolve_commit_selection(
-    paths: &DotsyncPaths,
-    changed_paths: &[PathBuf],
-    options: &CommitOptions,
-) -> Result<Vec<PathBuf>, DotsyncError> {
-    match &options.selection {
-        CommitSelection::All => {
-            if changed_paths.is_empty() {
-                return Err(DotsyncError::CommitSelectionEmpty);
-            }
-            validate_config_commit_scope(changed_paths, &options.scope)?;
-            Ok(changed_paths.to_vec())
-        }
-        CommitSelection::Paths(requested_paths) => {
-            if requested_paths.is_empty() {
-                return Err(DotsyncError::CommitSelectionRequired);
-            }
-
-            let normalized_paths = normalize_selected_repo_paths(paths, requested_paths, changed_paths)?;
-            let mut selected = changed_paths
-                .iter()
-                .filter(|changed| path_matches_selection(&normalized_paths, changed))
-                .cloned()
-                .collect::<Vec<_>>();
-            selected.sort();
-            selected.dedup();
-
-            if selected.is_empty() {
-                return Err(DotsyncError::CommitSelectionEmpty);
-            }
-
-            validate_config_commit_scope(&selected, &options.scope)?;
-            Ok(selected)
-        }
-    }
-}
-
-pub(crate) fn normalize_selected_repo_paths(
-    paths: &DotsyncPaths,
-    requested_paths: &[PathBuf],
-    changed_paths: &[PathBuf],
-) -> Result<Vec<PathBuf>, DotsyncError> {
-    let repo_root = fs::canonicalize(&paths.repo_root).map_err(|source| DotsyncError::Io {
-        path: paths.repo_root.clone(),
-        source,
-    })?;
-    let changed_set = changed_paths.iter().cloned().collect::<BTreeSet<_>>();
-    let mut normalized = Vec::with_capacity(requested_paths.len());
-
-    for requested in requested_paths {
-        let candidate = if requested.is_absolute() {
-            requested.clone()
-        } else {
-            paths.repo_root.join(requested)
-        };
-
-        let canonical = match fs::canonicalize(&candidate) {
-            Ok(path) => path,
-            Err(source) if source.kind() == io::ErrorKind::NotFound => {
-                let repo_relative = if requested.is_absolute() {
-                    requested
-                        .strip_prefix(&repo_root)
-                        .map(Path::to_path_buf)
-                        .map_err(|_| DotsyncError::CommitPathOutsideRepo {
-                            path: requested.clone(),
-                        })?
-                } else {
-                    requested.clone()
-                };
-
-                if changed_set.contains(&repo_relative) {
-                    normalized.push(repo_relative);
-                    continue;
-                }
-
-                return Err(DotsyncError::CommitPathMissing {
-                    path: requested.clone(),
-                });
-            }
-            Err(source) => {
-                return Err(DotsyncError::Io {
-                    path: candidate.clone(),
-                    source,
-                })
-            }
-        };
-
-        let relative = canonical.strip_prefix(&repo_root).map_err(|_| {
-            DotsyncError::CommitPathOutsideRepo {
-                path: requested.clone(),
-            }
-        })?;
-        normalized.push(relative.to_path_buf());
-    }
-
-    normalized.sort();
-    normalized.dedup();
-    Ok(normalized)
-}
-
-pub(crate) fn path_matches_selection(selected_paths: &[PathBuf], changed_path: &Path) -> bool {
-    selected_paths.iter().any(|selected| {
-        changed_path == selected || changed_path.starts_with(selected) || selected.starts_with(changed_path)
-    })
-}
-
-pub(crate) fn validate_config_commit_scope(
-    selected_paths: &[PathBuf],
-    scope: &str,
-) -> Result<(), DotsyncError> {
-    let config_path = PathBuf::from(DOTSYNC_CONFIG_RELATIVE_PATH);
-    if scope != "all"
-        && selected_paths
-            .iter()
-            .any(|path| path == &config_path || path.starts_with(&config_path))
-    {
-        return Err(DotsyncError::ConfigOnlyAllowedOnBaseScope {
-            config_path: DOTSYNC_CONFIG_RELATIVE_PATH.to_string(),
-            scope: scope.to_string(),
-        });
-    }
-    Ok(())
-}
-
-pub(crate) async fn project_selected_paths(
-    selected_tree: &jj_lib::merged_tree::MergedTree,
-    base_tree: &jj_lib::merged_tree::MergedTree,
-    selected_paths: &[PathBuf],
-) -> Result<jj_lib::merged_tree::MergedTree, DotsyncError> {
-    let mut builder = MergedTreeBuilder::new(base_tree.clone());
-    for path in selected_paths {
-        let repo_path =
-            RepoPathBuf::from_internal_string(path.to_string_lossy().replace('\\', "/"))
-                .map_err(|err| jj_error(format!("invalid repo path {}: {err}", path.display())))?;
-        let value = selected_tree
-            .path_value(repo_path.as_ref())
-            .map_err(|err| jj_error(format!("read selected path {}: {err}", path.display())))?;
-        builder.set_or_remove(repo_path, value);
-    }
-    builder
-        .write_tree()
-        .await
-        .map_err(|err| jj_error(format!("write selected tree: {err}")))
-}
-
-pub(crate) async fn restore_working_copy_paths(
-    paths: &DotsyncPaths,
-    snapshot_tree: &jj_lib::merged_tree::MergedTree,
-    restore_paths: &[PathBuf],
-) -> Result<(), DotsyncError> {
-    for path in restore_paths {
-        let repo_path = RepoPathBuf::from_internal_string(path.to_string_lossy().replace('\\', "/"))
-            .map_err(|err| jj_error(format!("invalid restore path {}: {err}", path.display())))?;
-        let value = snapshot_tree
-            .path_value(repo_path.as_ref())
-            .map_err(|err| jj_error(format!("read restore path {}: {err}", path.display())))?;
-        let system_path = paths.repo_root.join(path);
-        let resolved = value.into_resolved().map_err(|conflict| {
-            jj_error(format!(
-                "restore path {} is conflicted: {conflict:?}",
-                path.display()
-            ))
-        })?;
-
-        match resolved {
-            Some(TreeValue::Tree(_)) => {
-                fs::create_dir_all(&system_path).map_err(|source| DotsyncError::Io {
-                    path: system_path.clone(),
-                    source,
-                })?;
-            }
-            Some(value) => {
-                if let Some(parent) = system_path.parent() {
-                    fs::create_dir_all(parent).map_err(|source| DotsyncError::Io {
-                        path: parent.to_path_buf(),
-                        source,
-                    })?;
-                }
-                let contents = read_tree_entry_bytes(snapshot_tree.store(), path, &value).await?;
-                fs::write(&system_path, contents).map_err(|source| DotsyncError::Io {
-                    path: system_path,
-                    source,
-                })?;
-            }
-            None => match fs::remove_file(&system_path) {
-                Ok(()) => {}
-                Err(source) if source.kind() == io::ErrorKind::NotFound => {}
-                Err(source) => {
-                    return Err(DotsyncError::Io {
-                        path: system_path,
-                        source,
-                    })
-                }
-            },
-        }
-    }
-    Ok(())
-}
-
 fn cascade_state_store(paths: &DotsyncPaths) -> JsonCascadeStateStore {
     JsonCascadeStateStore::new(paths.repo_root.join(".jj/dotsync/cascade-state.json"))
+}
+
+mod selection {
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    use crate::config::{DotsyncPaths, DOTSYNC_CONFIG_RELATIVE_PATH};
+    use crate::error::DotsyncError;
+    use crate::{CommitOptions, CommitSelection};
+
+    pub(crate) fn resolve_commit_selection(
+        paths: &DotsyncPaths,
+        changed_paths: &[PathBuf],
+        options: &CommitOptions,
+    ) -> Result<Vec<PathBuf>, DotsyncError> {
+        match &options.selection {
+            CommitSelection::All => {
+                if changed_paths.is_empty() {
+                    return Err(DotsyncError::CommitSelectionEmpty);
+                }
+                validate_config_commit_scope(changed_paths, &options.scope)?;
+                Ok(changed_paths.to_vec())
+            }
+            CommitSelection::Paths(requested_paths) => {
+                if requested_paths.is_empty() {
+                    return Err(DotsyncError::CommitSelectionRequired);
+                }
+
+                let normalized_paths =
+                    normalize_selected_repo_paths(paths, requested_paths, changed_paths)?;
+                let mut selected = changed_paths
+                    .iter()
+                    .filter(|changed| path_matches_selection(&normalized_paths, changed))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                selected.sort();
+                selected.dedup();
+
+                if selected.is_empty() {
+                    return Err(DotsyncError::CommitSelectionEmpty);
+                }
+
+                validate_config_commit_scope(&selected, &options.scope)?;
+                Ok(selected)
+            }
+        }
+    }
+
+    fn normalize_selected_repo_paths(
+        paths: &DotsyncPaths,
+        requested_paths: &[PathBuf],
+        changed_paths: &[PathBuf],
+    ) -> Result<Vec<PathBuf>, DotsyncError> {
+        let repo_root = fs::canonicalize(&paths.repo_root).map_err(|source| DotsyncError::Io {
+            path: paths.repo_root.clone(),
+            source,
+        })?;
+        let changed_set = changed_paths.iter().cloned().collect::<BTreeSet<_>>();
+        let mut normalized = Vec::with_capacity(requested_paths.len());
+
+        for requested in requested_paths {
+            let candidate = if requested.is_absolute() {
+                requested.clone()
+            } else {
+                paths.repo_root.join(requested)
+            };
+
+            let canonical = match fs::canonicalize(&candidate) {
+                Ok(path) => path,
+                Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                    let repo_relative = if requested.is_absolute() {
+                        requested
+                            .strip_prefix(&repo_root)
+                            .map(Path::to_path_buf)
+                            .map_err(|_| DotsyncError::CommitPathOutsideRepo {
+                                path: requested.clone(),
+                            })?
+                    } else {
+                        requested.clone()
+                    };
+
+                    if changed_set.contains(&repo_relative) {
+                        normalized.push(repo_relative);
+                        continue;
+                    }
+
+                    return Err(DotsyncError::CommitPathMissing {
+                        path: requested.clone(),
+                    });
+                }
+                Err(source) => {
+                    return Err(DotsyncError::Io {
+                        path: candidate.clone(),
+                        source,
+                    });
+                }
+            };
+
+            let relative = canonical.strip_prefix(&repo_root).map_err(|_| {
+                DotsyncError::CommitPathOutsideRepo {
+                    path: requested.clone(),
+                }
+            })?;
+            normalized.push(relative.to_path_buf());
+        }
+
+        normalized.sort();
+        normalized.dedup();
+        Ok(normalized)
+    }
+
+    fn path_matches_selection(selected_paths: &[PathBuf], changed_path: &Path) -> bool {
+        selected_paths.iter().any(|selected| {
+            changed_path == selected
+                || changed_path.starts_with(selected)
+                || selected.starts_with(changed_path)
+        })
+    }
+
+    fn validate_config_commit_scope(
+        selected_paths: &[PathBuf],
+        scope: &str,
+    ) -> Result<(), DotsyncError> {
+        let config_path = PathBuf::from(DOTSYNC_CONFIG_RELATIVE_PATH);
+        if scope != "all"
+            && selected_paths
+                .iter()
+                .any(|path| path == &config_path || path.starts_with(&config_path))
+        {
+            return Err(DotsyncError::ConfigOnlyAllowedOnBaseScope {
+                config_path: DOTSYNC_CONFIG_RELATIVE_PATH.to_string(),
+                scope: scope.to_string(),
+            });
+        }
+        Ok(())
+    }
 }

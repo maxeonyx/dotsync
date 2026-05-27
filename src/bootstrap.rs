@@ -5,7 +5,9 @@ use jj_lib::ref_name::RefNameBuf;
 use jj_lib::repo::Repo as _;
 use jj_lib::workspace::Workspace;
 
-use crate::cascade::{build_cascade_plan, execute_cascade_plan, CascadeCommand, CascadeOutcome, ScopeHeads};
+use crate::cascade::{
+    build_cascade_plan, execute_cascade_plan, CascadeCommand, CascadeOutcome, ScopeHeads,
+};
 use crate::config::{load_config, render_config, write_config, DotsyncPaths};
 use crate::error::{jj_error, DotsyncError};
 use crate::machine::{detect_machine, MachineIdentity};

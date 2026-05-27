@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,9 +14,10 @@ use jj_lib::git::{
 use jj_lib::gitignore::GitIgnoreFile;
 use jj_lib::matchers::EverythingMatcher;
 use jj_lib::merge::MergedTreeValue;
+use jj_lib::merged_tree_builder::MergedTreeBuilder;
 use jj_lib::object_id::ObjectId;
 use jj_lib::op_store::RefTarget;
-use jj_lib::ref_name::RefNameBuf;
+use jj_lib::ref_name::{RefNameBuf, WorkspaceNameBuf};
 use jj_lib::refs::BookmarkPushUpdate;
 use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo as _, StoreFactories};
 use jj_lib::repo_path::RepoPathBuf;
@@ -159,12 +161,16 @@ pub(crate) fn sync_local_bookmarks_from_remote(
         if local_id == remote_id {
             continue;
         }
-        let local_is_ancestor = mut_repo.index().is_ancestor(local_id, remote_id).map_err(|err| {
-            jj_error(format!(
-                "check bookmark ancestry for {}: {err}",
-                name.as_str()
-            ))
-        })?;
+        let local_is_ancestor =
+            mut_repo
+                .index()
+                .is_ancestor(local_id, remote_id)
+                .map_err(|err| {
+                    jj_error(format!(
+                        "check bookmark ancestry for {}: {err}",
+                        name.as_str()
+                    ))
+                })?;
         if !local_is_ancestor {
             return Err(DotsyncError::FetchWouldOverwriteLocalBookmark {
                 bookmark: name.as_str().to_string(),
@@ -322,7 +328,10 @@ pub(crate) async fn snapshot_working_copy(
         .map_err(|err| jj_error(format!("finish working copy mutation: {err}")))?;
 
     let changed_paths = changed_repo_paths(&old_tree, &tree)?;
-    Ok(WorkingCopySnapshot { tree, changed_paths })
+    Ok(WorkingCopySnapshot {
+        tree,
+        changed_paths,
+    })
 }
 
 pub(crate) fn changed_repo_paths(
@@ -372,6 +381,128 @@ pub(crate) fn load_scope_commit(
     repo.store()
         .get_commit(&commit_id)
         .map_err(|err| jj_error(format!("load scope commit for {scope}: {err}")))
+}
+
+pub(crate) async fn create_temporary_conflict_commit(
+    mut_repo: &mut MutableRepo,
+    scope_heads: &crate::cascade::ScopeHeads,
+    pause: &crate::cascade::CascadePause,
+    description: &str,
+) -> Result<jj_lib::commit::Commit, DotsyncError> {
+    let mut parents = vec![scope_heads.require(&pause.scope)?];
+    for parent_scope in &pause.parent_scopes {
+        parents.push(scope_heads.require(parent_scope)?);
+    }
+    let merged_tree = jj_lib::rewrite::merge_commit_trees(mut_repo, &parents)
+        .await
+        .map_err(|err| jj_error(format!("recreate conflict tree for {}: {err}", pause.scope)))?;
+    mut_repo
+        .new_commit(
+            parents.iter().map(|commit| commit.id().clone()).collect(),
+            merged_tree,
+        )
+        .set_description(description)
+        .write()
+        .await
+        .map_err(|err| {
+            jj_error(format!(
+                "write temporary conflict commit for {}: {err}",
+                pause.scope
+            ))
+        })
+}
+
+pub(crate) async fn set_working_copy_to_paused_conflict(
+    mut_repo: &mut MutableRepo,
+    scope_heads: &crate::cascade::ScopeHeads,
+    workspace_name: WorkspaceNameBuf,
+    pause: &crate::cascade::CascadePause,
+    description: &str,
+) -> Result<jj_lib::commit::Commit, DotsyncError> {
+    let current_commit =
+        create_temporary_conflict_commit(mut_repo, scope_heads, pause, description).await?;
+
+    mut_repo
+        .set_wc_commit(workspace_name, current_commit.id().clone())
+        .map_err(|err| jj_error(format!("set paused working copy commit: {err}")))?;
+    Ok(current_commit)
+}
+
+pub(crate) async fn project_selected_paths(
+    selected_tree: &jj_lib::merged_tree::MergedTree,
+    base_tree: &jj_lib::merged_tree::MergedTree,
+    selected_paths: &[PathBuf],
+) -> Result<jj_lib::merged_tree::MergedTree, DotsyncError> {
+    let mut builder = MergedTreeBuilder::new(base_tree.clone());
+    for path in selected_paths {
+        let repo_path =
+            RepoPathBuf::from_internal_string(path.to_string_lossy().replace('\\', "/"))
+                .map_err(|err| jj_error(format!("invalid repo path {}: {err}", path.display())))?;
+        let value = selected_tree
+            .path_value(repo_path.as_ref())
+            .map_err(|err| jj_error(format!("read selected path {}: {err}", path.display())))?;
+        builder.set_or_remove(repo_path, value);
+    }
+    builder
+        .write_tree()
+        .await
+        .map_err(|err| jj_error(format!("write selected tree: {err}")))
+}
+
+pub(crate) async fn restore_working_copy_paths(
+    paths: &DotsyncPaths,
+    snapshot_tree: &jj_lib::merged_tree::MergedTree,
+    restore_paths: &[PathBuf],
+) -> Result<(), DotsyncError> {
+    for path in restore_paths {
+        let repo_path = RepoPathBuf::from_internal_string(
+            path.to_string_lossy().replace('\\', "/"),
+        )
+        .map_err(|err| jj_error(format!("invalid restore path {}: {err}", path.display())))?;
+        let value = snapshot_tree
+            .path_value(repo_path.as_ref())
+            .map_err(|err| jj_error(format!("read restore path {}: {err}", path.display())))?;
+        let system_path = paths.repo_root.join(path);
+        let resolved = value.into_resolved().map_err(|conflict| {
+            jj_error(format!(
+                "restore path {} is conflicted: {conflict:?}",
+                path.display()
+            ))
+        })?;
+
+        match resolved {
+            Some(TreeValue::Tree(_)) => {
+                fs::create_dir_all(&system_path).map_err(|source| DotsyncError::Io {
+                    path: system_path.clone(),
+                    source,
+                })?;
+            }
+            Some(value) => {
+                if let Some(parent) = system_path.parent() {
+                    fs::create_dir_all(parent).map_err(|source| DotsyncError::Io {
+                        path: parent.to_path_buf(),
+                        source,
+                    })?;
+                }
+                let contents = read_tree_entry_bytes(snapshot_tree.store(), path, &value).await?;
+                fs::write(&system_path, contents).map_err(|source| DotsyncError::Io {
+                    path: system_path,
+                    source,
+                })?;
+            }
+            None => match fs::remove_file(&system_path) {
+                Ok(()) => {}
+                Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(DotsyncError::Io {
+                        path: system_path,
+                        source,
+                    });
+                }
+            },
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn collect_managed_tree_entries(
