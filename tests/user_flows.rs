@@ -85,6 +85,12 @@ impl MachineEnvironment {
         self.run_dotsync(&[scope, "-m", message])
     }
 
+    fn commit_with_paths(&self, scope: &str, message: &str, paths: &[&str]) -> Output {
+        let mut args = vec![scope, "-m", message, "--"];
+        args.extend_from_slice(paths);
+        self.run_dotsync(&args)
+    }
+
     fn continue_command(&self) -> Output {
         self.run_dotsync(&["continue"])
     }
@@ -132,7 +138,10 @@ impl MachineEnvironment {
         PathBuf::from(
             read_bookmark_file_contents(self, "all", ".config/dotsync/config.toml")
                 .lines()
-                .find_map(|line| line.strip_prefix("state_path = \"").and_then(|rest| rest.strip_suffix('"')))
+                .find_map(|line| {
+                    line.strip_prefix("state_path = \"")
+                        .and_then(|rest| rest.strip_suffix('"'))
+                })
                 .expect("sync.state_path should be configured"),
         )
     }
@@ -174,10 +183,7 @@ fn load_repo_direct(repo_dir: &Path) -> Arc<jj_lib::repo::ReadonlyRepo> {
         })
 }
 
-fn bookmark_commit(
-    machine: &MachineEnvironment,
-    scope: &str,
-) -> jj_lib::commit::Commit {
+fn bookmark_commit(machine: &MachineEnvironment, scope: &str) -> jj_lib::commit::Commit {
     let repo = load_repo_direct(&machine.repo_dir);
     let commit_id = repo
         .view()
@@ -190,7 +196,11 @@ fn bookmark_commit(
         .unwrap_or_else(|err| panic!("load bookmark commit `{scope}`: {err}"))
 }
 
-fn read_bookmark_file_contents(machine: &MachineEnvironment, scope: &str, relative: &str) -> String {
+fn read_bookmark_file_contents(
+    machine: &MachineEnvironment,
+    scope: &str,
+    relative: &str,
+) -> String {
     let commit = bookmark_commit(machine, scope);
     let path = RepoPath::from_internal_string(relative)
         .unwrap_or_else(|err| panic!("invalid repo path `{relative}`: {err}"));
@@ -236,7 +246,29 @@ fn bookmark_revision(machine: &MachineEnvironment, scope: &str) -> String {
         .hex()
 }
 
-fn seed_remote_scope_file(machine: &MachineEnvironment, scope: &str, relative: &str, contents: &str) {
+fn bookmark_has_file(machine: &MachineEnvironment, scope: &str, relative: &str) -> bool {
+    let commit = bookmark_commit(machine, scope);
+    let path = RepoPath::from_internal_string(relative)
+        .unwrap_or_else(|err| panic!("invalid repo path `{relative}`: {err}"));
+    let value = commit
+        .tree()
+        .path_value(path)
+        .unwrap_or_else(|err| panic!("read `{relative}` from `{scope}` tree: {err}"));
+
+    matches!(
+        value.into_resolved().unwrap_or_else(|conflict| panic!(
+            "unexpected conflict for `{relative}`: {conflict:?}"
+        )),
+        Some(TreeValue::File { .. })
+    )
+}
+
+fn seed_remote_scope_file(
+    machine: &MachineEnvironment,
+    scope: &str,
+    relative: &str,
+    contents: &str,
+) {
     let clone_dir = machine.home_dir.join(format!("remote-{scope}.ignore"));
     if clone_dir.exists() {
         fs::remove_dir_all(&clone_dir).expect("remove old remote clone dir");
@@ -256,6 +288,60 @@ fn remove_remote_scope_file(machine: &MachineEnvironment, scope: &str, relative:
     fs::remove_file(clone_dir.join(relative)).expect("remove remote scope file");
     git_commit_all(&clone_dir, &format!("test: remove {scope} {relative}"));
     git_push(&clone_dir, scope);
+}
+
+fn add_hyprland_scope(machine: &MachineEnvironment) {
+    let clone_dir = machine.home_dir.join("remote-all.ignore");
+    if clone_dir.exists() {
+        fs::remove_dir_all(&clone_dir).expect("remove old remote all clone dir");
+    }
+    clone_remote_branch_to(&clone_dir, &machine.remote_dir, "all");
+
+    let config_path = clone_dir.join(".config/dotsync/config.toml");
+    let original = fs::read_to_string(&config_path).expect("read remote config");
+    let updated = original.replace(
+        "linux = { parents = [\"all\"] }\nmx-xps-cy = { parents = [\"linux\"] }",
+        "linux = { parents = [\"all\"] }\nhyprland = { parents = [\"linux\"] }\nmx-xps-cy = { parents = [\"hyprland\"] }",
+    );
+    assert_ne!(
+        updated, original,
+        "expected init config shape to match test harness"
+    );
+    fs::write(&config_path, updated).expect("write remote config");
+    git_commit_all(&clone_dir, "test: add hyprland scope");
+    git_push(&clone_dir, "all");
+
+    let hyprland_clone_dir = machine.home_dir.join("remote-hyprland.ignore");
+    if hyprland_clone_dir.exists() {
+        fs::remove_dir_all(&hyprland_clone_dir).expect("remove old remote hyprland clone dir");
+    }
+    clone_remote_branch_to(&hyprland_clone_dir, &machine.remote_dir, "linux");
+    git_checkout_new_branch(&hyprland_clone_dir, "hyprland");
+    git_push(&hyprland_clone_dir, "hyprland");
+}
+
+fn merge_remote_scope_into(machine: &MachineEnvironment, source: &str, target: &str) {
+    let clone_dir = machine.home_dir.join(format!("remote-{target}.ignore"));
+    if clone_dir.exists() {
+        fs::remove_dir_all(&clone_dir).expect("remove old remote target clone dir");
+    }
+    clone_remote_branch_to(&clone_dir, &machine.remote_dir, target);
+
+    let fetch = git_in(&clone_dir, &["fetch", "origin", source]);
+    assert!(fetch.status.success(), "{}", render_output(&fetch));
+
+    let merge = Command::new("git")
+        .args(["merge", "--no-edit", "FETCH_HEAD"])
+        .current_dir(&clone_dir)
+        .env("GIT_AUTHOR_NAME", "dotsync-tests")
+        .env("GIT_AUTHOR_EMAIL", "dotsync-tests@example.com")
+        .env("GIT_COMMITTER_NAME", "dotsync-tests")
+        .env("GIT_COMMITTER_EMAIL", "dotsync-tests@example.com")
+        .output()
+        .expect("run git merge");
+    assert!(merge.status.success(), "{}", render_output(&merge));
+
+    git_push(&clone_dir, target);
 }
 
 fn init_bare_remote(remote_dir: &Path) {
@@ -282,7 +368,11 @@ fn clone_remote_branch_to(path: &Path, remote_dir: &Path, branch: &str) {
         .arg(path)
         .output()
         .expect("run git clone");
-    assert!(output.status.success(), "git clone failed: {}", render_output(&output));
+    assert!(
+        output.status.success(),
+        "git clone failed: {}",
+        render_output(&output)
+    );
 }
 
 fn write_file_at(path: &Path, contents: &str) {
@@ -314,6 +404,11 @@ fn git_commit_all(dir: &Path, message: &str) {
         .output()
         .expect("run git commit");
     assert!(commit.status.success(), "{}", render_output(&commit));
+}
+
+fn git_checkout_new_branch(dir: &Path, branch: &str) {
+    let checkout = git_in(dir, &["checkout", "-b", branch]);
+    assert!(checkout.status.success(), "{}", render_output(&checkout));
 }
 
 fn git_push(dir: &Path, branch: &str) {
@@ -350,16 +445,29 @@ fn drift_detected_human_error_stands_alone() {
     let relative = ".gitconfig";
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     seed_remote_scope_file(&machine, "mx-xps-cy", relative, "[user]\nname = \"Repo\"\n");
     let sync_output = machine.sync();
-    assert!(sync_output.status.success(), "{}", render_output(&sync_output));
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
 
     machine.write_home_file(relative, "[user]\nname = \"Drifted\"\n");
 
     let sync_output = machine.sync();
-    assert_eq!(sync_output.status.code(), Some(1), "{}", render_output(&sync_output));
+    assert_eq!(
+        sync_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&sync_output)
+    );
 
     let stderr = String::from_utf8_lossy(&sync_output.stderr);
     assert_standalone_error(
@@ -384,16 +492,29 @@ fn drift_detected_json_contract_stays_compatible() {
     let relative = ".gitconfig";
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     seed_remote_scope_file(&machine, "mx-xps-cy", relative, "[user]\nname = \"Repo\"\n");
     let sync_output = machine.sync();
-    assert!(sync_output.status.success(), "{}", render_output(&sync_output));
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
 
     machine.write_home_file(relative, "[user]\nname = \"Drifted\"\n");
 
     let sync_output = machine.sync_json();
-    assert_eq!(sync_output.status.code(), Some(1), "{}", render_output(&sync_output));
+    assert_eq!(
+        sync_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&sync_output)
+    );
 
     let json = parse_stdout_json(&sync_output);
     assert_eq!(json["status"], "error");
@@ -401,7 +522,9 @@ fn drift_detected_json_contract_stays_compatible() {
     assert!(json["message"].as_str().is_some());
     assert!(json["current_state"].as_str().is_some());
 
-    let drifts = json["drifts"].as_array().expect("drifts should be an array");
+    let drifts = json["drifts"]
+        .as_array()
+        .expect("drifts should be an array");
     assert_eq!(drifts.len(), 1);
     assert_eq!(drifts[0]["path"], relative);
     assert_eq!(
@@ -418,18 +541,30 @@ fn missing_state_file_disables_deletion() {
     let relative = ".gitconfig";
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     seed_remote_scope_file(&machine, "mx-xps-cy", relative, "[user]\nname = \"Max\"\n");
     let sync_output = machine.sync();
-    assert!(sync_output.status.success(), "{}", render_output(&sync_output));
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
     assert!(machine.home_file_exists(relative));
 
     machine.delete_sync_state();
     remove_remote_scope_file(&machine, "mx-xps-cy", relative);
 
     let sync_output = machine.sync();
-    assert!(sync_output.status.success(), "{}", render_output(&sync_output));
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
     assert!(
         machine.home_file_exists(relative),
         "without sync state, dotsync should fail safe and leave the previously managed file in home"
@@ -442,7 +577,11 @@ fn invalid_state_file_returns_clear_error() {
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_sync_state_raw("not valid json\n");
 
@@ -466,12 +605,21 @@ fn invalid_sync_state_human_error_stands_alone() {
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_sync_state_raw("not valid json\n");
 
     let sync_output = machine.sync();
-    assert_eq!(sync_output.status.code(), Some(1), "{}", render_output(&sync_output));
+    assert_eq!(
+        sync_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&sync_output)
+    );
 
     let stderr = String::from_utf8_lossy(&sync_output.stderr);
     assert_standalone_error(
@@ -495,11 +643,19 @@ fn sync_uses_state_machine_scope_even_if_checkout_changes() {
     let relative = ".config/machine-only.txt";
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     seed_remote_scope_file(&machine, "mx-xps-cy", relative, "machine config\n");
     let sync_output = machine.sync();
-    assert!(sync_output.status.success(), "{}", render_output(&sync_output));
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
     assert_eq!(machine.read_home_file(relative), "machine config\n");
 
     machine.delete_home_file(relative);
@@ -509,7 +665,11 @@ fn sync_uses_state_machine_scope_even_if_checkout_changes() {
     ));
 
     let sync_output = machine.sync();
-    assert!(sync_output.status.success(), "{}", render_output(&sync_output));
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
     assert_eq!(
         machine.read_home_file(relative),
         "machine config\n",
@@ -523,10 +683,17 @@ fn v03_init_creates_hidden_repo_not_dotfiles() {
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     assert!(
-        machine.home_dir.join(".local/share/dotsync/repo/.jj").exists(),
+        machine
+            .home_dir
+            .join(".local/share/dotsync/repo/.jj")
+            .exists(),
         "v0.3 init should create a hidden bare repo under ~/.local/share/dotsync/repo\n{}",
         render_output(&init_output)
     );
@@ -543,7 +710,11 @@ fn v03_plain_sync_ignores_unrelated_home_changes() {
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_home_file("untracked-notes.txt", "leave me alone\n");
 
@@ -553,7 +724,10 @@ fn v03_plain_sync_ignores_unrelated_home_changes() {
         "plain dotsync should ignore unrelated home-directory changes in bare-repo mode\n{}",
         render_output(&sync_output)
     );
-    assert_eq!(machine.read_home_file("untracked-notes.txt"), "leave me alone\n");
+    assert_eq!(
+        machine.read_home_file("untracked-notes.txt"),
+        "leave me alone\n"
+    );
 }
 
 #[test]
@@ -562,7 +736,11 @@ fn v03_commit_returns_not_implemented() {
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     machine.write_home_file(".gitconfig", "[user]\nname = \"Max\"\n");
 
@@ -587,7 +765,11 @@ fn v03_continue_returns_not_implemented() {
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     let init_output = machine.init();
-    assert!(init_output.status.success(), "{}", render_output(&init_output));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
 
     let continue_output = machine.continue_command();
     assert_eq!(
@@ -601,6 +783,309 @@ fn v03_continue_returns_not_implemented() {
         stderr.to_ascii_lowercase().contains("not implemented"),
         "continue should report not implemented clearly\n{}",
         render_output(&continue_output)
+    );
+}
+
+#[test]
+fn commit_explicit_path_adds_file_to_scope_and_syncs() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    let existing_relative = ".config/existing.txt";
+    let new_relative = ".gitconfig";
+    let new_contents = "[user]\nname = \"Max\"\n";
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "mx-xps-cy", existing_relative, "existing\n");
+    let sync_output = machine.sync();
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    machine.write_home_file(new_relative, new_contents);
+
+    let commit_output = machine.commit_with_paths("all", "add gitconfig", &[new_relative]);
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
+
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "all", new_relative),
+        new_contents
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "mx-xps-cy", new_relative),
+        new_contents
+    );
+    assert!(machine.home_file_exists(new_relative));
+    assert_eq!(machine.read_home_file(new_relative), new_contents);
+}
+
+#[test]
+fn commit_modifies_existing_file_on_scope() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    let relative = ".bashrc";
+    let updated_contents = "export PATH=\"$HOME/bin:$PATH\"\n";
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "linux", relative, "export PATH=\"$PATH\"\n");
+    let sync_output = machine.sync();
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    machine.write_home_file(relative, updated_contents);
+
+    let commit_output = machine.commit_with_paths("linux", "update bashrc", &[relative]);
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
+
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "linux", relative),
+        updated_contents
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "mx-xps-cy", relative),
+        updated_contents
+    );
+    assert_eq!(machine.read_home_file(relative), updated_contents);
+}
+
+#[test]
+fn commit_deletes_file_from_scope() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    let relative = ".config/remove-me.txt";
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "all", relative, "delete me\n");
+    merge_remote_scope_into(&machine, "all", "linux");
+    merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
+    let sync_output = machine.sync();
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+    assert!(machine.home_file_exists(relative));
+
+    machine.delete_home_file(relative);
+
+    let commit_output = machine.commit_with_paths("all", "remove file", &[relative]);
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
+
+    assert!(!bookmark_has_file(&machine, "all", relative));
+    assert!(!bookmark_has_file(&machine, "mx-xps-cy", relative));
+    assert!(!machine.home_file_exists(relative));
+}
+
+#[test]
+fn commit_cascades_through_all_descendants() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    let relative = ".config/shared.txt";
+    let new_contents = "shared everywhere\n";
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    add_hyprland_scope(&machine);
+    seed_remote_scope_file(&machine, "all", ".config/all-only.txt", "all\n");
+    seed_remote_scope_file(&machine, "linux", ".config/linux-only.txt", "linux\n");
+    seed_remote_scope_file(
+        &machine,
+        "hyprland",
+        ".config/hyprland-only.txt",
+        "hyprland\n",
+    );
+    let sync_output = machine.sync();
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    machine.write_home_file(relative, new_contents);
+
+    let commit_output = machine.commit_with_paths("all", "add shared file", &[relative]);
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
+
+    for scope in ["all", "linux", "hyprland", "mx-xps-cy"] {
+        assert_eq!(
+            read_bookmark_file_contents(&machine, scope, relative),
+            new_contents,
+            "expected `{relative}` to cascade to `{scope}`"
+        );
+    }
+}
+
+#[test]
+fn commit_to_machine_scope_does_not_cascade() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    let relative = ".config/machine-local.txt";
+    let contents = "machine only\n";
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_home_file(relative, contents);
+
+    let commit_output = machine.commit_with_paths("mx-xps-cy", "add machine file", &[relative]);
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
+
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "mx-xps-cy", relative),
+        contents
+    );
+    assert!(!bookmark_has_file(&machine, "linux", relative));
+    assert!(!bookmark_has_file(&machine, "all", relative));
+}
+
+#[test]
+fn commit_without_paths_imports_all_diffs() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    let relative = ".config/app.conf";
+    let updated_contents = "setting = \"updated\"\n";
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "mx-xps-cy", relative, "setting = \"original\"\n");
+    let sync_output = machine.sync();
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    machine.write_home_file(relative, updated_contents);
+
+    let commit_output = machine.commit("mx-xps-cy", "update");
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
+
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "mx-xps-cy", relative),
+        updated_contents
+    );
+}
+
+#[test]
+fn commit_noop_when_no_changes() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    let relative = ".config/unchanged.txt";
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "mx-xps-cy", relative, "same\n");
+    let sync_output = machine.sync();
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    let revision_before = bookmark_revision(&machine, "mx-xps-cy");
+
+    let commit_output = machine.commit("mx-xps-cy", "noop");
+    assert_eq!(
+        commit_output.status.code(),
+        Some(0),
+        "{}",
+        render_output(&commit_output)
+    );
+
+    let revision_after = bookmark_revision(&machine, "mx-xps-cy");
+    assert_eq!(revision_after, revision_before);
+}
+
+#[test]
+fn commit_invalid_scope_errors() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    let commit_output = machine.commit_with_paths("nonexistent", "test", &[".gitconfig"]);
+    assert_eq!(
+        commit_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&commit_output)
+    );
+
+    let stderr = String::from_utf8_lossy(&commit_output.stderr);
+    assert!(
+        stderr.to_ascii_lowercase().contains("invalid scope"),
+        "{}",
+        render_output(&commit_output)
     );
 }
 
@@ -650,7 +1135,9 @@ macro_rules! retired_ratchet_test {
     };
 }
 
-retired_ratchet_test!(retired_ancestor_scope_commit_from_machine_working_copy_stays_consistent_across_stages);
+retired_ratchet_test!(
+    retired_ancestor_scope_commit_from_machine_working_copy_stays_consistent_across_stages
+);
 retired_ratchet_test!(retired_command_while_cascade_paused_human_error_stands_alone);
 retired_ratchet_test!(retired_continue_without_pause_human_error_stands_alone);
 retired_ratchet_test!(retired_dirty_working_copy_human_error_stands_alone);
@@ -660,13 +1147,23 @@ retired_ratchet_test!(retired_non_ancestor_scope_human_error_stands_alone);
 retired_ratchet_test!(retired_pending_commit_all_preserves_whole_tree_commit_behavior);
 retired_ratchet_test!(retired_pending_commit_mode_rejects_all_plus_paths);
 retired_ratchet_test!(retired_pending_config_path_is_rejected_for_non_all_scope_commits);
-retired_ratchet_test!(retired_pending_explicit_path_commit_only_commits_selected_paths_and_leaves_other_changes_dirty);
+retired_ratchet_test!(
+    retired_pending_explicit_path_commit_only_commits_selected_paths_and_leaves_other_changes_dirty
+);
 retired_ratchet_test!(retired_pending_fetch_stops_when_remote_would_reset_local_bookmark);
-retired_ratchet_test!(retired_pending_joining_existing_remote_creates_new_scope_and_first_commit_works);
+retired_ratchet_test!(
+    retired_pending_joining_existing_remote_creates_new_scope_and_first_commit_works
+);
 retired_ratchet_test!(retired_pending_scoped_commit_requires_paths_or_all_in_human_and_json_modes);
-retired_ratchet_test!(retired_pending_selected_add_modify_and_delete_are_applied_without_touching_unselected_changes);
-retired_ratchet_test!(retired_pending_selective_commit_preserves_unselected_dirty_paths_when_cascade_pauses);
-retired_ratchet_test!(retired_pending_sync_loads_config_from_committed_all_scope_not_working_copy_edit);
+retired_ratchet_test!(
+    retired_pending_selected_add_modify_and_delete_are_applied_without_touching_unselected_changes
+);
+retired_ratchet_test!(
+    retired_pending_selective_commit_preserves_unselected_dirty_paths_when_cascade_pauses
+);
+retired_ratchet_test!(
+    retired_pending_sync_loads_config_from_committed_all_scope_not_working_copy_edit
+);
 retired_ratchet_test!(retired_plain_dotsync_rejects_working_copy_changes);
 retired_ratchet_test!(retired_scoped_commit_deletion_removes_file_from_fake_home);
 retired_ratchet_test!(retired_scoped_deletion_only_affects_homes_where_scope_applies);
