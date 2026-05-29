@@ -17,7 +17,7 @@ use crate::cascade::{
 };
 use crate::config::{internal_repo_paths, load_config, DotsyncPaths};
 use crate::error::DotsyncError;
-use crate::machine::detect_machine;
+
 use crate::repo::{
     collect_managed_tree_entries, fetch_origin, load_repo_direct, load_scope_commit,
     push_scope_updates, read_tree_entry_bytes,
@@ -72,13 +72,11 @@ pub async fn commit_and_sync(
     }
 
     let internal_paths = internal_repo_paths(&config);
-    let machine_scope = detect_machine()?.machine_scope;
-    if !graph.parents.contains_key(&machine_scope) {
-        return Err(DotsyncError::NoCurrentScope);
-    }
+    let sync_state = crate::sync::load_sync_state(paths, &config)?;
+    let machine_scope = crate::sync::resolve_current_scope(&config, sync_state.as_ref(), None)?;
 
     let old_machine_commit = load_scope_commit(repo.as_ref(), &machine_scope)?;
-    let machine_entries = load_current_machine_entries(repo.as_ref(), &graph, &internal_paths).await?;
+    let machine_entries = load_current_machine_entries(repo.as_ref(), &machine_scope, &internal_paths).await?;
     let target_entries = load_scope_entries(repo.as_ref(), &options.scope, &internal_paths)?;
     let selected_paths = select_commit_paths(
         paths,
@@ -191,14 +189,10 @@ pub async fn commit_and_sync(
 
 async fn load_current_machine_entries(
     repo: &dyn jj_lib::repo::Repo,
-    graph: &crate::scope_graph::ScopeGraph,
+    machine_scope: &str,
     internal_paths: &std::collections::BTreeSet<PathBuf>,
 ) -> Result<BTreeMap<PathBuf, TreeValue>, DotsyncError> {
-    let machine_scope = detect_machine()?.machine_scope;
-    if !graph.parents.contains_key(&machine_scope) {
-        return Err(DotsyncError::NoCurrentScope);
-    }
-    let machine_commit = load_scope_commit(repo, &machine_scope)?;
+    let machine_commit = load_scope_commit(repo, machine_scope)?;
     collect_managed_tree_entries(&machine_commit.tree(), internal_paths)
 }
 
