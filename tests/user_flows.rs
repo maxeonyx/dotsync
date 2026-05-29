@@ -1093,6 +1093,193 @@ fn commit_invalid_scope_errors() {
     );
 }
 
+#[test]
+fn status_shows_modified_file() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    let relative = ".bashrc";
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "mx-xps-cy", relative, "export DOTSYNC=repo\n");
+    let sync_output = machine.sync();
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    machine.write_home_file(relative, "export DOTSYNC=modified\n");
+
+    let status_output = machine.run_dotsync(&["status"]);
+    assert_eq!(status_output.status.code(), Some(0), "{}", render_output(&status_output));
+
+    let stderr = String::from_utf8_lossy(&status_output.stderr);
+    assert!(stderr.contains(relative), "{}", render_output(&status_output));
+    assert!(
+        stderr.contains("modified") || stderr.contains("M"),
+        "{}",
+        render_output(&status_output)
+    );
+}
+
+#[test]
+fn status_shows_deleted_file() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    let relative = ".bashrc";
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "mx-xps-cy", relative, "export DOTSYNC=repo\n");
+    let sync_output = machine.sync();
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    machine.delete_home_file(relative);
+
+    let status_output = machine.run_dotsync(&["status"]);
+    assert_eq!(status_output.status.code(), Some(0), "{}", render_output(&status_output));
+
+    let stderr = String::from_utf8_lossy(&status_output.stderr);
+    assert!(stderr.contains(relative), "{}", render_output(&status_output));
+    assert!(
+        stderr.contains("deleted") || stderr.contains("D"),
+        "{}",
+        render_output(&status_output)
+    );
+}
+
+#[test]
+fn status_clean_shows_no_changes() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    let relative = ".bashrc";
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "mx-xps-cy", relative, "export DOTSYNC=repo\n");
+    let sync_output = machine.sync();
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    let status_output = machine.run_dotsync(&["status"]);
+    assert_eq!(status_output.status.code(), Some(0), "{}", render_output(&status_output));
+
+    let stderr = String::from_utf8_lossy(&status_output.stderr);
+    let stderr_lower = stderr.to_ascii_lowercase();
+    assert!(
+        stderr.contains('0')
+            || stderr_lower.contains("no changes")
+            || stderr_lower.contains("clean"),
+        "{}",
+        render_output(&status_output)
+    );
+}
+
+#[test]
+fn status_json_contract() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    let relative = ".bashrc";
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "mx-xps-cy", relative, "export DOTSYNC=repo\n");
+    let sync_output = machine.sync();
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    machine.write_home_file(relative, "export DOTSYNC=modified\n");
+
+    let status_output = machine.run_dotsync_json(&["status"]);
+    assert_eq!(status_output.status.code(), Some(0), "{}", render_output(&status_output));
+
+    let json = parse_stdout_json(&status_output);
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["command"], "status");
+    assert_eq!(json["machine_scope"], "mx-xps-cy");
+
+    let groups = json["groups"].as_array().expect("groups should be an array");
+    assert!(
+        !groups.is_empty(),
+        "expected at least one status group\n{}",
+        render_output(&status_output)
+    );
+
+    let first_group = &groups[0];
+    assert_eq!(first_group["scope"], serde_json::Value::Null);
+
+    let files = first_group["files"]
+        .as_array()
+        .expect("group files should be an array");
+    assert!(
+        files.iter().any(|file| {
+            file["path"]
+                .as_str()
+                .is_some_and(|path| path.contains(relative))
+                && file["status"] == "modified"
+        }),
+        "expected .bashrc modified entry\n{}",
+        render_output(&status_output)
+    );
+}
+
+#[test]
+fn status_ignores_unmanaged_files() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    let relative = ".unmanaged-status-test";
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_home_file(relative, "this file is unmanaged\n");
+
+    let status_output = machine.run_dotsync(&["status"]);
+    assert_eq!(status_output.status.code(), Some(0), "{}", render_output(&status_output));
+
+    let stderr = String::from_utf8_lossy(&status_output.stderr);
+    assert!(
+        !stderr.contains(relative),
+        "{}",
+        render_output(&status_output)
+    );
+}
+
 fn assert_standalone_error(stderr: &str, expected_fragments: &[&str], output: &Output) {
     assert!(stderr.starts_with("dotsync:"), "{}", render_output(output));
     for heading in [
