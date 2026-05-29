@@ -2,9 +2,9 @@
   "$schema": "https://tdd-ratchet.maxeonyx.com/schema/test-status.v1.json",
   "tests": {
     "dotsync::dotsync$tests::tdd_ratchet_gatekeeper": "passing",
-    "dotsync::help_examples$help_examples": "pending",
-    "dotsync::help_text$init_help_explains_remote_url_and_setup": "pending",
-    "dotsync::help_text$top_level_help_explains_scope_and_basic_workflow": "pending",
+    "dotsync::help_examples$help_examples": "passing",
+    "dotsync::help_text$init_help_explains_remote_url_and_setup": "passing",
+    "dotsync::help_text$top_level_help_explains_scope_and_basic_workflow": "passing",
     "dotsync::user_flows$commit_cascades_through_all_descendants": "passing",
     "dotsync::user_flows$commit_deletes_file_from_scope": "passing",
     "dotsync::user_flows$commit_explicit_path_adds_file_to_scope_and_syncs": "passing",
@@ -50,27 +50,5 @@
     "dotsync::user_flows$v03_continue_returns_not_implemented": "passing",
     "dotsync::user_flows$v03_init_creates_hidden_repo_not_dotfiles": "passing",
     "dotsync::user_flows$v03_plain_sync_ignores_unrelated_home_changes": "passing"
-  },
-  "renames": {
-    "dotsync::user_flows$retired_ancestor_scope_commit_from_machine_working_copy_stays_consistent_across_stages": "dotsync::user_flows$ancestor_scope_commit_from_machine_working_copy_stays_consistent_across_stages",
-    "dotsync::user_flows$retired_command_while_cascade_paused_human_error_stands_alone": "dotsync::user_flows$command_while_cascade_paused_human_error_stands_alone",
-    "dotsync::user_flows$retired_continue_without_pause_human_error_stands_alone": "dotsync::user_flows$continue_without_pause_human_error_stands_alone",
-    "dotsync::user_flows$retired_dirty_working_copy_human_error_stands_alone": "dotsync::user_flows$dirty_working_copy_human_error_stands_alone",
-    "dotsync::user_flows$retired_dirty_working_copy_json_contract_stays_compatible": "dotsync::user_flows$dirty_working_copy_json_contract_stays_compatible",
-    "dotsync::user_flows$retired_invalid_scope_human_error_stands_alone": "dotsync::user_flows$invalid_scope_human_error_stands_alone",
-    "dotsync::user_flows$retired_non_ancestor_scope_human_error_stands_alone": "dotsync::user_flows$non_ancestor_scope_human_error_stands_alone",
-    "dotsync::user_flows$retired_pending_commit_all_preserves_whole_tree_commit_behavior": "dotsync::user_flows$pending_commit_all_preserves_whole_tree_commit_behavior",
-    "dotsync::user_flows$retired_pending_commit_mode_rejects_all_plus_paths": "dotsync::user_flows$pending_commit_mode_rejects_all_plus_paths",
-    "dotsync::user_flows$retired_pending_config_path_is_rejected_for_non_all_scope_commits": "dotsync::user_flows$pending_config_path_is_rejected_for_non_all_scope_commits",
-    "dotsync::user_flows$retired_pending_explicit_path_commit_only_commits_selected_paths_and_leaves_other_changes_dirty": "dotsync::user_flows$pending_explicit_path_commit_only_commits_selected_paths_and_leaves_other_changes_dirty",
-    "dotsync::user_flows$retired_pending_fetch_stops_when_remote_would_reset_local_bookmark": "dotsync::user_flows$pending_fetch_stops_when_remote_would_reset_local_bookmark",
-    "dotsync::user_flows$retired_pending_joining_existing_remote_creates_new_scope_and_first_commit_works": "dotsync::user_flows$pending_joining_existing_remote_creates_new_scope_and_first_commit_works",
-    "dotsync::user_flows$retired_pending_scoped_commit_requires_paths_or_all_in_human_and_json_modes": "dotsync::user_flows$pending_scoped_commit_requires_paths_or_all_in_human_and_json_modes",
-    "dotsync::user_flows$retired_pending_selected_add_modify_and_delete_are_applied_without_touching_unselected_changes": "dotsync::user_flows$pending_selected_add_modify_and_delete_are_applied_without_touching_unselected_changes",
-    "dotsync::user_flows$retired_pending_selective_commit_preserves_unselected_dirty_paths_when_cascade_pauses": "dotsync::user_flows$pending_selective_commit_preserves_unselected_dirty_paths_when_cascade_pauses",
-    "dotsync::user_flows$retired_pending_sync_loads_config_from_committed_all_scope_not_working_copy_edit": "dotsync::user_flows$pending_sync_loads_config_from_committed_all_scope_not_working_copy_edit",
-    "dotsync::user_flows$retired_plain_dotsync_rejects_working_copy_changes": "dotsync::user_flows$plain_dotsync_rejects_working_copy_changes",
-    "dotsync::user_flows$retired_scoped_commit_deletion_removes_file_from_fake_home": "dotsync::user_flows$scoped_commit_deletion_removes_file_from_fake_home",
-    "dotsync::user_flows$retired_scoped_deletion_only_affects_homes_where_scope_applies": "dotsync::user_flows$scoped_deletion_only_affects_homes_where_scope_applies"
   }
 }

@@ -8,6 +8,30 @@ use serde_json::json;
 use std::env;
 use std::path::PathBuf;
 
+const TOP_LEVEL_ABOUT: &str = "Agent-first dotfile sync";
+
+const TOP_LEVEL_LONG_ABOUT: &str = "dotsync keeps a hidden repo at ~/.local/share/dotsync/repo and syncs the current machine scope into your home directory.
+
+A scope is a branch in the dotsync DAG. Shared config lives on ancestor scopes such as `all` or `linux`; machine-specific config lives on leaf scopes such as your hostname.
+
+Basic workflow:
+  - plain `dotsync` syncs your current machine scope into home
+  - edit files in home, then run `dotsync <scope> -m \"message\" <path>...` to record the change on the right scope
+  - run `dotsync continue` if a cascade pauses for conflicts";
+
+const TOP_LEVEL_AFTER_HELP: &str = "Examples:
+  $ dotsync
+  $ dotsync linux -m \"add bashrc\" .bashrc
+  $ dotsync init <url>";
+
+const INIT_ABOUT: &str = "Clone or join a dotsync remote";
+
+const INIT_LONG_ABOUT: &str = "REMOTE_URL is the git remote that stores your dotsync repo.
+
+`dotsync init` clones the repo into ~/.local/share/dotsync/repo, detects this machine, sets up any missing scope branches for its OS and machine, and syncs the resulting machine scope into home.";
+
+const CONTINUE_ABOUT: &str = "Continue a paused merge cascade after resolving conflicts";
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum OutputFormat {
     Human,
@@ -15,7 +39,14 @@ enum OutputFormat {
 }
 
 #[derive(Debug, Parser)]
-#[command(author, version, about = "Agent-first dotfile sync", long_about = None)]
+#[command(
+    author,
+    version,
+    about = TOP_LEVEL_ABOUT,
+    long_about = TOP_LEVEL_LONG_ABOUT,
+    after_help = TOP_LEVEL_AFTER_HELP,
+    disable_help_subcommand = true
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -67,9 +98,12 @@ enum Action {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Clone or join a dotsync remote
-    Init { remote_url: String },
-    /// Continue a paused merge cascade after resolving conflicts
+    #[command(about = INIT_ABOUT, long_about = INIT_LONG_ABOUT)]
+    Init {
+        /// Git remote URL or local path for the dotsync repo
+        remote_url: String,
+    },
+    #[command(about = CONTINUE_ABOUT)]
     Continue,
     /// Show managed files that differ from the repo
     Status,
@@ -147,11 +181,9 @@ impl TryFrom<Cli> for Action {
             | (Some(Command::Init { .. }), None, Some(_)) => Err(usage_error(
                 "`init` does not take scope or message arguments",
             )),
-            (Some(Command::Status), Some(_), _) | (Some(Command::Status), None, Some(_)) => {
-                Err(usage_error(
-                    "`status` does not take scope or message arguments",
-                ))
-            }
+            (Some(Command::Status), Some(_), _) | (Some(Command::Status), None, Some(_)) => Err(
+                usage_error("`status` does not take scope or message arguments"),
+            ),
             (Some(Command::Continue), Some(_), _) | (Some(Command::Continue), None, Some(_)) => {
                 Err(usage_error(
                     "`continue` does not take scope or message arguments",
