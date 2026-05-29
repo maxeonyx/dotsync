@@ -7,6 +7,7 @@ license = "MIT"
 repository = "https://github.com/maxeonyx/dotsync"
 
 [dependencies]
+agent-tools-updater = { path = "../../crates/agent-tools-updater" }
 clap = { version = "4.5.31", features = ["derive"] }
 gix = "0.80"
 jj-lib = "0.39"
@@ -17,5 +18,6 @@ tokio = { version = "1.44", features = ["macros", "rt-multi-thread"] }
 toml = "0.8"
 
 [dev-dependencies]
+assert_cmd = "2"
 help-test = { path = "../../crates/help-test" }
 tempfile = "3.18"

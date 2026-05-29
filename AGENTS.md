@@ -1,6 +1,6 @@
 # dotsync - Agent Instructions
 
-This file guides AI agents working on the dotsync codebase itself.
+This file guides AI agents working on the dotsync codebase itself. This tool is developed from the [agent-tools workspace](https://github.com/maxeonyx/agent-tools); clone and develop there, not from this repo directly.
 
 ## Start Here
 
