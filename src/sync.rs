@@ -53,6 +53,27 @@ pub async fn sync(paths: &DotsyncPaths, options: SyncOptions) -> Result<SyncRepo
     sync_repo_to_home(paths, options, &[], None).await
 }
 
+pub(crate) fn resolve_current_scope(
+    config: &DotsyncConfig,
+    sync_state: Option<&SyncState>,
+    machine_scope_hint: Option<&str>,
+) -> Result<String, DotsyncError> {
+    let graph = &config.graph;
+    let valid_sync_state = sync_state.filter(|state| graph.parents.contains_key(&state.machine_scope));
+    match (machine_scope_hint, valid_sync_state) {
+        (Some(scope), _) => Ok(scope.to_string()),
+        (None, Some(state)) => Ok(state.machine_scope.clone()),
+        (None, None) => {
+            let detected = detect_machine()?;
+            if graph.parents.contains_key(&detected.machine_scope) {
+                Ok(detected.machine_scope)
+            } else {
+                Err(DotsyncError::NoCurrentScope)
+            }
+        }
+    }
+}
+
 pub(crate) async fn detect_drifts(
     paths: &DotsyncPaths,
     repo: &dyn jj_lib::repo::Repo,
@@ -120,27 +141,13 @@ pub(crate) async fn sync_repo_to_home(
     machine_scope_hint: Option<&str>,
 ) -> Result<SyncReport, DotsyncError> {
     let config = load_config(paths).await?;
-    let graph = config.graph.clone();
     let repo = load_repo_direct(paths).await?;
 
     let sync_state = load_sync_state(paths, &config)?;
-    // Only trust sync-state if its machine_scope exists in the current repo's config.
-    // A stale sync-state from a previous repo/remote should not drive scope selection.
     let valid_sync_state = sync_state
         .as_ref()
-        .filter(|state| graph.parents.contains_key(&state.machine_scope));
-    let current_scope = match (machine_scope_hint, valid_sync_state) {
-        (Some(scope), _) => scope.to_string(),
-        (None, Some(state)) => state.machine_scope.clone(),
-        (None, None) => {
-            let detected = detect_machine()?;
-            if graph.parents.contains_key(&detected.machine_scope) {
-                detected.machine_scope
-            } else {
-                return Err(DotsyncError::NoCurrentScope);
-            }
-        }
-    };
+        .filter(|state| config.graph.parents.contains_key(&state.machine_scope));
+    let current_scope = resolve_current_scope(&config, sync_state.as_ref(), machine_scope_hint)?;
     let current_commit = load_scope_commit(repo.as_ref(), &current_scope)?;
     let internal_paths = internal_repo_paths(&config);
     let repo_entries = collect_managed_tree_entries(&current_commit.tree(), &internal_paths)?;

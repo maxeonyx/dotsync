@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
-    commit_and_sync, continue_after_conflict, init, sync, CommandOutcome, CommitOptions,
-    CommitSelection, DotsyncError, DotsyncPaths, FileDrift, SyncOptions,
+    commit_and_sync, continue_after_conflict, init, status, sync, ChangeStatus, CommandOutcome,
+    CommitOptions, CommitSelection, DotsyncError, DotsyncPaths, FileDrift, SyncOptions,
 };
 mod render;
 use serde_json::json;
@@ -60,6 +60,9 @@ enum Action {
     Continue {
         force: bool,
     },
+    Status {
+        force: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -68,6 +71,8 @@ enum Command {
     Init { remote_url: String },
     /// Continue a paused merge cascade after resolving conflicts
     Continue,
+    /// Show managed files that differ from the repo
+    Status,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +117,7 @@ impl TryFrom<Cli> for Action {
         match (cli.command, cli.scope, cli.message) {
             (Some(Command::Init { remote_url }), None, None) => Ok(Self::Init { remote_url }),
             (Some(Command::Continue), None, None) => Ok(Self::Continue { force: cli.force }),
+            (Some(Command::Status), None, None) => Ok(Self::Status { force: false }),
             (None, None, None) if !cli.all && cli.paths.is_empty() => {
                 Ok(Self::Sync { force: cli.force })
             }
@@ -141,6 +147,11 @@ impl TryFrom<Cli> for Action {
             | (Some(Command::Init { .. }), None, Some(_)) => Err(usage_error(
                 "`init` does not take scope or message arguments",
             )),
+            (Some(Command::Status), Some(_), _) | (Some(Command::Status), None, Some(_)) => {
+                Err(usage_error(
+                    "`status` does not take scope or message arguments",
+                ))
+            }
             (Some(Command::Continue), Some(_), _) | (Some(Command::Continue), None, Some(_)) => {
                 Err(usage_error(
                     "`continue` does not take scope or message arguments",
@@ -162,6 +173,7 @@ async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
         } => run_commit(scope, message, force, selection).await,
         Action::Init { remote_url } => run_init(remote_url).await,
         Action::Continue { force } => run_continue(force).await,
+        Action::Status { force } => run_status(force).await,
     }
 }
 
@@ -231,6 +243,36 @@ async fn run_sync(force: bool) -> Result<CliOutput, DotsyncError> {
     }))
 }
 
+async fn run_status(_force: bool) -> Result<CliOutput, DotsyncError> {
+    let paths = discover_paths()?;
+    let report = status(&paths).await?;
+    let files = report
+        .changes
+        .iter()
+        .map(|change| {
+            json!({
+                "path": render::display_path(&change.path),
+                "status": render_change_status_json(change.status),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(CliOutput::Success(SuccessOutput {
+        json: json!({
+            "status": "ok",
+            "command": "status",
+            "machine_scope": report.machine_scope,
+            "changed_count": files.len(),
+            "groups": [{
+                "scope": serde_json::Value::Null,
+                "files": files,
+            }],
+        }),
+        human: render_status_human(&report),
+        notes: Vec::new(),
+    }))
+}
+
 async fn run_commit(
     scope: String,
     message: String,
@@ -280,6 +322,41 @@ fn discover_paths() -> Result<DotsyncPaths, DotsyncError> {
 fn print_drifts(drifts: &[FileDrift]) {
     for line in render::render_drifts_human(drifts) {
         eprintln!("{line}");
+    }
+}
+
+fn render_status_human(report: &dotsync::StatusReport) -> String {
+    if report.changes.is_empty() {
+        return format!("dotsync: no changes for {}", report.machine_scope);
+    }
+
+    let mut lines = Vec::with_capacity(report.changes.len() + 1);
+    lines.push(format!(
+        "dotsync: {} changed managed file(s) for {}",
+        report.changes.len(),
+        report.machine_scope
+    ));
+    lines.extend(report.changes.iter().map(|change| {
+        format!(
+            "  {} {}",
+            render_change_status_human(change.status),
+            render::display_path(&change.path)
+        )
+    }));
+    lines.join("\n")
+}
+
+fn render_change_status_human(status: ChangeStatus) -> &'static str {
+    match status {
+        ChangeStatus::Modified => "M",
+        ChangeStatus::Deleted => "D",
+    }
+}
+
+fn render_change_status_json(status: ChangeStatus) -> &'static str {
+    match status {
+        ChangeStatus::Modified => "modified",
+        ChangeStatus::Deleted => "deleted",
     }
 }
 
