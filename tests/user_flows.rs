@@ -853,6 +853,10 @@ fn commit_modifies_existing_file_on_scope() {
     );
 
     machine.write_home_file(relative, updated_contents);
+    machine.write_sync_state_raw(&format!(
+        "{{\"machine_scope\":\"all\",\"last_synced_revision\":\"{}\"}}",
+        bookmark_revision(&machine, "all")
+    ));
 
     let commit_output = machine.commit_with_paths("linux", "update bashrc", &[relative]);
     assert!(
@@ -1155,9 +1159,59 @@ retired_ratchet_test!(
     retired_pending_joining_existing_remote_creates_new_scope_and_first_commit_works
 );
 retired_ratchet_test!(retired_pending_scoped_commit_requires_paths_or_all_in_human_and_json_modes);
-retired_ratchet_test!(
-    retired_pending_selected_add_modify_and_delete_are_applied_without_touching_unselected_changes
-);
+#[test]
+fn retired_pending_selected_add_modify_and_delete_are_applied_without_touching_unselected_changes() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    let existing_relative = ".config/fish/config.fish";
+    let removed_relative = ".config/fish/removed.fish";
+    let new_relative = ".config/fish/completions/git.fish";
+    let existing_contents = "set -g fish_greeting off\n";
+    let new_contents = "complete -c git\n";
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "all", existing_relative, "set -g fish_greeting on\n");
+    seed_remote_scope_file(&machine, "all", removed_relative, "remove me\n");
+    merge_remote_scope_into(&machine, "all", "linux");
+    merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
+    let sync_output = machine.sync();
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    machine.write_home_file(existing_relative, existing_contents);
+    machine.write_home_file(new_relative, new_contents);
+    machine.delete_home_file(removed_relative);
+
+    let commit_output = machine.commit_with_paths("all", "update fish dir", &[".config/fish/"]);
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
+
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "all", existing_relative),
+        existing_contents
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "all", new_relative),
+        new_contents
+    );
+    assert!(!bookmark_has_file(&machine, "all", removed_relative));
+    assert_eq!(machine.read_home_file(existing_relative), existing_contents);
+    assert_eq!(machine.read_home_file(new_relative), new_contents);
+    assert!(!machine.home_file_exists(removed_relative));
+}
+
 retired_ratchet_test!(
     retired_pending_selective_commit_preserves_unselected_dirty_paths_when_cascade_pauses
 );

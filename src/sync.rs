@@ -129,9 +129,9 @@ pub(crate) async fn sync_repo_to_home(
     let valid_sync_state = sync_state
         .as_ref()
         .filter(|state| graph.parents.contains_key(&state.machine_scope));
-    let current_scope = match (valid_sync_state, machine_scope_hint) {
-        (Some(state), _) => state.machine_scope.clone(),
-        (None, Some(scope)) => scope.to_string(),
+    let current_scope = match (machine_scope_hint, valid_sync_state) {
+        (Some(scope), _) => scope.to_string(),
+        (None, Some(state)) => state.machine_scope.clone(),
         (None, None) => {
             let detected = detect_machine()?;
             if graph.parents.contains_key(&detected.machine_scope) {

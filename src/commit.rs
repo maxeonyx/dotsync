@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -78,11 +79,13 @@ pub async fn commit_and_sync(
 
     let old_machine_commit = load_scope_commit(repo.as_ref(), &machine_scope)?;
     let machine_entries = load_current_machine_entries(repo.as_ref(), &graph, &internal_paths).await?;
+    let target_entries = load_scope_entries(repo.as_ref(), &options.scope, &internal_paths)?;
     let selected_paths = select_commit_paths(
         paths,
         repo.as_ref(),
         &options.selection,
-        &machine_entries,
+        &target_entries,
+        &internal_paths,
     )
     .await?;
 
@@ -174,7 +177,7 @@ pub async fn commit_and_sync(
             force: options.force,
         },
         &expected_changes,
-        None,
+        Some(&machine_scope),
     )
     .await?;
     push_scope_updates(paths).await?;
@@ -199,26 +202,44 @@ async fn load_current_machine_entries(
     collect_managed_tree_entries(&machine_commit.tree(), internal_paths)
 }
 
+fn load_scope_entries(
+    repo: &dyn jj_lib::repo::Repo,
+    scope: &str,
+    internal_paths: &std::collections::BTreeSet<PathBuf>,
+) -> Result<BTreeMap<PathBuf, TreeValue>, DotsyncError> {
+    let commit = load_scope_commit(repo, scope)?;
+    collect_managed_tree_entries(&commit.tree(), internal_paths)
+}
+
 async fn select_commit_paths(
     paths: &DotsyncPaths,
     repo: &dyn jj_lib::repo::Repo,
     selection: &CommitSelection,
-    machine_entries: &BTreeMap<PathBuf, TreeValue>,
+    target_entries: &BTreeMap<PathBuf, TreeValue>,
+    internal_paths: &BTreeSet<PathBuf>,
 ) -> Result<Vec<PathBuf>, DotsyncError> {
     match selection {
-        CommitSelection::Paths(paths) if !paths.is_empty() => Ok(paths.clone()),
-        CommitSelection::Paths(_) => detect_changed_managed_paths(paths, repo, machine_entries).await,
-        CommitSelection::All => Ok(machine_entries.keys().cloned().collect()),
+        CommitSelection::Paths(selection_paths) if !selection_paths.is_empty() => {
+            expand_selection_paths(paths, selection_paths, target_entries, internal_paths)
+        }
+        CommitSelection::Paths(_) => detect_changed_managed_paths(paths, repo, target_entries).await,
+        CommitSelection::All => {
+            // `--all` intentionally means "all currently managed files on the target scope".
+            // We compare that tracked set against `~/` so modifications and deletions are
+            // committed, but we do not scan all of home looking for unrelated new files.
+            // New files must be opted into with explicit paths.
+            Ok(target_entries.keys().cloned().collect())
+        }
     }
 }
 
 async fn detect_changed_managed_paths(
     paths: &DotsyncPaths,
     repo: &dyn jj_lib::repo::Repo,
-    machine_entries: &BTreeMap<PathBuf, TreeValue>,
+    target_entries: &BTreeMap<PathBuf, TreeValue>,
 ) -> Result<Vec<PathBuf>, DotsyncError> {
     let mut changed = Vec::new();
-    for (relative, value) in machine_entries {
+    for (relative, value) in target_entries {
         let repo_bytes = read_tree_entry_bytes(repo.store(), relative, value).await?;
         let home_path = paths.home_dir.join(relative);
         let home_bytes = match fs::read(&home_path) {
@@ -236,6 +257,97 @@ async fn detect_changed_managed_paths(
         }
     }
     Ok(changed)
+}
+
+fn expand_selection_paths(
+    paths: &DotsyncPaths,
+    selection_paths: &[PathBuf],
+    target_entries: &BTreeMap<PathBuf, TreeValue>,
+    internal_paths: &BTreeSet<PathBuf>,
+) -> Result<Vec<PathBuf>, DotsyncError> {
+    let mut expanded = BTreeSet::new();
+
+    for selection_path in selection_paths {
+        if internal_paths.contains(selection_path) {
+            continue;
+        }
+
+        let home_path = paths.home_dir.join(selection_path);
+        let is_directory_selection = home_path.is_dir()
+            || target_entries
+                .keys()
+                .any(|candidate| candidate != selection_path && path_has_prefix(candidate, selection_path));
+        if is_directory_selection {
+            if home_path.exists() {
+                collect_home_directory_files(
+                    &paths.home_dir,
+                    &home_path,
+                    &mut expanded,
+                    internal_paths,
+                )?;
+            }
+            expanded.extend(
+                target_entries
+                    .keys()
+                    .filter(|candidate| path_has_prefix(candidate, selection_path))
+                    .cloned(),
+            );
+        } else {
+            expanded.insert(selection_path.clone());
+        }
+    }
+
+    Ok(expanded.into_iter().collect())
+}
+
+fn collect_home_directory_files(
+    home_root: &Path,
+    current: &Path,
+    expanded: &mut BTreeSet<PathBuf>,
+    internal_paths: &BTreeSet<PathBuf>,
+) -> Result<(), DotsyncError> {
+    for entry in fs::read_dir(current).map_err(|source| DotsyncError::Io {
+        path: current.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| DotsyncError::Io {
+            path: current.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|source| DotsyncError::Io {
+            path: path.clone(),
+            source,
+        })?;
+
+        if file_type.is_dir() {
+            collect_home_directory_files(home_root, &path, expanded, internal_paths)?;
+            continue;
+        }
+
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let relative = path.strip_prefix(home_root).map_err(|source| DotsyncError::Jj {
+            message: format!(
+                "failed to make home path {} relative to {}: {source}",
+                path.display(),
+                home_root.display()
+            ),
+        })?;
+        let relative = relative.to_path_buf();
+        if internal_paths.contains(&relative) {
+            continue;
+        }
+        expanded.insert(relative);
+    }
+
+    Ok(())
+}
+
+fn path_has_prefix(path: &Path, prefix: &Path) -> bool {
+    path == prefix || path.starts_with(prefix)
 }
 
 async fn apply_home_path_to_tree(
