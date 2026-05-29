@@ -284,6 +284,7 @@ fn expand_selection_paths(
                     &home_path,
                     &mut expanded,
                     internal_paths,
+                    &paths.repo_root,
                 )?;
             }
             expanded.extend(
@@ -305,6 +306,7 @@ fn collect_home_directory_files(
     current: &Path,
     expanded: &mut BTreeSet<PathBuf>,
     internal_paths: &BTreeSet<PathBuf>,
+    repo_root: &Path,
 ) -> Result<(), DotsyncError> {
     for entry in fs::read_dir(current).map_err(|source| DotsyncError::Io {
         path: current.to_path_buf(),
@@ -321,7 +323,11 @@ fn collect_home_directory_files(
         })?;
 
         if file_type.is_dir() {
-            collect_home_directory_files(home_root, &path, expanded, internal_paths)?;
+            // Never recurse into the dotsync repo directory itself
+            if path.starts_with(repo_root) {
+                continue;
+            }
+            collect_home_directory_files(home_root, &path, expanded, internal_paths, repo_root)?;
             continue;
         }
 
