@@ -1,6 +1,36 @@
 # dotsync — Plan
 
-## Current state
+## v0.3 direction: edit-in-place, no workspace
+
+The fundamental model change: eliminate the user-visible staging area (`~/dotfiles`). Agents and users edit config files directly at their real locations (`~/.config/foo/bar.conf`), then run dotsync to commit selected paths to the right scope.
+
+### Key changes
+
+1. **No workspace/working copy.** jj-lib supports operating on a bare repo — read/write trees programmatically, never check out to disk. Store the repo at `~/.local/share/dotsync/repo/`.
+
+2. **Edit-in-place workflow.** The source of truth flips: home directory is where edits happen, dotsync imports them into the repo. `dotsync <scope> -m "msg" -- <paths>` commits selected home paths to a scope.
+
+3. **One-file-one-scope ownership (default).** Each managed file path is owned by exactly one scope. Enforced at commit time — reject if a path belongs to a different scope. Drop-in convention for machine-specific overrides (main config in parent scope, drop-in files in child scope). Escape hatch for monolithic files that can't be split.
+
+4. **Cascade becomes mechanical.** If files can't conflict, cascade never pauses. Simplifies implementation dramatically.
+
+5. **`dotsync status --output json`** — discovers home changes against last-synced state, groups by inferred scope. Planning surface for agents.
+
+### What this eliminates
+
+- `~/dotfiles/` as a visible directory (or it becomes just `.jj/` which we'd also hide)
+- `.git` visible to agents (already done in v0.2.0)
+- Merge conflicts during cascade (in the common case)
+- The concept of "staging area" that agents must learn
+
+### Open questions
+
+- Migration path from existing `~/dotfiles` repos
+- Scope ownership storage format (manifest on `all` scope? path-prefix rules?)
+- Hunk splitting: defer as escape hatch, not primary UX
+- What happens to `dotsync init`? Probably creates the hidden repo + registers the remote
+
+## Current state (v0.2.x)
 
 4 passing black-box CLI tests. Ratchet clean.
 
