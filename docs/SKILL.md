@@ -4,14 +4,25 @@ Use this skill when editing dotfiles on a machine managed by dotsync.
 
 ## Workflow
 
-1. Edit files in `~/dotfiles/`, not in `~/`.
-2. Read `~/dotfiles/.config/dotsync/config.toml` first to discover available scopes; its comments explain what each scope is for.
-3. Choose the root-est appropriate scope for the change (the highest scope that still semantically owns the edit).
-4. Run `dotsync <scope> -m "message" <path>...` after edits are complete, or `dotsync <scope> --all -m "message"` only when you intentionally want every repo edit committed.
-5. Run plain `dotsync` only when there are no local repo edits and you only want repo-to-system sync.
+1. Edit config files directly at `~/` (their real locations).
+2. Run `dotsync status` to see what changed.
+3. Run `dotsync <scope> -m "message" -- <paths>` to commit specific files, or `dotsync <scope> -m "message"` to commit all changed managed files.
+4. Choose the root-est appropriate scope for the change (the highest scope that still semantically owns the edit).
+5. To discover available scopes, read `.config/dotsync/config.toml` from the `all` scope — its comments explain what each scope is for.
+
+## Choosing a scope
+
+- `all`: config that applies to every machine (e.g. `.gitconfig`, universal shell aliases)
+- OS scopes (e.g. `linux`, `windows`): config specific to an OS
+- Environment scopes (e.g. `hyprland`): config specific to a desktop environment or tool stack
+- Machine scopes (e.g. `mx-xps-cy`): config specific to one machine only
+
+Always choose the **highest (most general) scope** that makes sense. If a change applies to all linux machines, use `linux`, not the machine scope.
 
 ## Notes
 
 - dotsync is repo-first: the repo is the source of truth.
-- The repo mirrors `~/`: paths map directly (for example `~/dotfiles/.config/fish/config.fish` maps to `~/.config/fish/config.fish`).
-- If live system files have drifted, dotsync will show the diff and stop. Inspect the diff before re-running with `--force`.
+- After committing, dotsync cascades the change through all descendant scopes and syncs the result back to `~/`.
+- If live system files have drifted from what the repo expects, `dotsync` (sync) will show the diff and stop. Inspect the diff before re-running with `--force`.
+- There is no `~/dotfiles/` directory. The repo is hidden at `~/.local/share/dotsync/repo/`. Never interact with it directly.
+- `dotsync --output json <command>` gives structured output for programmatic use.
