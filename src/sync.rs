@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{internal_repo_paths, load_config, DotsyncConfig, DotsyncPaths};
 use crate::error::DotsyncError;
+use crate::machine::detect_machine;
 use crate::repo::{
-    collect_managed_tree_entries, detect_current_scope, load_scope_commit, load_workspace,
+    collect_managed_tree_entries, fetch_origin, load_repo_direct, load_scope_commit,
     read_tree_entry_bytes,
 };
 
@@ -48,22 +49,8 @@ pub(crate) struct SyncState {
 
 pub async fn sync(paths: &DotsyncPaths, options: SyncOptions) -> Result<SyncReport, DotsyncError> {
     crate::commit::ensure_no_paused_cascade(paths)?;
-    let workspace = load_workspace(paths)?;
-    let repo = workspace
-        .repo_loader()
-        .load_at_head()
-        .await
-        .map_err(|err| crate::error::jj_error(format!("load repo at head: {err}")))?;
-
-    let snapshot = crate::repo::snapshot_working_copy(paths).await?;
-    if !snapshot.changed_paths.is_empty() {
-        return Err(DotsyncError::DirtyWorkingCopy {
-            count: snapshot.changed_paths.len(),
-        });
-    }
-
-    let _repo = crate::repo::fetch_origin(repo).await?;
-
+    let repo = load_repo_direct(paths).await?;
+    let _repo = fetch_origin(repo).await?;
     sync_repo_to_home(paths, options, &[], None).await
 }
 
@@ -135,18 +122,20 @@ pub(crate) async fn sync_repo_to_home(
 ) -> Result<SyncReport, DotsyncError> {
     let config = load_config(paths).await?;
     let graph = config.graph.clone();
-    let workspace = load_workspace(paths)?;
-    let repo = workspace
-        .repo_loader()
-        .load_at_head()
-        .await
-        .map_err(|err| crate::error::jj_error(format!("load repo at head: {err}")))?;
+    let repo = load_repo_direct(paths).await?;
 
     let sync_state = load_sync_state(paths, &config)?;
     let current_scope = match (&sync_state, machine_scope_hint) {
         (Some(state), _) => state.machine_scope.clone(),
         (None, Some(scope)) => scope.to_string(),
-        (None, None) => detect_current_scope(&graph, &workspace, repo.as_ref())?,
+        (None, None) => {
+            let detected = detect_machine()?;
+            if graph.parents.contains_key(&detected.machine_scope) {
+                detected.machine_scope
+            } else {
+                return Err(DotsyncError::NoCurrentScope);
+            }
+        }
     };
     let current_commit = load_scope_commit(repo.as_ref(), &current_scope)?;
     let internal_paths = internal_repo_paths(&config);

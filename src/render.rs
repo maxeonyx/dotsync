@@ -152,21 +152,6 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 "If the remote bookmark was rewritten intentionally, reconcile that history explicitly instead of letting dotsync reset the local bookmark.",
             ],
         ),
-        DotsyncError::DirtyWorkingCopy { .. } => render_structured_error(
-            "dirty working copy",
-            "Dotsync keeps your dotfiles repo as the source of truth for your home-directory config and syncs committed repo state into the live system.",
-            "Plain `dotsync` is sync-only: it checks the repo state for your machine scope and copies that committed state into your home directory.",
-            "Plain `dotsync` expects a clean working copy with no uncommitted repo edits.",
-            error_report
-                .current_state
-                .as_deref()
-                .unwrap_or("working copy has uncommitted changes"),
-            "Dotsync stopped because it cannot safely sync changes that have not been assigned to a scope and committed into the scope DAG.",
-            &[
-                "Put the change in the root-est appropriate scope with `dotsync <scope> -m \"message\"`.",
-                "Use plain `dotsync` only after the repo working copy is clean.",
-            ],
-        ),
         DotsyncError::DriftDetected { .. } => render_structured_error(
             "drift detected",
             "Dotsync keeps your dotfiles repo as the source of truth for your home-directory config: the repo is the source of truth, and dotsync syncs committed repo state into the live system.",

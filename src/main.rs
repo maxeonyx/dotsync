@@ -123,13 +123,8 @@ impl TryFrom<Cli> for Action {
                             "commit mode accepts explicit paths or --all, not both",
                         ));
                     }
-                    (false, true) => {
-                        return Err(usage_error(
-                            "commit mode requires explicit file/directory paths or --all",
-                        ));
-                    }
                     (true, true) => CommitSelection::All,
-                    (false, false) => CommitSelection::Paths(cli.paths),
+                    (false, _) => CommitSelection::Paths(cli.paths),
                 };
 
                 Ok(Self::Commit {
@@ -280,7 +275,7 @@ fn discover_paths() -> Result<DotsyncPaths, DotsyncError> {
         .map(PathBuf::from)
         .ok_or(DotsyncError::NotImplemented("HOME is not set"))?;
     Ok(DotsyncPaths {
-        repo_root: home_dir.join("dotfiles"),
+        repo_root: home_dir.join(".local/share/dotsync/repo"),
         home_dir,
     })
 }

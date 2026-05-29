@@ -12,8 +12,7 @@ use crate::config::{load_config, render_config, write_config, DotsyncPaths};
 use crate::error::{jj_error, DotsyncError};
 use crate::machine::{detect_machine, MachineIdentity};
 use crate::repo::{
-    add_origin_remote, checkout_workspace_to_scope, default_settings, fetch_origin, load_repo,
-    load_workspace, push_scope_updates, snapshot_working_copy,
+    add_origin_remote, default_settings, fetch_origin, load_repo_direct, push_scope_updates,
 };
 use crate::scope_graph::ScopeGraph;
 use crate::sync::{sync_repo_to_home, SyncOptions, SyncReport};
@@ -47,20 +46,15 @@ pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, 
         .await
         .map_err(|err| jj_error(format!("init repo: {err}")))?;
     let _repo = add_origin_remote(repo, remote_url).await?;
-    let mut workspace = load_workspace(paths)?;
-    let repo = workspace
-        .repo_loader()
-        .load_at_head()
-        .await
-        .map_err(|err| jj_error(format!("reload repo after adding origin: {err}")))?;
+    let repo = load_repo_direct(paths).await?;
     let repo = fetch_origin(repo).await?;
     let identity = detect_machine()?;
 
     let remote_empty = repo.view().all_remote_bookmarks().next().is_none();
     let (created_scopes, current_scope) = if remote_empty {
-        bootstrap_empty_remote(paths, &mut workspace, &identity).await?
+        bootstrap_empty_remote(paths, &identity).await?
     } else {
-        join_existing_remote(paths, &mut workspace, repo, &identity).await?
+        join_existing_remote(paths, repo, &identity).await?
     };
 
     let sync = sync_repo_to_home(
@@ -81,7 +75,6 @@ pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, 
 
 pub(crate) async fn bootstrap_empty_remote(
     paths: &DotsyncPaths,
-    workspace: &mut Workspace,
     identity: &MachineIdentity,
 ) -> Result<(Vec<String>, String), DotsyncError> {
     let graph = ScopeGraph::new(HashMap::from([
@@ -92,20 +85,14 @@ pub(crate) async fn bootstrap_empty_remote(
             vec![identity.os_scope.clone()],
         ),
     ]))?;
-    write_config(paths, &render_config(&graph))?;
-
-    let snapshot = snapshot_working_copy(paths).await?;
-    let repo = workspace
-        .repo_loader()
-        .load_at_head()
-        .await
-        .map_err(|err| jj_error(format!("reload repo after init snapshot: {err}")))?;
+    let repo = load_repo_direct(paths).await?;
     let root_commit = repo.store().root_commit();
 
     let mut tx = repo.start_transaction();
+    let config_tree = write_config(tx.repo_mut(), &root_commit.tree(), &render_config(&graph)).await?;
     let all_commit = tx
         .repo_mut()
-        .new_commit(vec![root_commit.id().clone()], snapshot.tree)
+        .new_commit(vec![root_commit.id().clone()], config_tree)
         .set_description("dotsync: initialize all scope")
         .write()
         .await
@@ -136,21 +123,10 @@ pub(crate) async fn bootstrap_empty_remote(
         RefNameBuf::from(identity.machine_scope.as_str()).as_ref(),
         RefTarget::normal(machine_commit.id().clone()),
     );
-    tx.repo_mut()
-        .set_wc_commit(
-            workspace.workspace_name().to_owned(),
-            machine_commit.id().clone(),
-        )
-        .map_err(|err| jj_error(format!("set init working copy commit: {err}")))?;
-    let repo = tx
+    tx
         .commit("dotsync: initialize scopes")
         .await
         .map_err(|err| jj_error(format!("commit init scopes: {err}")))?;
-
-    workspace
-        .check_out(repo.op_id().clone(), None, &machine_commit)
-        .await
-        .map_err(|err| jj_error(format!("check out machine scope: {err}")))?;
 
     Ok((
         vec![
@@ -164,11 +140,9 @@ pub(crate) async fn bootstrap_empty_remote(
 
 pub(crate) async fn join_existing_remote(
     paths: &DotsyncPaths,
-    workspace: &mut Workspace,
     _repo: std::sync::Arc<jj_lib::repo::ReadonlyRepo>,
     identity: &MachineIdentity,
 ) -> Result<(Vec<String>, String), DotsyncError> {
-    checkout_workspace_to_scope(paths, workspace, "all").await?;
     let graph = load_config(paths).await?.graph;
 
     let mut parents = graph.parents.clone();
@@ -186,23 +160,25 @@ pub(crate) async fn join_existing_remote(
     }
 
     if created_scopes.is_empty() {
-        checkout_workspace_to_scope(paths, workspace, &identity.machine_scope).await?;
         return Ok((created_scopes, identity.machine_scope.clone()));
     }
 
     let updated_graph = ScopeGraph::new(parents)?;
-    write_config(paths, &render_config(&updated_graph))?;
-
-    let snapshot = snapshot_working_copy(paths).await?;
-    let repo = load_repo(workspace).await?;
+    let repo = load_repo_direct(paths).await?;
 
     let mut tx = repo.start_transaction();
     let mut scope_heads = ScopeHeads::load_existing(tx.repo_mut().base_repo(), &updated_graph)?;
     let all_head = scope_heads.require("all")?;
+    let config_tree = write_config(
+        tx.repo_mut(),
+        &all_head.tree(),
+        &render_config(&updated_graph),
+    )
+    .await?;
 
     let config_commit = tx
         .repo_mut()
-        .new_commit(vec![all_head.id().clone()], snapshot.tree)
+        .new_commit(vec![all_head.id().clone()], config_tree)
         .set_description("dotsync: update scope config")
         .write()
         .await
@@ -268,21 +244,10 @@ pub(crate) async fn join_existing_remote(
         scope_heads.update(identity.machine_scope.clone(), commit);
     }
 
-    let machine_commit = scope_heads.require(&identity.machine_scope)?;
-    tx.repo_mut()
-        .set_wc_commit(
-            workspace.workspace_name().to_owned(),
-            machine_commit.id().clone(),
-        )
-        .map_err(|err| jj_error(format!("set join working copy commit: {err}")))?;
-    let repo = tx
+    let _repo = tx
         .commit("dotsync: initialize machine scope")
         .await
         .map_err(|err| jj_error(format!("commit join scope changes: {err}")))?;
-    workspace
-        .check_out(repo.op_id().clone(), None, &machine_commit)
-        .await
-        .map_err(|err| jj_error(format!("check out joined machine scope: {err}")))?;
 
     let mut created = descendant_scopes;
     created.extend(created_scopes);

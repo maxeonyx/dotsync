@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, HashMap};
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,73 +10,36 @@ use jj_lib::git::{
     self, GitBranchPushTargets, GitFetch, GitFetchRefExpression, GitImportOptions, GitProgress,
     GitPushOptions, GitSidebandLineTerminator, GitSubprocessCallback, GitSubprocessOptions,
 };
-use jj_lib::gitignore::GitIgnoreFile;
-use jj_lib::matchers::EverythingMatcher;
-use jj_lib::merge::MergedTreeValue;
-use jj_lib::merged_tree_builder::MergedTreeBuilder;
 use jj_lib::object_id::ObjectId;
 use jj_lib::op_store::RefTarget;
-use jj_lib::ref_name::{RefNameBuf, WorkspaceNameBuf};
+use jj_lib::ref_name::RefNameBuf;
 use jj_lib::refs::BookmarkPushUpdate;
-use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo as _, StoreFactories};
-use jj_lib::repo_path::RepoPathBuf;
+use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo as _, RepoLoader, StoreFactories};
 use jj_lib::settings::UserSettings;
 use jj_lib::str_util::StringExpression;
-use jj_lib::working_copy::SnapshotOptions;
-use jj_lib::workspace::{default_working_copy_factories, Workspace};
 
-use crate::config::{repo_config_path, DotsyncPaths};
+use crate::config::DotsyncPaths;
 use crate::error::{jj_error, DotsyncError};
-use crate::scope_graph::{scope_depth, ScopeGraph};
-
-#[derive(Debug, Clone)]
-pub(crate) struct WorkingCopySnapshot {
-    pub(crate) tree: jj_lib::merged_tree::MergedTree,
-    pub(crate) changed_paths: Vec<PathBuf>,
-}
-
-pub(crate) fn load_workspace(paths: &DotsyncPaths) -> Result<Workspace, DotsyncError> {
-    let settings = default_settings()?;
-    Workspace::load(
-        &settings,
-        &paths.repo_root,
-        &StoreFactories::default(),
-        &default_working_copy_factories(),
-    )
-    .map_err(|err| jj_error(format!("load workspace: {err}")))
-}
 
 pub(crate) fn default_settings() -> Result<UserSettings, DotsyncError> {
     let config = StackedConfig::with_defaults();
     UserSettings::from_config(config).map_err(|err| jj_error(format!("load jj settings: {err}")))
 }
 
-pub(crate) fn detect_current_scope(
-    graph: &ScopeGraph,
-    workspace: &Workspace,
-    repo: &dyn jj_lib::repo::Repo,
-) -> Result<String, DotsyncError> {
-    let wc_commit_id = repo
-        .view()
-        .get_wc_commit_id(workspace.workspace_name())
-        .ok_or(DotsyncError::NoCurrentScope)?;
-
-    let mut best: Option<(String, usize)> = None;
-    let mut memo = HashMap::new();
-    for (name, _) in repo.view().local_bookmarks_for_commit(wc_commit_id) {
-        let scope = name.as_str().to_owned();
-        if !graph.parents.contains_key(&scope) {
-            continue;
-        }
-        let depth = scope_depth(graph, &scope, &mut memo)?;
-        match &best {
-            Some((_, best_depth)) if *best_depth >= depth => {}
-            _ => best = Some((scope, depth)),
-        }
-    }
-
-    best.map(|(scope, _)| scope)
-        .ok_or(DotsyncError::NoCurrentScope)
+pub(crate) async fn load_repo_direct(
+    paths: &DotsyncPaths,
+) -> Result<Arc<ReadonlyRepo>, DotsyncError> {
+    let settings = default_settings()?;
+    let loader = RepoLoader::init_from_file_system(
+        &settings,
+        &paths.repo_root.join(".jj/repo"),
+        &StoreFactories::default(),
+    )
+    .map_err(|err| jj_error(format!("load repo loader from file system: {err}")))?;
+    loader
+        .load_at_head()
+        .await
+        .map_err(|err| jj_error(format!("load repo at head: {err}")))
 }
 
 pub(crate) async fn add_origin_remote(
@@ -187,71 +149,8 @@ pub(crate) fn sync_local_bookmarks_from_remote(
     Ok(())
 }
 
-pub(crate) async fn checkout_workspace_to_scope(
-    paths: &DotsyncPaths,
-    workspace: &mut Workspace,
-    scope: &str,
-) -> Result<(), DotsyncError> {
-    let repo = load_repo(workspace).await?;
-    let commit_id = repo
-        .view()
-        .get_local_bookmark(RefNameBuf::from(scope).as_ref())
-        .as_normal()
-        .cloned()
-        .ok_or_else(|| DotsyncError::MissingScopeBookmark {
-            scope: scope.to_string(),
-        })?;
-    let commit = repo
-        .store()
-        .get_commit(&commit_id)
-        .map_err(|err| jj_error(format!("load checkout commit for {scope}: {err}")))?;
-
-    let mut tx = repo.start_transaction();
-    tx.repo_mut()
-        .set_wc_commit(workspace.workspace_name().to_owned(), commit.id().clone())
-        .map_err(|err| jj_error(format!("set workspace commit for {scope}: {err}")))?;
-    let repo = tx
-        .commit(format!("dotsync: check out {scope}"))
-        .await
-        .map_err(|err| jj_error(format!("commit checkout operation for {scope}: {err}")))?;
-    checkout_workspace_to_commit(workspace, repo.op_id().clone(), &commit).await?;
-
-    if !repo_config_path(paths).exists() && scope == "all" {
-        return Err(DotsyncError::Io {
-            path: repo_config_path(paths),
-            source: io::Error::new(io::ErrorKind::NotFound, "config missing after checkout"),
-        });
-    }
-    Ok(())
-}
-
-pub(crate) async fn checkout_workspace_to_commit(
-    workspace: &mut Workspace,
-    op_id: jj_lib::op_store::OperationId,
-    commit: &jj_lib::commit::Commit,
-) -> Result<(), DotsyncError> {
-    workspace
-        .check_out(op_id, None, commit)
-        .await
-        .map_err(|err| jj_error(format!("materialize checkout: {err}")))?;
-    Ok(())
-}
-
-pub(crate) async fn load_repo(workspace: &Workspace) -> Result<Arc<ReadonlyRepo>, DotsyncError> {
-    workspace
-        .repo_loader()
-        .load_at_head()
-        .await
-        .map_err(|err| jj_error(format!("load repo at head: {err}")))
-}
-
 pub(crate) async fn push_scope_updates(paths: &DotsyncPaths) -> Result<(), DotsyncError> {
-    let workspace = load_workspace(paths)?;
-    let repo = workspace
-        .repo_loader()
-        .load_at_head()
-        .await
-        .map_err(|err| jj_error(format!("load repo before push: {err}")))?;
+    let repo = load_repo_direct(paths).await?;
     let settings = default_settings()?;
     let subprocess_options = GitSubprocessOptions::from_settings(&settings)
         .map_err(|err| jj_error(format!("load git subprocess settings: {err}")))?;
@@ -297,75 +196,6 @@ pub(crate) async fn push_scope_updates(paths: &DotsyncPaths) -> Result<(), Dotsy
     Ok(())
 }
 
-pub(crate) async fn snapshot_working_copy(
-    paths: &DotsyncPaths,
-) -> Result<WorkingCopySnapshot, DotsyncError> {
-    let mut workspace = load_workspace(paths)?;
-    let repo = workspace
-        .repo_loader()
-        .load_at_head()
-        .await
-        .map_err(|err| jj_error(format!("load repo at head: {err}")))?;
-
-    let mut locked_ws = workspace
-        .start_working_copy_mutation()
-        .map_err(|err| jj_error(format!("lock working copy: {err}")))?;
-    let snapshot_options = SnapshotOptions {
-        base_ignores: GitIgnoreFile::empty(),
-        progress: None,
-        start_tracking_matcher: &EverythingMatcher,
-        force_tracking_matcher: &EverythingMatcher,
-        max_new_file_size: u64::MAX,
-    };
-    let old_tree = locked_ws.locked_wc().old_tree().clone();
-    let (tree, _) = locked_ws
-        .locked_wc()
-        .snapshot(&snapshot_options)
-        .await
-        .map_err(|err| jj_error(format!("snapshot working copy: {err}")))?;
-    locked_ws
-        .finish(repo.op_id().clone())
-        .map_err(|err| jj_error(format!("finish working copy mutation: {err}")))?;
-
-    let changed_paths = changed_repo_paths(&old_tree, &tree)?;
-    Ok(WorkingCopySnapshot {
-        tree,
-        changed_paths,
-    })
-}
-
-pub(crate) fn changed_repo_paths(
-    old_tree: &jj_lib::merged_tree::MergedTree,
-    new_tree: &jj_lib::merged_tree::MergedTree,
-) -> Result<Vec<PathBuf>, DotsyncError> {
-    let old_entries = collect_tree_entries(old_tree)?;
-    let new_entries = collect_tree_entries(new_tree)?;
-    let all_paths = old_entries
-        .keys()
-        .chain(new_entries.keys())
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-
-    Ok(all_paths
-        .into_iter()
-        .filter(|path| old_entries.get(path) != new_entries.get(path))
-        .map(|path| PathBuf::from(path.as_internal_file_string()))
-        .collect())
-}
-
-pub(crate) fn collect_tree_entries(
-    tree: &jj_lib::merged_tree::MergedTree,
-) -> Result<BTreeMap<RepoPathBuf, MergedTreeValue>, DotsyncError> {
-    tree.entries()
-        .map(|(path, value)| {
-            let display_path = path.as_internal_file_string().to_string();
-            value
-                .map(|value| (path, value))
-                .map_err(|err| jj_error(format!("read tree entry {}: {err}", display_path)))
-        })
-        .collect()
-}
-
 pub(crate) fn load_scope_commit(
     repo: &dyn jj_lib::repo::Repo,
     scope: &str,
@@ -381,128 +211,6 @@ pub(crate) fn load_scope_commit(
     repo.store()
         .get_commit(&commit_id)
         .map_err(|err| jj_error(format!("load scope commit for {scope}: {err}")))
-}
-
-pub(crate) async fn create_temporary_conflict_commit(
-    mut_repo: &mut MutableRepo,
-    scope_heads: &crate::cascade::ScopeHeads,
-    pause: &crate::cascade::CascadePause,
-    description: &str,
-) -> Result<jj_lib::commit::Commit, DotsyncError> {
-    let mut parents = vec![scope_heads.require(&pause.scope)?];
-    for parent_scope in &pause.parent_scopes {
-        parents.push(scope_heads.require(parent_scope)?);
-    }
-    let merged_tree = jj_lib::rewrite::merge_commit_trees(mut_repo, &parents)
-        .await
-        .map_err(|err| jj_error(format!("recreate conflict tree for {}: {err}", pause.scope)))?;
-    mut_repo
-        .new_commit(
-            parents.iter().map(|commit| commit.id().clone()).collect(),
-            merged_tree,
-        )
-        .set_description(description)
-        .write()
-        .await
-        .map_err(|err| {
-            jj_error(format!(
-                "write temporary conflict commit for {}: {err}",
-                pause.scope
-            ))
-        })
-}
-
-pub(crate) async fn set_working_copy_to_paused_conflict(
-    mut_repo: &mut MutableRepo,
-    scope_heads: &crate::cascade::ScopeHeads,
-    workspace_name: WorkspaceNameBuf,
-    pause: &crate::cascade::CascadePause,
-    description: &str,
-) -> Result<jj_lib::commit::Commit, DotsyncError> {
-    let current_commit =
-        create_temporary_conflict_commit(mut_repo, scope_heads, pause, description).await?;
-
-    mut_repo
-        .set_wc_commit(workspace_name, current_commit.id().clone())
-        .map_err(|err| jj_error(format!("set paused working copy commit: {err}")))?;
-    Ok(current_commit)
-}
-
-pub(crate) async fn project_selected_paths(
-    selected_tree: &jj_lib::merged_tree::MergedTree,
-    base_tree: &jj_lib::merged_tree::MergedTree,
-    selected_paths: &[PathBuf],
-) -> Result<jj_lib::merged_tree::MergedTree, DotsyncError> {
-    let mut builder = MergedTreeBuilder::new(base_tree.clone());
-    for path in selected_paths {
-        let repo_path =
-            RepoPathBuf::from_internal_string(path.to_string_lossy().replace('\\', "/"))
-                .map_err(|err| jj_error(format!("invalid repo path {}: {err}", path.display())))?;
-        let value = selected_tree
-            .path_value(repo_path.as_ref())
-            .map_err(|err| jj_error(format!("read selected path {}: {err}", path.display())))?;
-        builder.set_or_remove(repo_path, value);
-    }
-    builder
-        .write_tree()
-        .await
-        .map_err(|err| jj_error(format!("write selected tree: {err}")))
-}
-
-pub(crate) async fn restore_working_copy_paths(
-    paths: &DotsyncPaths,
-    snapshot_tree: &jj_lib::merged_tree::MergedTree,
-    restore_paths: &[PathBuf],
-) -> Result<(), DotsyncError> {
-    for path in restore_paths {
-        let repo_path = RepoPathBuf::from_internal_string(
-            path.to_string_lossy().replace('\\', "/"),
-        )
-        .map_err(|err| jj_error(format!("invalid restore path {}: {err}", path.display())))?;
-        let value = snapshot_tree
-            .path_value(repo_path.as_ref())
-            .map_err(|err| jj_error(format!("read restore path {}: {err}", path.display())))?;
-        let system_path = paths.repo_root.join(path);
-        let resolved = value.into_resolved().map_err(|conflict| {
-            jj_error(format!(
-                "restore path {} is conflicted: {conflict:?}",
-                path.display()
-            ))
-        })?;
-
-        match resolved {
-            Some(TreeValue::Tree(_)) => {
-                fs::create_dir_all(&system_path).map_err(|source| DotsyncError::Io {
-                    path: system_path.clone(),
-                    source,
-                })?;
-            }
-            Some(value) => {
-                if let Some(parent) = system_path.parent() {
-                    fs::create_dir_all(parent).map_err(|source| DotsyncError::Io {
-                        path: parent.to_path_buf(),
-                        source,
-                    })?;
-                }
-                let contents = read_tree_entry_bytes(snapshot_tree.store(), path, &value).await?;
-                fs::write(&system_path, contents).map_err(|source| DotsyncError::Io {
-                    path: system_path,
-                    source,
-                })?;
-            }
-            None => match fs::remove_file(&system_path) {
-                Ok(()) => {}
-                Err(source) if source.kind() == io::ErrorKind::NotFound => {}
-                Err(source) => {
-                    return Err(DotsyncError::Io {
-                        path: system_path,
-                        source,
-                    });
-                }
-            },
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn collect_managed_tree_entries(

@@ -32,7 +32,7 @@ pub enum DotsyncError {
     MissingParent { scope: String, parent: String },
     #[error("scope graph contains a cycle involving `{scope}`")]
     ScopeCycle { scope: String },
-    #[error("no scope bookmark points at the working copy commit")]
+    #[error("unable to determine current machine scope")]
     NoCurrentScope,
     #[error("scope `{scope}` does not exist in config")]
     InvalidScope { scope: String },
@@ -80,10 +80,6 @@ pub enum DotsyncError {
         count: usize,
         drifts: Vec<FileDrift>,
     },
-    #[error(
-        "working copy has uncommitted changes in {count} path(s); plain `dotsync` requires a clean working copy. Use `dotsync <scope> -m \"message\"` instead"
-    )]
-    DirtyWorkingCopy { count: usize },
     #[error("repo already exists at {path}")]
     RepoAlreadyExists { path: PathBuf },
     #[error("unable to determine machine hostname")]
@@ -104,7 +100,6 @@ impl DotsyncError {
                         .to_string(),
                 ),
             },
-            DotsyncError::DirtyWorkingCopy { .. } => basic_error_report("dirty_working_copy", self),
             DotsyncError::NoPausedCascade => basic_error_report("no_paused_cascade", self),
             DotsyncError::InvalidScope { .. } => basic_error_report("invalid_scope", self),
             DotsyncError::ScopeNotAncestor { .. } => basic_error_report("scope_not_ancestor", self),
@@ -184,9 +179,6 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
             remote_target,
         } => Some(format!(
             "bookmark: {bookmark}; local target: {local_target}; remote target: {remote_target}"
-        )),
-        DotsyncError::DirtyWorkingCopy { count } => Some(format!(
-            "working copy has uncommitted changes in {count} path(s)"
         )),
         DotsyncError::NoPausedCascade => Some("no cascade is currently paused".to_string()),
         DotsyncError::NotImplemented(_)

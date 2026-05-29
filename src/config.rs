@@ -1,13 +1,17 @@
 use std::collections::{BTreeSet, HashMap};
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use jj_lib::backend::{CopyId, TreeValue};
+use jj_lib::merge::Merge;
+use jj_lib::merged_tree_builder::MergedTreeBuilder;
 use jj_lib::repo::Repo as _;
+use jj_lib::repo::MutableRepo;
+use jj_lib::repo_path::RepoPathBuf;
 use serde::Deserialize;
 
 use crate::error::{jj_error, DotsyncError};
-use crate::repo::{load_scope_commit, load_workspace, read_tree_entry_bytes};
+use crate::repo::{load_repo_direct, load_scope_commit, read_tree_entry_bytes};
 use crate::scope_graph::{scope_depth, ScopeGraph};
 
 pub(crate) const DOTSYNC_CONFIG_RELATIVE_PATH: &str = ".config/dotsync/config.toml";
@@ -83,24 +87,37 @@ pub(crate) fn render_config(graph: &ScopeGraph) -> String {
     rendered
 }
 
-pub(crate) fn write_config(paths: &DotsyncPaths, contents: &str) -> Result<(), DotsyncError> {
-    let path = repo_config_path(paths);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| DotsyncError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
-    fs::write(&path, contents).map_err(|source| DotsyncError::Io { path, source })
+pub(crate) async fn write_config(
+    mut_repo: &mut MutableRepo,
+    parent_tree: &jj_lib::merged_tree::MergedTree,
+    contents: &str,
+) -> Result<jj_lib::merged_tree::MergedTree, DotsyncError> {
+    let path = RepoPathBuf::from_internal_string(DOTSYNC_CONFIG_RELATIVE_PATH)
+        .map_err(|err| jj_error(format!("invalid config repo path: {err}")))?;
+    let mut reader = contents.as_bytes();
+    let file_id = mut_repo
+        .store()
+        .write_file(path.as_ref(), &mut reader)
+        .await
+        .map_err(|err| jj_error(format!("write config file to repo store: {err}")))?;
+
+    let mut builder = MergedTreeBuilder::new(parent_tree.clone());
+    builder.set_or_remove(
+        path,
+        Merge::normal(TreeValue::File {
+            id: file_id,
+            executable: false,
+            copy_id: CopyId::placeholder(),
+        }),
+    );
+    builder
+        .write_tree()
+        .await
+        .map_err(|err| jj_error(format!("write config tree: {err}")))
 }
 
 pub(crate) async fn load_config(paths: &DotsyncPaths) -> Result<DotsyncConfig, DotsyncError> {
-    let workspace = load_workspace(paths)?;
-    let repo = workspace
-        .repo_loader()
-        .load_at_head()
-        .await
-        .map_err(|err| jj_error(format!("load repo for config: {err}")))?;
+    let repo = load_repo_direct(paths).await?;
     let all_commit = load_scope_commit(repo.as_ref(), "all")?;
     let repo_path = jj_lib::repo_path::RepoPath::from_internal_string(DOTSYNC_CONFIG_RELATIVE_PATH)
         .map_err(|err| jj_error(format!("invalid config repo path: {err}")))?;
