@@ -266,10 +266,22 @@ fn expand_selection_paths(
     internal_paths: &BTreeSet<PathBuf>,
 ) -> Result<Vec<PathBuf>, DotsyncError> {
     let mut expanded = BTreeSet::new();
+    // Relative path of the repo root within home — reject anything under it
+    let repo_relative = paths
+        .repo_root
+        .strip_prefix(&paths.home_dir)
+        .ok()
+        .map(|p| p.to_path_buf());
 
     for selection_path in selection_paths {
         if internal_paths.contains(selection_path) {
             continue;
+        }
+        // Reject paths that are inside or equal to the repo directory
+        if let Some(ref repo_rel) = repo_relative {
+            if selection_path.starts_with(repo_rel) {
+                continue;
+            }
         }
 
         let home_path = paths.home_dir.join(selection_path);
