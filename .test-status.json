@@ -29,6 +29,10 @@
     "dotsync::user_flows$scoped_commit_deletion_removes_file_from_fake_home": "passing",
     "dotsync::user_flows$scoped_deletion_only_affects_homes_where_scope_applies": "passing",
     "dotsync::user_flows$sync_uses_state_machine_scope_even_if_checkout_changes": "passing",
+    "dotsync::user_flows$v03_commit_returns_not_implemented": "pending",
+    "dotsync::user_flows$v03_continue_returns_not_implemented": "pending",
+    "dotsync::user_flows$v03_init_creates_hidden_repo_not_dotfiles": "pending",
+    "dotsync::user_flows$v03_plain_sync_ignores_unrelated_home_changes": "pending",
     "dotsync::user_flows$tdd_ratchet_gatekeeper": "passing"
   }
 }

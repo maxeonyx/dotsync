@@ -1702,6 +1702,115 @@ fn render_output(output: &Output) -> String {
 }
 
 #[test]
+fn v03_init_creates_hidden_repo_not_dotfiles() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    assert!(
+        machine
+            .home_dir
+            .join(".local/share/dotsync/repo/.jj")
+            .exists(),
+        "v0.3 init should create a hidden bare repo under ~/.local/share/dotsync/repo\n{}",
+        render_output(&init_output)
+    );
+    assert!(
+        !machine.home_dir.join("dotfiles").exists(),
+        "v0.3 init should not create ~/dotfiles\n{}",
+        render_output(&init_output)
+    );
+}
+
+#[test]
+fn v03_plain_sync_ignores_unrelated_home_changes() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_home_file("untracked-notes.txt", "leave me alone\n");
+
+    let sync_output = machine.sync();
+    assert!(
+        sync_output.status.success(),
+        "plain dotsync should ignore unrelated home-directory changes in bare-repo mode\n{}",
+        render_output(&sync_output)
+    );
+    assert_eq!(
+        machine.read_home_file("untracked-notes.txt"),
+        "leave me alone\n"
+    );
+}
+
+#[test]
+fn v03_commit_returns_not_implemented() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_home_file(".gitconfig", "[user]\nname = \"Max\"\n");
+
+    let commit_output = machine.commit("all", "not implemented yet");
+    assert_eq!(
+        commit_output.status.code(),
+        Some(1),
+        "scoped commit should return a normal not-implemented error in v0.3 task 1\n{}",
+        render_output(&commit_output)
+    );
+    let stderr = String::from_utf8_lossy(&commit_output.stderr);
+    assert!(
+        stderr.to_ascii_lowercase().contains("not implemented"),
+        "scoped commit should report not implemented clearly\n{}",
+        render_output(&commit_output)
+    );
+}
+
+#[test]
+fn v03_continue_returns_not_implemented() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    let continue_output = machine.continue_command();
+    assert_eq!(
+        continue_output.status.code(),
+        Some(1),
+        "continue should return a normal not-implemented error in v0.3 task 1\n{}",
+        render_output(&continue_output)
+    );
+    let stderr = String::from_utf8_lossy(&continue_output.stderr);
+    assert!(
+        stderr.to_ascii_lowercase().contains("not implemented"),
+        "continue should report not implemented clearly\n{}",
+        render_output(&continue_output)
+    );
+}
+
+#[test]
 fn tdd_ratchet_gatekeeper() {
     if std::env::var("TDD_RATCHET").is_err() {
         panic!("Run tdd-ratchet instead of cargo test.");
