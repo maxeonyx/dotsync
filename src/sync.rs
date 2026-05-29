@@ -48,7 +48,6 @@ pub(crate) struct SyncState {
 }
 
 pub async fn sync(paths: &DotsyncPaths, options: SyncOptions) -> Result<SyncReport, DotsyncError> {
-    crate::commit::ensure_no_paused_cascade(paths)?;
     let repo = load_repo_direct(paths).await?;
     let _repo = fetch_origin(repo).await?;
     sync_repo_to_home(paths, options, &[], None).await

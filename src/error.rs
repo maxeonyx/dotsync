@@ -36,18 +36,6 @@ pub enum DotsyncError {
     NoCurrentScope,
     #[error("scope `{scope}` does not exist in config")]
     InvalidScope { scope: String },
-    #[error("commit mode requires explicit file/directory paths or --all")]
-    CommitSelectionRequired,
-    #[error("commit mode accepts explicit paths or --all, not both")]
-    ConflictingCommitSelection,
-    #[error("commit path `{path}` is outside the repo root")]
-    CommitPathOutsideRepo { path: PathBuf },
-    #[error("commit path `{path}` does not exist in the working copy or selected deletion set")]
-    CommitPathMissing { path: PathBuf },
-    #[error("commit selection did not match any working-copy changes")]
-    CommitSelectionEmpty,
-    #[error("{config_path} may only be committed to scope `all`; requested scope `{scope}`")]
-    ConfigOnlyAllowedOnBaseScope { config_path: String, scope: String },
     #[error(
         "fetch would overwrite local bookmark `{bookmark}` by moving it from {local_target} to {remote_target}"
     )]
@@ -56,23 +44,8 @@ pub enum DotsyncError {
         local_target: String,
         remote_target: String,
     },
-    #[error("scope `{scope}` is not an ancestor of `{current_scope}`")]
-    ScopeNotAncestor {
-        scope: String,
-        current_scope: String,
-    },
     #[error("scope `{scope}` does not have a local bookmark")]
     MissingScopeBookmark { scope: String },
-    #[error("cascade already in progress on `{scope}`")]
-    CascadeInProgress { scope: String },
-    #[error("no cascade is currently paused")]
-    NoPausedCascade,
-    #[error("cascade state error at {path}: {source}")]
-    CascadeState {
-        path: PathBuf,
-        #[source]
-        source: serde_json::Error,
-    },
     #[error("sync state error at {path}: {message}")]
     SyncState { path: PathBuf, message: String },
     #[error("detected drift in {count} file(s)")]
@@ -100,30 +73,7 @@ impl DotsyncError {
                         .to_string(),
                 ),
             },
-            DotsyncError::NoPausedCascade => basic_error_report("no_paused_cascade", self),
             DotsyncError::InvalidScope { .. } => basic_error_report("invalid_scope", self),
-            DotsyncError::ScopeNotAncestor { .. } => basic_error_report("scope_not_ancestor", self),
-            DotsyncError::CascadeInProgress { .. } => {
-                basic_error_report("cascade_in_progress", self)
-            }
-            DotsyncError::CommitSelectionRequired => {
-                basic_error_report("commit_selection_required", self)
-            }
-            DotsyncError::ConflictingCommitSelection => {
-                basic_error_report("conflicting_commit_selection", self)
-            }
-            DotsyncError::CommitPathOutsideRepo { .. } => {
-                basic_error_report("commit_path_outside_repo", self)
-            }
-            DotsyncError::CommitPathMissing { .. } => {
-                basic_error_report("commit_path_missing", self)
-            }
-            DotsyncError::CommitSelectionEmpty => {
-                basic_error_report("commit_selection_empty", self)
-            }
-            DotsyncError::ConfigOnlyAllowedOnBaseScope { .. } => {
-                basic_error_report("config_base_scope_only", self)
-            }
             DotsyncError::FetchWouldOverwriteLocalBookmark { .. } => {
                 basic_error_report("fetch_would_overwrite_local_bookmark", self)
             }
@@ -134,7 +84,6 @@ impl DotsyncError {
             DotsyncError::MissingParent { .. } => basic_error_report("missing_parent", self),
             DotsyncError::ScopeCycle { .. } => basic_error_report("scope_cycle", self),
             DotsyncError::ConfigParse { .. } => basic_error_report("config_parse", self),
-            DotsyncError::CascadeState { .. } => basic_error_report("cascade_state", self),
             DotsyncError::SyncState { .. } => basic_error_report("sync_state", self),
             DotsyncError::RepoAlreadyExists { .. } => basic_error_report("repo_exists", self),
             DotsyncError::MissingHostname => basic_error_report("missing_hostname", self),
@@ -156,23 +105,8 @@ pub(crate) fn basic_error_report(code: &'static str, error: &DotsyncError) -> Er
 
 pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
     match error {
-        DotsyncError::CascadeInProgress { scope } => Some(format!("paused cascade scope: {scope}")),
         DotsyncError::InvalidScope { scope } => Some(format!("requested scope: {scope}")),
-        DotsyncError::ScopeNotAncestor {
-            scope,
-            current_scope,
-        } => Some(format!(
-            "requested scope: {scope}; current machine scope: {current_scope}"
-        )),
-        DotsyncError::SyncState { path, .. } => {
-            Some(format!("sync state path: {}", path.display()))
-        }
-        DotsyncError::CommitPathOutsideRepo { path } | DotsyncError::CommitPathMissing { path } => {
-            Some(format!("requested path: {}", path.display()))
-        }
-        DotsyncError::ConfigOnlyAllowedOnBaseScope { config_path, scope } => Some(format!(
-            "requested scope: {scope}; restricted path: {config_path}"
-        )),
+        DotsyncError::SyncState { path, .. } => Some(format!("sync state path: {}", path.display())),
         DotsyncError::FetchWouldOverwriteLocalBookmark {
             bookmark,
             local_target,
@@ -180,7 +114,6 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
         } => Some(format!(
             "bookmark: {bookmark}; local target: {local_target}; remote target: {remote_target}"
         )),
-        DotsyncError::NoPausedCascade => Some("no cascade is currently paused".to_string()),
         DotsyncError::NotImplemented(_)
         | DotsyncError::Io { .. }
         | DotsyncError::ConfigParse { .. }
@@ -188,14 +121,10 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
         | DotsyncError::ScopeCycle { .. }
         | DotsyncError::NoCurrentScope
         | DotsyncError::MissingScopeBookmark { .. }
-        | DotsyncError::CascadeState { .. }
         | DotsyncError::DriftDetected { .. }
         | DotsyncError::RepoAlreadyExists { .. }
         | DotsyncError::MissingHostname
-        | DotsyncError::Jj { .. }
-        | DotsyncError::CommitSelectionRequired
-        | DotsyncError::ConflictingCommitSelection
-        | DotsyncError::CommitSelectionEmpty => None,
+        | DotsyncError::Jj { .. } => None,
     }
 }
 

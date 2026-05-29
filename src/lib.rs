@@ -9,7 +9,6 @@ mod scope_graph;
 mod sync;
 
 pub use crate::bootstrap::{init, InitReport};
-pub use crate::cascade::CascadePause;
 pub use crate::commit::{
     commit_and_sync, continue_after_conflict, CommandOutcome, CommitOptions, CommitReport,
     CommitSelection, ContinueReport,

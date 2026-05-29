@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 
 use crate::error::DotsyncError;
@@ -102,26 +100,4 @@ pub(crate) fn scope_depth(
     };
     memo.insert(scope.to_string(), depth);
     Ok(depth)
-}
-
-pub(crate) fn is_ancestor_scope(
-    graph: &ScopeGraph,
-    ancestor: &str,
-    scope: &str,
-) -> Result<bool, DotsyncError> {
-    if ancestor == scope {
-        return Ok(true);
-    }
-    let parents = graph
-        .parents
-        .get(scope)
-        .ok_or_else(|| DotsyncError::InvalidScope {
-            scope: scope.to_string(),
-        })?;
-    for parent in parents {
-        if is_ancestor_scope(graph, ancestor, parent)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }

@@ -8,7 +8,10 @@ use jj_lib::workspace::Workspace;
 use crate::cascade::{
     build_cascade_plan, execute_cascade_plan, CascadeCommand, CascadeOutcome, ScopeHeads,
 };
-use crate::config::{load_config, render_config, write_config, DotsyncPaths};
+use crate::config::{
+    default_sync_state_relative_path, load_config, render_config, write_config, DotsyncConfig,
+    DotsyncPaths,
+};
 use crate::error::{jj_error, DotsyncError};
 use crate::machine::{detect_machine, MachineIdentity};
 use crate::repo::{
@@ -87,9 +90,13 @@ pub(crate) async fn bootstrap_empty_remote(
     ]))?;
     let repo = load_repo_direct(paths).await?;
     let root_commit = repo.store().root_commit();
+    let config = DotsyncConfig {
+        graph: graph.clone(),
+        sync_state_relative_path: default_sync_state_relative_path().into(),
+    };
 
     let mut tx = repo.start_transaction();
-    let config_tree = write_config(tx.repo_mut(), &root_commit.tree(), &render_config(&graph)).await?;
+    let config_tree = write_config(tx.repo_mut(), &root_commit.tree(), &render_config(&config)).await?;
     let all_commit = tx
         .repo_mut()
         .new_commit(vec![root_commit.id().clone()], config_tree)
@@ -143,7 +150,8 @@ pub(crate) async fn join_existing_remote(
     _repo: std::sync::Arc<jj_lib::repo::ReadonlyRepo>,
     identity: &MachineIdentity,
 ) -> Result<(Vec<String>, String), DotsyncError> {
-    let graph = load_config(paths).await?.graph;
+    let config = load_config(paths).await?;
+    let graph = config.graph.clone();
 
     let mut parents = graph.parents.clone();
     let mut created_scopes = Vec::new();
@@ -169,12 +177,12 @@ pub(crate) async fn join_existing_remote(
     let mut tx = repo.start_transaction();
     let mut scope_heads = ScopeHeads::load_existing(tx.repo_mut().base_repo(), &updated_graph)?;
     let all_head = scope_heads.require("all")?;
-    let config_tree = write_config(
-        tx.repo_mut(),
-        &all_head.tree(),
-        &render_config(&updated_graph),
-    )
-    .await?;
+    let updated_config = DotsyncConfig {
+        graph: updated_graph.clone(),
+        sync_state_relative_path: config.sync_state_relative_path.clone(),
+    };
+    let config_tree =
+        write_config(tx.repo_mut(), &all_head.tree(), &render_config(&updated_config)).await?;
 
     let config_commit = tx
         .repo_mut()
@@ -192,8 +200,6 @@ pub(crate) async fn join_existing_remote(
     let cascade_command = CascadeCommand {
         root_scope: "all".to_string(),
         description: "dotsync: cascade init config".to_string(),
-        original_scope: "all".to_string(),
-        machine_scope: identity.machine_scope.clone(),
     };
     let cascade_plan = build_cascade_plan(&updated_graph, &scope_heads, &cascade_command);
     let descendant_scopes = match execute_cascade_plan(
@@ -205,9 +211,15 @@ pub(crate) async fn join_existing_remote(
     .await?
     {
         CascadeOutcome::Completed(success) => success.progress.completed_scopes,
-        CascadeOutcome::Paused(_pause) => {
+        CascadeOutcome::Paused {
+            scope,
+            conflicted_files,
+        } => {
             return Err(DotsyncError::Jj {
-                message: "unexpected conflict while cascading init config".to_string(),
+                message: format!(
+                    "unexpected conflict while cascading init config at `{scope}`: {}",
+                    conflicted_files.join(", ")
+                ),
             })
         }
     };

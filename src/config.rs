@@ -56,7 +56,8 @@ pub(crate) struct DotsyncConfig {
     pub(crate) sync_state_relative_path: PathBuf,
 }
 
-pub(crate) fn render_config(graph: &ScopeGraph) -> String {
+pub(crate) fn render_config(config: &DotsyncConfig) -> String {
+    let graph = &config.graph;
     let mut scopes: Vec<String> = graph.parents.keys().cloned().collect();
     let mut memo = HashMap::new();
     scopes.sort_by(|a, b| {
@@ -82,7 +83,7 @@ pub(crate) fn render_config(graph: &ScopeGraph) -> String {
     rendered.push_str("\n[sync]\n");
     rendered.push_str(&format!(
         "state_path = \"{}\"\n",
-        default_sync_state_relative_path()
+        config.sync_state_relative_path.display()
     ));
     rendered
 }

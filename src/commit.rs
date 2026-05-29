@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use crate::cascade::{CascadeStateStore, JsonCascadeStateStore};
 use crate::config::DotsyncPaths;
 use crate::error::DotsyncError;
 use crate::sync::{SyncOptions, SyncReport};
@@ -35,7 +34,6 @@ pub struct ContinueReport {
 #[derive(Debug, Clone)]
 pub enum CommandOutcome<T> {
     Success(T),
-    Conflict(crate::cascade::CascadePause),
 }
 
 pub async fn commit_and_sync(
@@ -54,17 +52,4 @@ pub async fn continue_after_conflict(
     Err(DotsyncError::NotImplemented(
         "continue is not available until home-diff commit flow lands",
     ))
-}
-
-pub(crate) fn ensure_no_paused_cascade(paths: &DotsyncPaths) -> Result<(), DotsyncError> {
-    if let Some(state) = cascade_state_store(paths).load()? {
-        return Err(DotsyncError::CascadeInProgress {
-            scope: state.paused_scope,
-        });
-    }
-    Ok(())
-}
-
-fn cascade_state_store(paths: &DotsyncPaths) -> JsonCascadeStateStore {
-    JsonCascadeStateStore::new(paths.repo_root.join(".jj/dotsync/cascade-state.json"))
 }

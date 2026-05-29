@@ -35,7 +35,7 @@ struct Cli {
     #[arg(long)]
     force: bool,
 
-    /// Commit every working-copy change
+    /// Commit every repo change
     #[arg(long)]
     all: bool,
 
@@ -85,7 +85,6 @@ struct UsageError {
 #[derive(Debug)]
 enum CliOutput {
     Success(SuccessOutput),
-    Conflict(dotsync::CascadePause),
     Error(DotsyncError),
     Usage(UsageError),
 }
@@ -209,7 +208,6 @@ async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
             ),
             notes: render::success_notes_for_drifts(&report.sync.drifts),
         })),
-        CommandOutcome::Conflict(conflict) => Ok(CliOutput::Conflict(conflict)),
     }
 }
 
@@ -266,7 +264,6 @@ async fn run_commit(
             ),
             notes: render::success_notes_for_drifts(&report.sync.drifts),
         })),
-        CommandOutcome::Conflict(conflict) => Ok(CliOutput::Conflict(conflict)),
     }
 }
 
@@ -297,13 +294,6 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
                 println!("{}", success.json);
             }
             0
-        }
-        CliOutput::Conflict(conflict) => {
-            eprintln!("{}", render::render_conflict_human(&conflict));
-            if matches!(output_format, OutputFormat::Json) {
-                println!("{}", render::render_conflict_json(&conflict));
-            }
-            3
         }
         CliOutput::Error(error) => {
             eprintln!("{}", render::render_error_human(&error));

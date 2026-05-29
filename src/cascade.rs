@@ -1,18 +1,10 @@
-#![allow(dead_code)]
-
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::io;
-use std::path::PathBuf;
 
-use jj_lib::backend::CommitId;
 use jj_lib::commit::Commit;
-use jj_lib::object_id::ObjectId;
 use jj_lib::op_store::RefTarget;
 use jj_lib::ref_name::RefNameBuf;
 use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo as _};
 use jj_lib::rewrite::merge_commit_trees;
-use serde::{Deserialize, Serialize};
 
 use crate::error::{jj_error, DotsyncError};
 use crate::scope_graph::ScopeGraph;
@@ -21,8 +13,6 @@ use crate::scope_graph::ScopeGraph;
 pub(crate) struct CascadeCommand {
     pub(crate) root_scope: String,
     pub(crate) description: String,
-    pub(crate) original_scope: String,
-    pub(crate) machine_scope: String,
 }
 
 #[derive(Debug, Clone)]
@@ -30,7 +20,7 @@ pub(crate) struct CascadePlan {
     steps: Vec<CascadeStep>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub(crate) struct CascadeStep {
     pub(crate) scope: String,
     pub(crate) parent_scopes: Vec<String>,
@@ -41,18 +31,6 @@ pub(crate) struct CascadeProgress {
     pub(crate) completed_scopes: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct CascadePause {
-    pub scope: String,
-    pub conflicted_files: Vec<String>,
-    pub scopes_done: Vec<String>,
-    pub scopes_pending: Vec<String>,
-    pub original_scope: String,
-    pub machine_scope: String,
-    pub parent_scopes: Vec<String>,
-    pub scope_dag: String,
-}
-
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CascadeSuccess {
     pub(crate) progress: CascadeProgress,
@@ -61,86 +39,10 @@ pub(crate) struct CascadeSuccess {
 #[derive(Debug, Clone)]
 pub(crate) enum CascadeOutcome {
     Completed(CascadeSuccess),
-    Paused(CascadePause),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PersistedCascadeState {
-    pub(crate) original_scope: String,
-    pub(crate) machine_scope: String,
-    pub(crate) paused_scope: String,
-    pub(crate) paused_parent_commit_hexes: Vec<String>,
-    pub(crate) command_description: String,
-    pub(crate) committed_scope: String,
-    pub(crate) completed_scopes: Vec<String>,
-    pub(crate) remaining_steps: Vec<CascadeStep>,
-}
-
-pub(crate) trait CascadeStateStore {
-    fn load(&self) -> Result<Option<PersistedCascadeState>, DotsyncError>;
-    fn save(&self, state: &PersistedCascadeState) -> Result<(), DotsyncError>;
-    fn clear(&self) -> Result<(), DotsyncError>;
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct JsonCascadeStateStore {
-    path: PathBuf,
-}
-
-impl JsonCascadeStateStore {
-    pub(crate) fn new(path: PathBuf) -> Self {
-        Self { path }
-    }
-}
-
-impl CascadeStateStore for JsonCascadeStateStore {
-    fn load(&self) -> Result<Option<PersistedCascadeState>, DotsyncError> {
-        let contents = match fs::read_to_string(&self.path) {
-            Ok(contents) => contents,
-            Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(source) => {
-                return Err(DotsyncError::Io {
-                    path: self.path.clone(),
-                    source,
-                })
-            }
-        };
-        let state =
-            serde_json::from_str(&contents).map_err(|source| DotsyncError::CascadeState {
-                path: self.path.clone(),
-                source,
-            })?;
-        Ok(Some(state))
-    }
-
-    fn save(&self, state: &PersistedCascadeState) -> Result<(), DotsyncError> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).map_err(|source| DotsyncError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
-        let contents =
-            serde_json::to_string_pretty(state).map_err(|source| DotsyncError::CascadeState {
-                path: self.path.clone(),
-                source,
-            })?;
-        fs::write(&self.path, contents).map_err(|source| DotsyncError::Io {
-            path: self.path.clone(),
-            source,
-        })
-    }
-
-    fn clear(&self) -> Result<(), DotsyncError> {
-        match fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(DotsyncError::Io {
-                path: self.path.clone(),
-                source,
-            }),
-        }
-    }
+    Paused {
+        scope: String,
+        conflicted_files: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -188,10 +90,6 @@ impl ScopeHeads {
 }
 
 impl CascadePlan {
-    pub(crate) fn from_steps(steps: Vec<CascadeStep>) -> Self {
-        Self { steps }
-    }
-
     pub(crate) fn remaining_steps(&self) -> &[CascadeStep] {
         &self.steps
     }
@@ -239,29 +137,6 @@ pub(crate) async fn execute_cascade_plan(
     .await
 }
 
-pub(crate) async fn resume_cascade(
-    mut_repo: &mut MutableRepo,
-    scope_heads: &mut ScopeHeads,
-    state: &PersistedCascadeState,
-) -> Result<CascadeOutcome, DotsyncError> {
-    let command = CascadeCommand {
-        root_scope: state.committed_scope.clone(),
-        description: state.command_description.clone(),
-        original_scope: state.original_scope.clone(),
-        machine_scope: state.machine_scope.clone(),
-    };
-    execute_cascade_steps(
-        mut_repo,
-        scope_heads,
-        &state.remaining_steps,
-        &command,
-        CascadeProgress {
-            completed_scopes: state.completed_scopes.clone(),
-        },
-    )
-    .await
-}
-
 async fn execute_cascade_steps(
     mut_repo: &mut MutableRepo,
     scope_heads: &mut ScopeHeads,
@@ -269,7 +144,7 @@ async fn execute_cascade_steps(
     command: &CascadeCommand,
     mut progress: CascadeProgress,
 ) -> Result<CascadeOutcome, DotsyncError> {
-    for (index, step) in steps.iter().enumerate() {
+    for step in steps {
         let existing_head = scope_heads.require(&step.scope)?;
         let mut parents = vec![existing_head];
         for parent_scope in &step.parent_scopes {
@@ -294,19 +169,10 @@ async fn execute_cascade_steps(
                 })
                 .collect::<Result<Vec<_>, DotsyncError>>()?;
 
-            return Ok(CascadeOutcome::Paused(CascadePause {
+            return Ok(CascadeOutcome::Paused {
                 scope: step.scope.clone(),
                 conflicted_files,
-                scopes_done: progress.completed_scopes.clone(),
-                scopes_pending: steps[index..]
-                    .iter()
-                    .map(|step| step.scope.clone())
-                    .collect(),
-                original_scope: command.original_scope.clone(),
-                machine_scope: command.machine_scope.clone(),
-                parent_scopes: step.parent_scopes.clone(),
-                scope_dag: String::new(),
-            }));
+            });
         }
 
         let new_commit = mut_repo
@@ -326,137 +192,6 @@ async fn execute_cascade_steps(
         progress.completed_scopes.push(step.scope.clone());
     }
     Ok(CascadeOutcome::Completed(CascadeSuccess { progress }))
-}
-
-pub(crate) fn build_paused_state(
-    plan: &CascadePlan,
-    pause: &CascadePause,
-    command: &CascadeCommand,
-    scope_heads: &ScopeHeads,
-) -> PersistedCascadeState {
-    let pause_index = plan
-        .remaining_steps()
-        .iter()
-        .position(|step| step.scope == pause.scope)
-        .expect("paused scope should exist in plan");
-
-    PersistedCascadeState {
-        original_scope: pause.original_scope.clone(),
-        machine_scope: pause.machine_scope.clone(),
-        paused_scope: pause.scope.clone(),
-        paused_parent_commit_hexes: paused_parent_commit_ids(scope_heads, pause)
-            .into_iter()
-            .map(|commit_id| commit_id.hex())
-            .collect(),
-        command_description: command.description.clone(),
-        committed_scope: command.root_scope.clone(),
-        completed_scopes: pause.scopes_done.clone(),
-        remaining_steps: plan.remaining_steps()[pause_index + 1..].to_vec(),
-    }
-}
-
-pub(crate) async fn create_scope_head_if_missing(
-    mut_repo: &mut MutableRepo,
-    scope_heads: &mut ScopeHeads,
-    graph: &ScopeGraph,
-    scope: &str,
-    description: &str,
-) -> Result<(), DotsyncError> {
-    if scope_heads.contains(scope) {
-        return Ok(());
-    }
-
-    let parents = graph
-        .parents
-        .get(scope)
-        .ok_or_else(|| DotsyncError::InvalidScope {
-            scope: scope.to_string(),
-        })?;
-
-    let parent_commit = if let Some(first_parent) = parents.first() {
-        scope_heads.require(first_parent)?
-    } else {
-        return Err(DotsyncError::MissingScopeBookmark {
-            scope: scope.to_string(),
-        });
-    };
-
-    let commit = mut_repo
-        .new_commit(vec![parent_commit.id().clone()], parent_commit.tree())
-        .set_description(description)
-        .write()
-        .await
-        .map_err(|err| jj_error(format!("write new scope head for {scope}: {err}")))?;
-    mut_repo.set_local_bookmark_target(
-        RefNameBuf::from(scope).as_ref(),
-        RefTarget::normal(commit.id().clone()),
-    );
-    scope_heads.update(scope.to_string(), commit);
-    Ok(())
-}
-
-pub(crate) async fn commit_resolved_pause(
-    mut_repo: &mut MutableRepo,
-    scope_heads: &mut ScopeHeads,
-    state: &PersistedCascadeState,
-    resolved_tree: &jj_lib::merged_tree::MergedTree,
-) -> Result<(), DotsyncError> {
-    let resolved_tree = resolved_tree.clone().resolve().await.map_err(|err| {
-        jj_error(format!(
-            "resolve paused merge tree for {}: {err}",
-            state.paused_scope
-        ))
-    })?;
-    let parents = state
-        .paused_parent_commit_hexes
-        .iter()
-        .map(|hex| load_commit_from_hex(mut_repo.base_repo(), hex))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let commit = mut_repo
-        .new_commit(
-            parents.iter().map(|commit| commit.id().clone()).collect(),
-            resolved_tree,
-        )
-        .set_description(&state.command_description)
-        .write()
-        .await
-        .map_err(|err| {
-            jj_error(format!(
-                "write resolved cascade commit for {}: {err}",
-                state.paused_scope
-            ))
-        })?;
-    mut_repo.set_local_bookmark_target(
-        RefNameBuf::from(state.paused_scope.as_str()).as_ref(),
-        RefTarget::normal(commit.id().clone()),
-    );
-    scope_heads.update(state.paused_scope.clone(), commit);
-    Ok(())
-}
-
-fn paused_parent_commit_ids(scope_heads: &ScopeHeads, pause: &CascadePause) -> Vec<CommitId> {
-    let mut parent_ids = vec![scope_heads
-        .require(&pause.scope)
-        .expect("paused scope head should exist")
-        .id()
-        .clone()];
-    parent_ids.extend(pause.parent_scopes.iter().map(|parent_scope| {
-        scope_heads
-            .require(parent_scope)
-            .expect("paused parent scope head should exist")
-            .id()
-            .clone()
-    }));
-    parent_ids
-}
-
-fn load_commit_from_hex(repo: &ReadonlyRepo, hex: &str) -> Result<Commit, DotsyncError> {
-    let commit_id = CommitId::try_from_hex(hex)
-        .ok_or_else(|| jj_error(format!("invalid persisted commit id {hex}")))?;
-    repo.store()
-        .get_commit(&commit_id)
-        .map_err(|err| jj_error(format!("load persisted commit {hex}: {err}")))
 }
 
 fn descendants_in_topological_order(graph: &ScopeGraph, scope: &str) -> Vec<String> {
@@ -495,168 +230,4 @@ fn descendants_of(graph: &ScopeGraph, scope: &str) -> Vec<String> {
         }
     }
     descendants
-}
-
-pub(crate) fn enrich_pause_with_scope_dag(
-    mut pause: CascadePause,
-    graph: &ScopeGraph,
-) -> CascadePause {
-    pause.scope_dag = ScopeDagRenderer::new(graph, &pause).render();
-    pause
-}
-
-struct ScopeDagRenderer<'a> {
-    graph: &'a ScopeGraph,
-    pause: &'a CascadePause,
-    display_children: HashMap<String, Vec<String>>,
-    done: HashSet<&'a str>,
-    pending: HashSet<&'a str>,
-}
-
-impl<'a> ScopeDagRenderer<'a> {
-    fn new(graph: &'a ScopeGraph, pause: &'a CascadePause) -> Self {
-        let mut display_children: HashMap<String, Vec<String>> = HashMap::new();
-        for (scope, parents) in &graph.parents {
-            if let Some(primary_parent) = parents.first() {
-                display_children
-                    .entry(primary_parent.clone())
-                    .or_default()
-                    .push(scope.clone());
-            }
-        }
-        for children in display_children.values_mut() {
-            children.sort();
-        }
-
-        Self {
-            graph,
-            pause,
-            display_children,
-            done: pause.scopes_done.iter().map(String::as_str).collect(),
-            pending: pause.scopes_pending.iter().map(String::as_str).collect(),
-        }
-    }
-
-    fn render(&self) -> String {
-        let mut lines = vec![
-            "Legend: [origin] original change, [done] cascaded, [paused] conflict here, [pending] still to cascade, [machine] your machine scope".to_string(),
-        ];
-        let roots = self.sorted_roots();
-        for (index, root) in roots.iter().enumerate() {
-            self.render_scope(&mut lines, root, "", index + 1 == roots.len(), true);
-        }
-        lines.join("\n")
-    }
-
-    fn render_scope(
-        &self,
-        lines: &mut Vec<String>,
-        scope: &str,
-        prefix: &str,
-        is_last: bool,
-        is_root: bool,
-    ) {
-        let connector = if is_root {
-            ""
-        } else if is_last {
-            "└─ "
-        } else {
-            "├─ "
-        };
-        lines.push(format!("{prefix}{connector}{}", self.render_label(scope)));
-
-        let child_prefix = if is_root {
-            String::new()
-        } else if is_last {
-            format!("{prefix}   ")
-        } else {
-            format!("{prefix}│  ")
-        };
-
-        let children = self.sorted_children(scope);
-        for (index, child) in children.iter().enumerate() {
-            self.render_scope(
-                lines,
-                child,
-                &child_prefix,
-                index + 1 == children.len(),
-                false,
-            );
-        }
-    }
-
-    fn render_label(&self, scope: &str) -> String {
-        let mut parts = vec![scope.to_string()];
-        parts.extend(self.scope_markers(scope).into_iter().map(str::to_string));
-
-        let extra_parents = self.extra_parents(scope);
-        if !extra_parents.is_empty() {
-            parts.push(format!("<- also from {}", extra_parents.join(", ")));
-        }
-
-        parts.join(" ")
-    }
-
-    fn scope_markers(&self, scope: &str) -> Vec<&'static str> {
-        let mut markers = Vec::new();
-        if scope == self.pause.original_scope {
-            markers.push("[origin]");
-        }
-        if scope == self.pause.scope {
-            markers.push("[paused]");
-        } else if self.done.contains(scope) {
-            markers.push("[done]");
-        } else if self.pending.contains(scope) {
-            markers.push("[pending]");
-        }
-        if scope == self.pause.machine_scope {
-            markers.push("[machine]");
-        }
-        markers
-    }
-
-    fn sorted_roots(&self) -> Vec<String> {
-        let mut roots: Vec<String> = self
-            .graph
-            .parents
-            .iter()
-            .filter(|(_, parents)| parents.is_empty())
-            .map(|(scope, _)| scope.clone())
-            .collect();
-        roots.sort();
-        roots
-    }
-
-    fn sorted_children(&self, scope: &str) -> Vec<String> {
-        let mut children = self
-            .display_children
-            .get(scope)
-            .cloned()
-            .unwrap_or_default();
-        children.sort_by_key(|child| self.sort_key(child));
-        children
-    }
-
-    fn extra_parents(&self, scope: &str) -> Vec<String> {
-        self.graph.parents[scope].iter().skip(1).cloned().collect()
-    }
-
-    fn sort_key(&self, scope: &str) -> (usize, String) {
-        (self.state_rank(scope), scope.to_string())
-    }
-}
-
-impl ScopeDagRenderer<'_> {
-    fn state_rank(&self, scope: &str) -> usize {
-        if scope == self.pause.scope {
-            return 0;
-        }
-        if self.pending.contains(scope) {
-            return 1;
-        }
-        if self.done.contains(scope) {
-            return 2;
-        }
-        3
-    }
 }
