@@ -124,7 +124,12 @@ pub(crate) async fn sync_repo_to_home(
     let repo = load_repo_direct(paths).await?;
 
     let sync_state = load_sync_state(paths, &config)?;
-    let current_scope = match (&sync_state, machine_scope_hint) {
+    // Only trust sync-state if its machine_scope exists in the current repo's config.
+    // A stale sync-state from a previous repo/remote should not drive scope selection.
+    let valid_sync_state = sync_state
+        .as_ref()
+        .filter(|state| graph.parents.contains_key(&state.machine_scope));
+    let current_scope = match (valid_sync_state, machine_scope_hint) {
         (Some(state), _) => state.machine_scope.clone(),
         (None, Some(scope)) => scope.to_string(),
         (None, None) => {
@@ -158,24 +163,18 @@ pub(crate) async fn sync_repo_to_home(
         synced_paths.push(relative.clone());
     }
 
-    if let Some(state) = &sync_state {
-        let previous_commit = repo
-            .store()
-            .get_commit(&state.last_synced_revision)
-            .map_err(|err| DotsyncError::SyncState {
-                path: sync_state_path(paths, &config),
-                message: format!(
-                    "last_synced_revision `{}` does not resolve to a commit: {err}",
-                    state.last_synced_revision.hex()
-                ),
-            })?;
-        let previous_entries =
-            collect_managed_tree_entries(&previous_commit.tree(), &internal_paths)?;
-        for removed_path in previous_entries
-            .keys()
-            .filter(|path| !repo_entries.contains_key(*path))
-        {
-            remove_home_path(paths, removed_path)?;
+    if let Some(state) = &valid_sync_state {
+        // If last_synced_revision doesn't exist in this repo, skip deletion
+        // (stale state from a different repo instance).
+        if let Ok(previous_commit) = repo.store().get_commit(&state.last_synced_revision) {
+            let previous_entries =
+                collect_managed_tree_entries(&previous_commit.tree(), &internal_paths)?;
+            for removed_path in previous_entries
+                .keys()
+                .filter(|path| !repo_entries.contains_key(*path))
+            {
+                remove_home_path(paths, removed_path)?;
+            }
         }
     }
 
