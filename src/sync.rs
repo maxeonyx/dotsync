@@ -59,7 +59,8 @@ pub(crate) fn resolve_current_scope(
     machine_scope_hint: Option<&str>,
 ) -> Result<String, DotsyncError> {
     let graph = &config.graph;
-    let valid_sync_state = sync_state.filter(|state| graph.parents.contains_key(&state.machine_scope));
+    let valid_sync_state =
+        sync_state.filter(|state| graph.parents.contains_key(&state.machine_scope));
     match (machine_scope_hint, valid_sync_state) {
         (Some(scope), _) => Ok(scope.to_string()),
         (None, Some(state)) => Ok(state.machine_scope.clone()),

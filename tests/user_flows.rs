@@ -1117,10 +1117,19 @@ fn status_shows_modified_file() {
     machine.write_home_file(relative, "export DOTSYNC=modified\n");
 
     let status_output = machine.run_dotsync(&["status"]);
-    assert_eq!(status_output.status.code(), Some(0), "{}", render_output(&status_output));
+    assert_eq!(
+        status_output.status.code(),
+        Some(0),
+        "{}",
+        render_output(&status_output)
+    );
 
     let stderr = String::from_utf8_lossy(&status_output.stderr);
-    assert!(stderr.contains(relative), "{}", render_output(&status_output));
+    assert!(
+        stderr.contains(relative),
+        "{}",
+        render_output(&status_output)
+    );
     assert!(
         stderr.contains("modified") || stderr.contains("M"),
         "{}",
@@ -1152,10 +1161,19 @@ fn status_shows_deleted_file() {
     machine.delete_home_file(relative);
 
     let status_output = machine.run_dotsync(&["status"]);
-    assert_eq!(status_output.status.code(), Some(0), "{}", render_output(&status_output));
+    assert_eq!(
+        status_output.status.code(),
+        Some(0),
+        "{}",
+        render_output(&status_output)
+    );
 
     let stderr = String::from_utf8_lossy(&status_output.stderr);
-    assert!(stderr.contains(relative), "{}", render_output(&status_output));
+    assert!(
+        stderr.contains(relative),
+        "{}",
+        render_output(&status_output)
+    );
     assert!(
         stderr.contains("deleted") || stderr.contains("D"),
         "{}",
@@ -1185,7 +1203,12 @@ fn status_clean_shows_no_changes() {
     );
 
     let status_output = machine.run_dotsync(&["status"]);
-    assert_eq!(status_output.status.code(), Some(0), "{}", render_output(&status_output));
+    assert_eq!(
+        status_output.status.code(),
+        Some(0),
+        "{}",
+        render_output(&status_output)
+    );
 
     let stderr = String::from_utf8_lossy(&status_output.stderr);
     let stderr_lower = stderr.to_ascii_lowercase();
@@ -1222,14 +1245,21 @@ fn status_json_contract() {
     machine.write_home_file(relative, "export DOTSYNC=modified\n");
 
     let status_output = machine.run_dotsync_json(&["status"]);
-    assert_eq!(status_output.status.code(), Some(0), "{}", render_output(&status_output));
+    assert_eq!(
+        status_output.status.code(),
+        Some(0),
+        "{}",
+        render_output(&status_output)
+    );
 
     let json = parse_stdout_json(&status_output);
     assert_eq!(json["status"], "ok");
     assert_eq!(json["command"], "status");
     assert_eq!(json["machine_scope"], "mx-xps-cy");
 
-    let groups = json["groups"].as_array().expect("groups should be an array");
+    let groups = json["groups"]
+        .as_array()
+        .expect("groups should be an array");
     assert!(
         !groups.is_empty(),
         "expected at least one status group\n{}",
@@ -1270,7 +1300,12 @@ fn status_ignores_unmanaged_files() {
     machine.write_home_file(relative, "this file is unmanaged\n");
 
     let status_output = machine.run_dotsync(&["status"]);
-    assert_eq!(status_output.status.code(), Some(0), "{}", render_output(&status_output));
+    assert_eq!(
+        status_output.status.code(),
+        Some(0),
+        "{}",
+        render_output(&status_output)
+    );
 
     let stderr = String::from_utf8_lossy(&status_output.stderr);
     assert!(
@@ -1347,7 +1382,8 @@ retired_ratchet_test!(
 );
 retired_ratchet_test!(retired_pending_scoped_commit_requires_paths_or_all_in_human_and_json_modes);
 #[test]
-fn retired_pending_selected_add_modify_and_delete_are_applied_without_touching_unselected_changes() {
+fn retired_pending_selected_add_modify_and_delete_are_applied_without_touching_unselected_changes()
+{
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
     let existing_relative = ".config/fish/config.fish";
@@ -1363,7 +1399,12 @@ fn retired_pending_selected_add_modify_and_delete_are_applied_without_touching_u
         render_output(&init_output)
     );
 
-    seed_remote_scope_file(&machine, "all", existing_relative, "set -g fish_greeting on\n");
+    seed_remote_scope_file(
+        &machine,
+        "all",
+        existing_relative,
+        "set -g fish_greeting on\n",
+    );
     seed_remote_scope_file(&machine, "all", removed_relative, "remove me\n");
     merge_remote_scope_into(&machine, "all", "linux");
     merge_remote_scope_into(&machine, "linux", "mx-xps-cy");

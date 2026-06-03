@@ -96,7 +96,8 @@ pub(crate) async fn bootstrap_empty_remote(
     };
 
     let mut tx = repo.start_transaction();
-    let config_tree = write_config(tx.repo_mut(), &root_commit.tree(), &render_config(&config)).await?;
+    let config_tree =
+        write_config(tx.repo_mut(), &root_commit.tree(), &render_config(&config)).await?;
     let all_commit = tx
         .repo_mut()
         .new_commit(vec![root_commit.id().clone()], config_tree)
@@ -130,8 +131,7 @@ pub(crate) async fn bootstrap_empty_remote(
         RefNameBuf::from(identity.machine_scope.as_str()).as_ref(),
         RefTarget::normal(machine_commit.id().clone()),
     );
-    tx
-        .commit("dotsync: initialize scopes")
+    tx.commit("dotsync: initialize scopes")
         .await
         .map_err(|err| jj_error(format!("commit init scopes: {err}")))?;
 
@@ -181,8 +181,12 @@ pub(crate) async fn join_existing_remote(
         graph: updated_graph.clone(),
         sync_state_relative_path: config.sync_state_relative_path.clone(),
     };
-    let config_tree =
-        write_config(tx.repo_mut(), &all_head.tree(), &render_config(&updated_config)).await?;
+    let config_tree = write_config(
+        tx.repo_mut(),
+        &all_head.tree(),
+        &render_config(&updated_config),
+    )
+    .await?;
 
     let config_commit = tx
         .repo_mut()

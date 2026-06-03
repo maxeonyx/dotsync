@@ -76,7 +76,8 @@ pub async fn commit_and_sync(
     let machine_scope = crate::sync::resolve_current_scope(&config, sync_state.as_ref(), None)?;
 
     let old_machine_commit = load_scope_commit(repo.as_ref(), &machine_scope)?;
-    let machine_entries = load_current_machine_entries(repo.as_ref(), &machine_scope, &internal_paths).await?;
+    let machine_entries =
+        load_current_machine_entries(repo.as_ref(), &machine_scope, &internal_paths).await?;
     let target_entries = load_scope_entries(repo.as_ref(), &options.scope, &internal_paths)?;
     let selected_paths = select_commit_paths(
         paths,
@@ -136,24 +137,17 @@ pub async fn commit_and_sync(
         description: format!("dotsync: cascade from {}", options.scope),
     };
     let plan = build_cascade_plan(&graph, &scope_heads, &cascade_command);
-    let cascaded_scopes = match execute_cascade_plan(
-        tx.repo_mut(),
-        &mut scope_heads,
-        &plan,
-        &cascade_command,
-    )
-    .await?
-    {
-        CascadeOutcome::Completed(success) => success.progress.completed_scopes,
-        CascadeOutcome::Paused {
-            scope: _,
-            conflicted_files: _,
-        } => {
-            return Err(DotsyncError::NotImplemented(
-                "cascade conflict resolution",
-            ));
-        }
-    };
+    let cascaded_scopes =
+        match execute_cascade_plan(tx.repo_mut(), &mut scope_heads, &plan, &cascade_command).await?
+        {
+            CascadeOutcome::Completed(success) => success.progress.completed_scopes,
+            CascadeOutcome::Paused {
+                scope: _,
+                conflicted_files: _,
+            } => {
+                return Err(DotsyncError::NotImplemented("cascade conflict resolution"));
+            }
+        };
 
     let expected_changes = expected_machine_changes(
         tx.repo_mut(),
@@ -216,7 +210,9 @@ async fn select_commit_paths(
         CommitSelection::Paths(selection_paths) if !selection_paths.is_empty() => {
             expand_selection_paths(paths, selection_paths, target_entries, internal_paths)
         }
-        CommitSelection::Paths(_) => detect_changed_managed_paths(paths, repo, target_entries).await,
+        CommitSelection::Paths(_) => {
+            detect_changed_managed_paths(paths, repo, target_entries).await
+        }
         CommitSelection::All => {
             // `--all` intentionally means "all currently managed files on the target scope".
             // We compare that tracked set against `~/` so modifications and deletions are
@@ -280,9 +276,9 @@ fn expand_selection_paths(
 
         let home_path = paths.home_dir.join(selection_path);
         let is_directory_selection = home_path.is_dir()
-            || target_entries
-                .keys()
-                .any(|candidate| candidate != selection_path && path_has_prefix(candidate, selection_path));
+            || target_entries.keys().any(|candidate| {
+                candidate != selection_path && path_has_prefix(candidate, selection_path)
+            });
         if is_directory_selection {
             if home_path.exists() {
                 collect_home_directory_files(
@@ -341,13 +337,15 @@ fn collect_home_directory_files(
             continue;
         }
 
-        let relative = path.strip_prefix(home_root).map_err(|source| DotsyncError::Jj {
-            message: format!(
-                "failed to make home path {} relative to {}: {source}",
-                path.display(),
-                home_root.display()
-            ),
-        })?;
+        let relative = path
+            .strip_prefix(home_root)
+            .map_err(|source| DotsyncError::Jj {
+                message: format!(
+                    "failed to make home path {} relative to {}: {source}",
+                    path.display(),
+                    home_root.display()
+                ),
+            })?;
         let relative = relative.to_path_buf();
         if internal_paths.contains(&relative) {
             continue;
@@ -371,9 +369,10 @@ async fn apply_home_path_to_tree(
     let relative_str = relative.to_str().ok_or(DotsyncError::NotImplemented(
         "non-utf8 repo paths are not supported yet",
     ))?;
-    let repo_path = RepoPathBuf::from_internal_string(relative_str).map_err(|err| DotsyncError::Jj {
-        message: format!("invalid repo path {}: {err}", relative.display()),
-    })?;
+    let repo_path =
+        RepoPathBuf::from_internal_string(relative_str).map_err(|err| DotsyncError::Jj {
+            message: format!("invalid repo path {}: {err}", relative.display()),
+        })?;
 
     let home_path = paths.home_dir.join(relative);
     if home_path.exists() {
@@ -477,7 +476,13 @@ fn home_dir_has_unmanaged_files(
         }
 
         if file_type.is_dir() {
-            if home_dir_has_unmanaged_files(root, repo_root, &path, machine_entries, internal_paths)? {
+            if home_dir_has_unmanaged_files(
+                root,
+                repo_root,
+                &path,
+                machine_entries,
+                internal_paths,
+            )? {
                 return Ok(true);
             }
             continue;

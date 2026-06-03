@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use jj_lib::backend::{CopyId, TreeValue};
 use jj_lib::merge::Merge;
 use jj_lib::merged_tree_builder::MergedTreeBuilder;
-use jj_lib::repo::Repo as _;
 use jj_lib::repo::MutableRepo;
+use jj_lib::repo::Repo as _;
 use jj_lib::repo_path::RepoPathBuf;
 use serde::Deserialize;
 

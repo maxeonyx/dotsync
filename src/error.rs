@@ -106,7 +106,9 @@ pub(crate) fn basic_error_report(code: &'static str, error: &DotsyncError) -> Er
 pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
     match error {
         DotsyncError::InvalidScope { scope } => Some(format!("requested scope: {scope}")),
-        DotsyncError::SyncState { path, .. } => Some(format!("sync state path: {}", path.display())),
+        DotsyncError::SyncState { path, .. } => {
+            Some(format!("sync state path: {}", path.display()))
+        }
         DotsyncError::FetchWouldOverwriteLocalBookmark {
             bookmark,
             local_target,
