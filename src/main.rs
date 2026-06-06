@@ -130,6 +130,10 @@ enum CliOutput {
 
 #[tokio::main]
 async fn main() {
+    if try_handle_version_request() {
+        return;
+    }
+
     let cli = Cli::parse();
     let output_format = cli.output_format;
     let outcome = match Action::try_from(cli) {
@@ -142,6 +146,42 @@ async fn main() {
         Err(error) => emit_output(&output_format, CliOutput::Error(error)),
     };
     std::process::exit(exit_code);
+}
+
+fn try_handle_version_request() -> bool {
+    let args: Vec<String> = env::args().skip(1).collect();
+
+    if is_version_json_request(&args) {
+        println!(
+            "{}",
+            json!({
+                "package": "dotsync",
+                "binary": "dotsync",
+                "version": env!("CARGO_PKG_VERSION"),
+            })
+        );
+        return true;
+    }
+
+    if is_version_request(&args) {
+        println!("dotsync {}", env!("CARGO_PKG_VERSION"));
+        return true;
+    }
+
+    false
+}
+
+fn is_version_request(args: &[String]) -> bool {
+    args.len() == 1 && matches!(args[0].as_str(), "--version" | "-V")
+}
+
+fn is_version_json_request(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| matches!(arg.as_str(), "--version" | "-V"))
+        && args.iter().any(|arg| arg == "--json")
+        && args
+            .iter()
+            .all(|arg| matches!(arg.as_str(), "--version" | "-V" | "--json"))
 }
 
 impl TryFrom<Cli> for Action {
