@@ -1,6 +1,6 @@
 [package]
 name = "dotsync"
-version = "0.3.10"
+version = "0.3.11"
 edition = "2021"
 description = "Agent-first dotfile sync with scope branches and merge cascades"
 license = "MIT"

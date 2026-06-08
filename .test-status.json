@@ -50,6 +50,6 @@
     "dotsync::user_flows$v03_continue_returns_not_implemented": "passing",
     "dotsync::user_flows$v03_init_creates_hidden_repo_not_dotfiles": "passing",
     "dotsync::user_flows$v03_plain_sync_ignores_unrelated_home_changes": "passing",
-    "dotsync::version_json$version_json_flag_prints_machine_readable_version": "pending"
+    "dotsync::version_json$version_json_flag_prints_machine_readable_version": "passing"
   }
 }

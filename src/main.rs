@@ -176,10 +176,8 @@ fn is_version_request(args: &[String]) -> bool {
 }
 
 fn is_version_json_request(args: &[String]) -> bool {
-    false
-        && args
-            .iter()
-            .any(|arg| matches!(arg.as_str(), "--version" | "-V"))
+    args.iter()
+        .any(|arg| matches!(arg.as_str(), "--version" | "-V"))
         && args.iter().any(|arg| arg == "--json")
         && args
             .iter()
