@@ -30,6 +30,7 @@ jobs:
         run: |
           mkdir -p ../../crates
           git clone --depth=1 https://github.com/maxeonyx/agent-tools ../../agent-tools-deps
+          git clone --depth=1 https://github.com/maxeonyx/tdd-ratchet-rs ../../agent-tools-deps/tools/tdd-ratchet
           cp -R ../../agent-tools-deps/crates/agent-tools-updater ../../crates/agent-tools-updater
           cp -R ../../agent-tools-deps/crates/help-test ../../crates/help-test
 
