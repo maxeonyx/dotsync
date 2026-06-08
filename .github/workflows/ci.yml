@@ -46,7 +46,7 @@ jobs:
         run: cargo clippy -- -D warnings
       - name: Install cargo-ratchet
         run: |
-          cargo install --git https://github.com/maxeonyx/tdd-ratchet-rs --rev 2cc9545ae32c5ec7b0f7f33f4ddb62bc6985317b --locked tdd-ratchet
+          cargo install --path ../../agent-tools-deps/tools/tdd-ratchet --locked
           cargo install cargo-nextest --locked
       - name: Run tests (ratchet)
         run: cargo ratchet
