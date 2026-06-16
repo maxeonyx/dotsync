@@ -65,7 +65,7 @@ impl MachineEnvironment {
     }
 
     fn init(&self) -> Output {
-        self.run_dotsync(&[
+        self.run(&[
             "init",
             self.remote_dir
                 .to_str()
@@ -73,33 +73,7 @@ impl MachineEnvironment {
         ])
     }
 
-    fn sync(&self) -> Output {
-        self.run_dotsync(&[])
-    }
-
-    fn sync_force(&self) -> Output {
-        self.run_dotsync(&["--force"])
-    }
-
-    fn sync_json(&self) -> Output {
-        self.run_dotsync_json(&[])
-    }
-
-    fn commit(&self, scope: &str, message: &str) -> Output {
-        self.run_dotsync(&[scope, "-m", message])
-    }
-
-    fn commit_with_paths(&self, scope: &str, message: &str, paths: &[&str]) -> Output {
-        let mut args = vec![scope, "-m", message, "--"];
-        args.extend_from_slice(paths);
-        self.run_dotsync(&args)
-    }
-
-    fn continue_command(&self) -> Output {
-        self.run_dotsync(&["continue"])
-    }
-
-    fn run_dotsync(&self, args: &[&str]) -> Output {
+    fn run(&self, args: &[&str]) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_dotsync"));
         command.args(args);
         command.current_dir(&self.home_dir);
@@ -109,32 +83,25 @@ impl MachineEnvironment {
         command.output().expect("run dotsync")
     }
 
-    fn run_dotsync_json(&self, args: &[&str]) -> Output {
+    fn run_json(&self, args: &[&str]) -> Output {
         let mut all_args = vec!["--output", "json"];
         all_args.extend_from_slice(args);
-        self.run_dotsync(&all_args)
+        self.run(&all_args)
     }
 
-    fn write_home_file(&self, relative: &str, contents: &str) {
-        self.write_file(self.home_dir.join(relative), contents);
+    fn delete_file(&self, relative: &str) {
+        fs::remove_file(self.home_dir.join(relative)).expect("delete file");
     }
 
-    fn delete_home_file(&self, relative: &str) {
-        fs::remove_file(self.home_dir.join(relative)).expect("delete home file");
+    fn write_file(&self, relative: &str, contents: &str) {
+        write_file_at(&self.home_dir.join(relative), contents);
     }
 
-    fn write_file(&self, path: PathBuf, contents: &str) {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create parent dir");
-        }
-        fs::write(path, contents).expect("write file");
+    fn read_file(&self, relative: &str) -> String {
+        fs::read_to_string(self.home_dir.join(relative)).expect("read file")
     }
 
-    fn read_home_file(&self, relative: &str) -> String {
-        fs::read_to_string(self.home_dir.join(relative)).expect("read home file")
-    }
-
-    fn home_file_exists(&self, relative: &str) -> bool {
+    fn file_exists(&self, relative: &str) -> bool {
         self.home_dir.join(relative).exists()
     }
 
@@ -159,7 +126,7 @@ impl MachineEnvironment {
     }
 
     fn write_sync_state_raw(&self, contents: &str) {
-        self.write_file(self.sync_state_path(), contents);
+        write_file_at(&self.sync_state_path(), contents);
     }
 }
 
@@ -456,16 +423,16 @@ fn drift_detected_human_error_stands_alone() {
     );
 
     seed_remote_scope_file(&machine, "mx-xps-cy", relative, "[user]\nname = \"Repo\"\n");
-    let sync_output = machine.sync();
+    let sync_output = machine.run(&[]);
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    machine.write_home_file(relative, "[user]\nname = \"Drifted\"\n");
+    machine.write_file(relative, "[user]\nname = \"Drifted\"\n");
 
-    let sync_output = machine.sync();
+    let sync_output = machine.run(&[]);
     assert_eq!(
         sync_output.status.code(),
         Some(1),
@@ -503,16 +470,16 @@ fn drift_detected_json_contract_stays_compatible() {
     );
 
     seed_remote_scope_file(&machine, "mx-xps-cy", relative, "[user]\nname = \"Repo\"\n");
-    let sync_output = machine.sync();
+    let sync_output = machine.run(&[]);
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    machine.write_home_file(relative, "[user]\nname = \"Drifted\"\n");
+    machine.write_file(relative, "[user]\nname = \"Drifted\"\n");
 
-    let sync_output = machine.sync_json();
+    let sync_output = machine.run_json(&[]);
     assert_eq!(
         sync_output.status.code(),
         Some(1),
@@ -552,25 +519,25 @@ fn missing_state_file_disables_deletion() {
     );
 
     seed_remote_scope_file(&machine, "mx-xps-cy", relative, "[user]\nname = \"Max\"\n");
-    let sync_output = machine.sync();
+    let sync_output = machine.run(&[]);
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
-    assert!(machine.home_file_exists(relative));
+    assert!(machine.file_exists(relative));
 
     machine.delete_sync_state();
     remove_remote_scope_file(&machine, "mx-xps-cy", relative);
 
-    let sync_output = machine.sync();
+    let sync_output = machine.run(&[]);
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
     assert!(
-        machine.home_file_exists(relative),
+        machine.file_exists(relative),
         "without sync state, dotsync should fail safe and leave the previously managed file in home"
     );
 }
@@ -589,7 +556,7 @@ fn invalid_state_file_returns_clear_error() {
 
     machine.write_sync_state_raw("not valid json\n");
 
-    let sync_output = machine.sync();
+    let sync_output = machine.run(&[]);
     assert!(
         !sync_output.status.success(),
         "sync should fail when the sync state file is corrupt\n{}",
@@ -617,7 +584,7 @@ fn invalid_sync_state_human_error_stands_alone() {
 
     machine.write_sync_state_raw("not valid json\n");
 
-    let sync_output = machine.sync();
+    let sync_output = machine.run(&[]);
     assert_eq!(
         sync_output.status.code(),
         Some(1),
@@ -654,28 +621,28 @@ fn sync_uses_state_machine_scope_even_if_checkout_changes() {
     );
 
     seed_remote_scope_file(&machine, "mx-xps-cy", relative, "machine config\n");
-    let sync_output = machine.sync();
+    let sync_output = machine.run(&[]);
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
-    assert_eq!(machine.read_home_file(relative), "machine config\n");
+    assert_eq!(machine.read_file(relative), "machine config\n");
 
-    machine.delete_home_file(relative);
+    machine.delete_file(relative);
     machine.write_sync_state_raw(&format!(
         "{{\n  \"machine_scope\": \"mx-xps-cy\",\n  \"last_synced_revision\": \"{}\"\n}}\n",
         bookmark_revision(&machine, "mx-xps-cy")
     ));
 
-    let sync_output = machine.sync();
+    let sync_output = machine.run(&[]);
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
     assert_eq!(
-        machine.read_home_file(relative),
+        machine.read_file(relative),
         "machine config\n",
         "sync state machine scope should govern sync regardless of any unrelated repo metadata"
     );
@@ -720,18 +687,15 @@ fn v03_plain_sync_ignores_unrelated_home_changes() {
         render_output(&init_output)
     );
 
-    machine.write_home_file("untracked-notes.txt", "leave me alone\n");
+    machine.write_file("untracked-notes.txt", "leave me alone\n");
 
-    let sync_output = machine.sync();
+    let sync_output = machine.run(&[]);
     assert!(
         sync_output.status.success(),
         "plain dotsync should ignore unrelated home-directory changes in bare-repo mode\n{}",
         render_output(&sync_output)
     );
-    assert_eq!(
-        machine.read_home_file("untracked-notes.txt"),
-        "leave me alone\n"
-    );
+    assert_eq!(machine.read_file("untracked-notes.txt"), "leave me alone\n");
 }
 
 #[test]
@@ -746,9 +710,9 @@ fn v03_commit_returns_not_implemented() {
         render_output(&init_output)
     );
 
-    machine.write_home_file(".gitconfig", "[user]\nname = \"Max\"\n");
+    machine.write_file(".gitconfig", "[user]\nname = \"Max\"\n");
 
-    let commit_output = machine.commit("all", "not implemented yet");
+    let commit_output = machine.run(&["all", "-m", "not implemented yet"]);
     assert_eq!(
         commit_output.status.code(),
         Some(1),
@@ -775,7 +739,7 @@ fn continue_without_pause_returns_clear_error() {
         render_output(&init_output)
     );
 
-    let continue_output = machine.continue_command();
+    let continue_output = machine.run(&["continue"]);
     assert_eq!(
         continue_output.status.code(),
         Some(1),
@@ -806,16 +770,16 @@ fn commit_explicit_path_adds_file_to_scope_and_syncs() {
     );
 
     seed_remote_scope_file(&machine, "mx-xps-cy", existing_relative, "existing\n");
-    let sync_output = machine.sync();
+    let sync_output = machine.run(&[]);
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    machine.write_home_file(new_relative, new_contents);
+    machine.write_file(new_relative, new_contents);
 
-    let commit_output = machine.commit_with_paths("all", "add gitconfig", &[new_relative]);
+    let commit_output = machine.run(&["all", "-m", "add gitconfig", "--", new_relative]);
     assert!(
         commit_output.status.success(),
         "{}",
@@ -830,8 +794,8 @@ fn commit_explicit_path_adds_file_to_scope_and_syncs() {
         read_bookmark_file_contents(&machine, "mx-xps-cy", new_relative),
         new_contents
     );
-    assert!(machine.home_file_exists(new_relative));
-    assert_eq!(machine.read_home_file(new_relative), new_contents);
+    assert!(machine.file_exists(new_relative));
+    assert_eq!(machine.read_file(new_relative), new_contents);
 }
 
 #[test]
@@ -849,20 +813,20 @@ fn commit_modifies_existing_file_on_scope() {
     );
 
     seed_remote_scope_file(&machine, "linux", relative, "export PATH=\"$PATH\"\n");
-    let sync_output = machine.sync();
+    let sync_output = machine.run(&[]);
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    machine.write_home_file(relative, updated_contents);
+    machine.write_file(relative, updated_contents);
     machine.write_sync_state_raw(&format!(
         "{{\"machine_scope\":\"all\",\"last_synced_revision\":\"{}\"}}",
         bookmark_revision(&machine, "all")
     ));
 
-    let commit_output = machine.commit_with_paths("linux", "update bashrc", &[relative]);
+    let commit_output = machine.run(&["linux", "-m", "update bashrc", "--", relative]);
     assert!(
         commit_output.status.success(),
         "{}",
@@ -877,7 +841,7 @@ fn commit_modifies_existing_file_on_scope() {
         read_bookmark_file_contents(&machine, "mx-xps-cy", relative),
         updated_contents
     );
-    assert_eq!(machine.read_home_file(relative), updated_contents);
+    assert_eq!(machine.read_file(relative), updated_contents);
 }
 
 #[test]
@@ -896,17 +860,17 @@ fn commit_deletes_file_from_scope() {
     seed_remote_scope_file(&machine, "all", relative, "delete me\n");
     merge_remote_scope_into(&machine, "all", "linux");
     merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
-    let sync_output = machine.sync();
+    let sync_output = machine.run(&[]);
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
-    assert!(machine.home_file_exists(relative));
+    assert!(machine.file_exists(relative));
 
-    machine.delete_home_file(relative);
+    machine.delete_file(relative);
 
-    let commit_output = machine.commit_with_paths("all", "remove file", &[relative]);
+    let commit_output = machine.run(&["all", "-m", "remove file", "--", relative]);
     assert!(
         commit_output.status.success(),
         "{}",
@@ -915,7 +879,7 @@ fn commit_deletes_file_from_scope() {
 
     assert!(!bookmark_has_file(&machine, "all", relative));
     assert!(!bookmark_has_file(&machine, "mx-xps-cy", relative));
-    assert!(!machine.home_file_exists(relative));
+    assert!(!machine.file_exists(relative));
 }
 
 #[test]
@@ -941,16 +905,16 @@ fn commit_cascades_through_all_descendants() {
         ".config/hyprland-only.txt",
         "hyprland\n",
     );
-    let sync_output = machine.sync();
+    let sync_output = machine.run(&[]);
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    machine.write_home_file(relative, new_contents);
+    machine.write_file(relative, new_contents);
 
-    let commit_output = machine.commit_with_paths("all", "add shared file", &[relative]);
+    let commit_output = machine.run(&["all", "-m", "add shared file", "--", relative]);
     assert!(
         commit_output.status.success(),
         "{}",
@@ -978,31 +942,31 @@ fn multiple_machines_can_contribute_to_all_without_losing_changes() {
     assert!(init_a.status.success(), "{}", render_output(&init_a));
     let init_b = machine_b.init();
     assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a_after_join = machine_a.sync_force();
+    let sync_a_after_join = machine_a.run(&["--force"]);
     assert!(
         sync_a_after_join.status.success(),
         "{}",
         render_output(&sync_a_after_join)
     );
 
-    machine_a.write_home_file(a_relative, "from machine a\n");
-    let commit_a = machine_a.commit_with_paths("all", "add shared a", &[a_relative]);
+    machine_a.write_file(a_relative, "from machine a\n");
+    let commit_a = machine_a.run(&["all", "-m", "add shared a", "--", a_relative]);
     assert!(commit_a.status.success(), "{}", render_output(&commit_a));
 
-    let sync_b = machine_b.sync();
+    let sync_b = machine_b.run(&[]);
     assert!(sync_b.status.success(), "{}", render_output(&sync_b));
-    assert_eq!(machine_b.read_home_file(a_relative), "from machine a\n");
+    assert_eq!(machine_b.read_file(a_relative), "from machine a\n");
 
-    machine_b.write_home_file(b_relative, "from machine b\n");
-    let commit_b = machine_b.commit_with_paths("all", "add shared b", &[b_relative]);
+    machine_b.write_file(b_relative, "from machine b\n");
+    let commit_b = machine_b.run(&["all", "-m", "add shared b", "--", b_relative]);
     assert!(commit_b.status.success(), "{}", render_output(&commit_b));
 
-    let sync_a = machine_a.sync();
+    let sync_a = machine_a.run(&[]);
     assert!(sync_a.status.success(), "{}", render_output(&sync_a));
-    assert_eq!(machine_a.read_home_file(a_relative), "from machine a\n");
-    assert_eq!(machine_a.read_home_file(b_relative), "from machine b\n");
-    assert_eq!(machine_b.read_home_file(a_relative), "from machine a\n");
-    assert_eq!(machine_b.read_home_file(b_relative), "from machine b\n");
+    assert_eq!(machine_a.read_file(a_relative), "from machine a\n");
+    assert_eq!(machine_a.read_file(b_relative), "from machine b\n");
+    assert_eq!(machine_b.read_file(a_relative), "from machine a\n");
+    assert_eq!(machine_b.read_file(b_relative), "from machine b\n");
     assert_eq!(
         read_bookmark_file_contents(&machine_a, "all", a_relative),
         "from machine a\n"
@@ -1018,17 +982,12 @@ fn concurrent_same_scope_file_edits_require_resolution() {
     let harness = TestHarness::new();
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
-    let relative = ".config/shared.conf";
-    let base = "setting = \"base\"\n";
-    let from_a = "setting = \"all-a\"\n";
-    let from_b = "setting = \"all-b\"\n";
-    let resolved = "setting = \"all-a+all-b\"\n";
 
     let init_a = machine_a.init();
     assert!(init_a.status.success(), "{}", render_output(&init_a));
     let init_b = machine_b.init();
     assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a_after_join = machine_a.sync_force();
+    let sync_a_after_join = machine_a.run(&["--force"]);
     assert!(
         sync_a_after_join.status.success(),
         "{}",
@@ -1036,8 +995,8 @@ fn concurrent_same_scope_file_edits_require_resolution() {
     );
 
     // Establish the shared base version first.
-    machine_a.write_home_file(relative, base);
-    let commit_base = machine_a.commit_with_paths("all", "add shared base", &[relative]);
+    machine_a.write_file(".config/shared.conf", "setting = \"base\"\n");
+    let commit_base = machine_a.run(&["all", "-m", "add shared base", "--", ".config/shared.conf"]);
     assert!(
         commit_base.status.success(),
         "{}",
@@ -1045,41 +1004,62 @@ fn concurrent_same_scope_file_edits_require_resolution() {
     );
 
     // Both machines start the conflict scenario from the same synced base.
-    let sync_a_to_base = machine_a.sync();
+    let sync_a_to_base = machine_a.run(&[]);
     assert!(
         sync_a_to_base.status.success(),
         "{}",
         render_output(&sync_a_to_base)
     );
-    assert_eq!(machine_a.read_home_file(relative), base);
+    assert_eq!(
+        machine_a.read_file(".config/shared.conf"),
+        "setting = \"base\"\n"
+    );
 
-    let sync_b_to_base = machine_b.sync();
+    let sync_b_to_base = machine_b.run(&[]);
     assert!(
         sync_b_to_base.status.success(),
         "{}",
         render_output(&sync_b_to_base)
     );
-    assert_eq!(machine_b.read_home_file(relative), base);
+    assert_eq!(
+        machine_b.read_file(".config/shared.conf"),
+        "setting = \"base\"\n"
+    );
 
     // Divergent local edits start here. B must not sync again before committing.
-    machine_a.write_home_file(relative, from_a);
-    machine_b.write_home_file(relative, from_b);
-    assert_eq!(machine_a.read_home_file(relative), from_a);
+    machine_a.write_file(".config/shared.conf", "setting = \"all-a\"\n");
+    machine_b.write_file(".config/shared.conf", "setting = \"all-b\"\n");
     assert_eq!(
-        machine_b.read_home_file(relative),
-        from_b,
+        machine_a.read_file(".config/shared.conf"),
+        "setting = \"all-a\"\n"
+    );
+    assert_eq!(
+        machine_b.read_file(".config/shared.conf"),
+        "setting = \"all-b\"\n",
         "machine B must make its own local edit before machine A publishes"
     );
 
-    let commit_a = machine_a.commit_with_paths("all", "update shared from a", &[relative]);
+    let commit_a = machine_a.run(&[
+        "all",
+        "-m",
+        "update shared from a",
+        "--",
+        ".config/shared.conf",
+    ]);
     assert!(commit_a.status.success(), "{}", render_output(&commit_a));
     assert_eq!(
-        machine_b.read_home_file(relative),
-        from_b,
+        machine_b.read_file(".config/shared.conf"),
+        "setting = \"all-b\"\n",
         "machine B must not sync to machine A's published edit before committing its own edit"
     );
 
-    let conflict = machine_b.commit_with_paths("all", "update shared from b", &[relative]);
+    let conflict = machine_b.run(&[
+        "all",
+        "-m",
+        "update shared from b",
+        "--",
+        ".config/shared.conf",
+    ]);
     assert_eq!(
         conflict.status.code(),
         Some(3),
@@ -1089,29 +1069,39 @@ fn concurrent_same_scope_file_edits_require_resolution() {
     let stderr = String::from_utf8_lossy(&conflict.stderr);
     assert!(stderr.contains("conflict"), "{}", render_output(&conflict));
     assert!(stderr.contains("all"), "{}", render_output(&conflict));
-    assert!(stderr.contains(relative), "{}", render_output(&conflict));
+    assert!(
+        stderr.contains(".config/shared.conf"),
+        "{}",
+        render_output(&conflict)
+    );
     assert_eq!(
-        read_bookmark_file_contents(&machine_b, "all", relative),
-        from_a,
+        read_bookmark_file_contents(&machine_b, "all", ".config/shared.conf"),
+        "setting = \"all-a\"\n",
         "failed concurrent commit must leave the shared scope at the already-published version"
     );
     assert_eq!(
-        machine_b.read_home_file(relative),
-        from_b,
+        machine_b.read_file(".config/shared.conf"),
+        "setting = \"all-b\"\n",
         "failed concurrent commit must not overwrite B's unresolved home edit"
     );
 
-    machine_b.write_home_file(relative, resolved);
-    let continued = machine_b.continue_command();
+    machine_b.write_file(".config/shared.conf", "setting = \"all-a+all-b\"\n");
+    let continued = machine_b.run(&["continue"]);
     assert!(continued.status.success(), "{}", render_output(&continued));
-    assert_eq!(machine_b.read_home_file(relative), resolved);
-
-    let sync_a = machine_a.sync();
-    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
-    assert_eq!(machine_a.read_home_file(relative), resolved);
     assert_eq!(
-        read_bookmark_file_contents(&machine_a, "all", relative),
-        resolved
+        machine_b.read_file(".config/shared.conf"),
+        "setting = \"all-a+all-b\"\n"
+    );
+
+    let sync_a = machine_a.run(&[]);
+    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    assert_eq!(
+        machine_a.read_file(".config/shared.conf"),
+        "setting = \"all-a+all-b\"\n"
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine_a, "all", ".config/shared.conf"),
+        "setting = \"all-a+all-b\"\n"
     );
 }
 
@@ -1130,35 +1120,35 @@ fn shared_scope_conflict_pauses_and_continue_applies_resolution_to_machine_homes
     assert!(init_a.status.success(), "{}", render_output(&init_a));
     let init_b = machine_b.init();
     assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a_after_join = machine_a.sync_force();
+    let sync_a_after_join = machine_a.run(&["--force"]);
     assert!(
         sync_a_after_join.status.success(),
         "{}",
         render_output(&sync_a_after_join)
     );
 
-    machine_a.write_home_file(relative, base);
-    let commit_base = machine_a.commit_with_paths("all", "add base config", &[relative]);
+    machine_a.write_file(relative, base);
+    let commit_base = machine_a.run(&["all", "-m", "add base config", "--", relative]);
     assert!(
         commit_base.status.success(),
         "{}",
         render_output(&commit_base)
     );
 
-    machine_a.write_home_file(relative, linux_override);
-    let commit_linux = machine_a.commit_with_paths("linux", "customize linux config", &[relative]);
+    machine_a.write_file(relative, linux_override);
+    let commit_linux = machine_a.run(&["linux", "-m", "customize linux config", "--", relative]);
     assert!(
         commit_linux.status.success(),
         "{}",
         render_output(&commit_linux)
     );
 
-    let sync_b = machine_b.sync();
+    let sync_b = machine_b.run(&[]);
     assert!(sync_b.status.success(), "{}", render_output(&sync_b));
-    assert_eq!(machine_b.read_home_file(relative), linux_override);
+    assert_eq!(machine_b.read_file(relative), linux_override);
 
-    machine_b.write_home_file(relative, all_update);
-    let conflict = machine_b.commit_with_paths("all", "update shared config", &[relative]);
+    machine_b.write_file(relative, all_update);
+    let conflict = machine_b.run(&["all", "-m", "update shared config", "--", relative]);
     assert_eq!(
         conflict.status.code(),
         Some(3),
@@ -1174,14 +1164,14 @@ fn shared_scope_conflict_pauses_and_continue_applies_resolution_to_machine_homes
     assert!(stderr.contains("linux"), "{}", render_output(&conflict));
     assert!(stderr.contains(relative), "{}", render_output(&conflict));
 
-    machine_b.write_home_file(relative, resolved);
-    let continued = machine_b.continue_command();
+    machine_b.write_file(relative, resolved);
+    let continued = machine_b.run(&["continue"]);
     assert!(continued.status.success(), "{}", render_output(&continued));
-    assert_eq!(machine_b.read_home_file(relative), resolved);
+    assert_eq!(machine_b.read_file(relative), resolved);
 
-    let sync_a = machine_a.sync();
+    let sync_a = machine_a.run(&[]);
     assert!(sync_a.status.success(), "{}", render_output(&sync_a));
-    assert_eq!(machine_a.read_home_file(relative), resolved);
+    assert_eq!(machine_a.read_file(relative), resolved);
     assert_eq!(
         read_bookmark_file_contents(&machine_a, "all", relative),
         all_update
@@ -1218,50 +1208,58 @@ fn continue_preserves_non_conflicting_parent_changes_from_paused_merge() {
     assert!(init_a.status.success(), "{}", render_output(&init_a));
     let init_b = machine_b.init();
     assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a_after_join = machine_a.sync_force();
+    let sync_a_after_join = machine_a.run(&["--force"]);
     assert!(
         sync_a_after_join.status.success(),
         "{}",
         render_output(&sync_a_after_join)
     );
 
-    machine_a.write_home_file(conflicting_relative, base_conflict);
-    machine_a.write_home_file(shared_relative, base_shared);
-    let commit_base = machine_a.commit_with_paths(
+    machine_a.write_file(conflicting_relative, base_conflict);
+    machine_a.write_file(shared_relative, base_shared);
+    let commit_base = machine_a.run(&[
         "all",
+        "-m",
         "add base config",
-        &[conflicting_relative, shared_relative],
-    );
+        "--",
+        conflicting_relative,
+        shared_relative,
+    ]);
     assert!(
         commit_base.status.success(),
         "{}",
         render_output(&commit_base)
     );
 
-    machine_a.write_home_file(conflicting_relative, linux_override);
-    let commit_linux =
-        machine_a.commit_with_paths("linux", "customize linux config", &[conflicting_relative]);
+    machine_a.write_file(conflicting_relative, linux_override);
+    let commit_linux = machine_a.run(&[
+        "linux",
+        "-m",
+        "customize linux config",
+        "--",
+        conflicting_relative,
+    ]);
     assert!(
         commit_linux.status.success(),
         "{}",
         render_output(&commit_linux)
     );
 
-    let sync_b = machine_b.sync();
+    let sync_b = machine_b.run(&[]);
     assert!(sync_b.status.success(), "{}", render_output(&sync_b));
-    assert_eq!(
-        machine_b.read_home_file(conflicting_relative),
-        linux_override
-    );
-    assert_eq!(machine_b.read_home_file(shared_relative), base_shared);
+    assert_eq!(machine_b.read_file(conflicting_relative), linux_override);
+    assert_eq!(machine_b.read_file(shared_relative), base_shared);
 
-    machine_b.write_home_file(conflicting_relative, all_update);
-    machine_b.write_home_file(shared_relative, shared_update);
-    let conflict = machine_b.commit_with_paths(
+    machine_b.write_file(conflicting_relative, all_update);
+    machine_b.write_file(shared_relative, shared_update);
+    let conflict = machine_b.run(&[
         "all",
+        "-m",
         "update shared config",
-        &[conflicting_relative, shared_relative],
-    );
+        "--",
+        conflicting_relative,
+        shared_relative,
+    ]);
     assert_eq!(
         conflict.status.code(),
         Some(3),
@@ -1269,16 +1267,16 @@ fn continue_preserves_non_conflicting_parent_changes_from_paused_merge() {
         render_output(&conflict)
     );
 
-    machine_b.write_home_file(conflicting_relative, resolved);
-    let continued = machine_b.continue_command();
+    machine_b.write_file(conflicting_relative, resolved);
+    let continued = machine_b.run(&["continue"]);
     assert!(continued.status.success(), "{}", render_output(&continued));
-    assert_eq!(machine_b.read_home_file(conflicting_relative), resolved);
-    assert_eq!(machine_b.read_home_file(shared_relative), shared_update);
+    assert_eq!(machine_b.read_file(conflicting_relative), resolved);
+    assert_eq!(machine_b.read_file(shared_relative), shared_update);
 
-    let sync_a = machine_a.sync();
+    let sync_a = machine_a.run(&[]);
     assert!(sync_a.status.success(), "{}", render_output(&sync_a));
-    assert_eq!(machine_a.read_home_file(conflicting_relative), resolved);
-    assert_eq!(machine_a.read_home_file(shared_relative), shared_update);
+    assert_eq!(machine_a.read_file(conflicting_relative), resolved);
+    assert_eq!(machine_a.read_file(shared_relative), shared_update);
     assert_eq!(
         read_bookmark_file_contents(&machine_a, "linux", conflicting_relative),
         resolved
@@ -1301,37 +1299,46 @@ fn commit_while_cascade_paused_is_blocked_without_mutating_scope() {
     assert!(init_a.status.success(), "{}", render_output(&init_a));
     let init_b = machine_b.init();
     assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a_after_join = machine_a.sync_force();
+    let sync_a_after_join = machine_a.run(&["--force"]);
     assert!(
         sync_a_after_join.status.success(),
         "{}",
         render_output(&sync_a_after_join)
     );
 
-    machine_a.write_home_file(conflicting_relative, "setting = \"base\"\n");
-    let commit_base =
-        machine_a.commit_with_paths("all", "add base config", &[conflicting_relative]);
+    machine_a.write_file(conflicting_relative, "setting = \"base\"\n");
+    let commit_base = machine_a.run(&["all", "-m", "add base config", "--", conflicting_relative]);
     assert!(
         commit_base.status.success(),
         "{}",
         render_output(&commit_base)
     );
 
-    machine_a.write_home_file(conflicting_relative, "setting = \"linux\"\n");
-    let commit_linux =
-        machine_a.commit_with_paths("linux", "customize linux config", &[conflicting_relative]);
+    machine_a.write_file(conflicting_relative, "setting = \"linux\"\n");
+    let commit_linux = machine_a.run(&[
+        "linux",
+        "-m",
+        "customize linux config",
+        "--",
+        conflicting_relative,
+    ]);
     assert!(
         commit_linux.status.success(),
         "{}",
         render_output(&commit_linux)
     );
 
-    let sync_b = machine_b.sync();
+    let sync_b = machine_b.run(&[]);
     assert!(sync_b.status.success(), "{}", render_output(&sync_b));
 
-    machine_b.write_home_file(conflicting_relative, "setting = \"all\"\n");
-    let conflict =
-        machine_b.commit_with_paths("all", "update shared config", &[conflicting_relative]);
+    machine_b.write_file(conflicting_relative, "setting = \"all\"\n");
+    let conflict = machine_b.run(&[
+        "all",
+        "-m",
+        "update shared config",
+        "--",
+        conflicting_relative,
+    ]);
     assert_eq!(
         conflict.status.code(),
         Some(3),
@@ -1340,13 +1347,15 @@ fn commit_while_cascade_paused_is_blocked_without_mutating_scope() {
     );
 
     let machine_scope_revision_before = bookmark_revision(&machine_b, "goof-b");
-    machine_b.write_home_file(second_commit_relative, "other = true\n");
+    machine_b.write_file(second_commit_relative, "other = true\n");
 
-    let blocked = machine_b.commit_with_paths(
+    let blocked = machine_b.run(&[
         "goof-b",
+        "-m",
         "try commit while paused",
-        &[second_commit_relative],
-    );
+        "--",
+        second_commit_relative,
+    ]);
 
     assert_eq!(
         blocked.status.code(),
@@ -1381,9 +1390,9 @@ fn commit_to_machine_scope_does_not_cascade() {
         render_output(&init_output)
     );
 
-    machine.write_home_file(relative, contents);
+    machine.write_file(relative, contents);
 
-    let commit_output = machine.commit_with_paths("mx-xps-cy", "add machine file", &[relative]);
+    let commit_output = machine.run(&["mx-xps-cy", "-m", "add machine file", "--", relative]);
     assert!(
         commit_output.status.success(),
         "{}",
@@ -1413,16 +1422,16 @@ fn commit_without_paths_imports_all_diffs() {
     );
 
     seed_remote_scope_file(&machine, "mx-xps-cy", relative, "setting = \"original\"\n");
-    let sync_output = machine.sync();
+    let sync_output = machine.run(&[]);
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    machine.write_home_file(relative, updated_contents);
+    machine.write_file(relative, updated_contents);
 
-    let commit_output = machine.commit("mx-xps-cy", "update");
+    let commit_output = machine.run(&["mx-xps-cy", "-m", "update"]);
     assert!(
         commit_output.status.success(),
         "{}",
@@ -1449,7 +1458,7 @@ fn commit_noop_when_no_changes() {
     );
 
     seed_remote_scope_file(&machine, "mx-xps-cy", relative, "same\n");
-    let sync_output = machine.sync();
+    let sync_output = machine.run(&[]);
     assert!(
         sync_output.status.success(),
         "{}",
@@ -1458,7 +1467,7 @@ fn commit_noop_when_no_changes() {
 
     let revision_before = bookmark_revision(&machine, "mx-xps-cy");
 
-    let commit_output = machine.commit("mx-xps-cy", "noop");
+    let commit_output = machine.run(&["mx-xps-cy", "-m", "noop"]);
     assert_eq!(
         commit_output.status.code(),
         Some(0),
@@ -1482,7 +1491,7 @@ fn commit_invalid_scope_errors() {
         render_output(&init_output)
     );
 
-    let commit_output = machine.commit_with_paths("nonexistent", "test", &[".gitconfig"]);
+    let commit_output = machine.run(&["nonexistent", "-m", "test", "--", ".gitconfig"]);
     assert_eq!(
         commit_output.status.code(),
         Some(1),
@@ -1512,16 +1521,16 @@ fn status_shows_modified_file() {
     );
 
     seed_remote_scope_file(&machine, "mx-xps-cy", relative, "export DOTSYNC=repo\n");
-    let sync_output = machine.sync();
+    let sync_output = machine.run(&[]);
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    machine.write_home_file(relative, "export DOTSYNC=modified\n");
+    machine.write_file(relative, "export DOTSYNC=modified\n");
 
-    let status_output = machine.run_dotsync(&["status"]);
+    let status_output = machine.run(&["status"]);
     assert_eq!(
         status_output.status.code(),
         Some(0),
@@ -1556,16 +1565,16 @@ fn status_shows_deleted_file() {
     );
 
     seed_remote_scope_file(&machine, "mx-xps-cy", relative, "export DOTSYNC=repo\n");
-    let sync_output = machine.sync();
+    let sync_output = machine.run(&[]);
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    machine.delete_home_file(relative);
+    machine.delete_file(relative);
 
-    let status_output = machine.run_dotsync(&["status"]);
+    let status_output = machine.run(&["status"]);
     assert_eq!(
         status_output.status.code(),
         Some(0),
@@ -1600,14 +1609,14 @@ fn status_clean_shows_no_changes() {
     );
 
     seed_remote_scope_file(&machine, "mx-xps-cy", relative, "export DOTSYNC=repo\n");
-    let sync_output = machine.sync();
+    let sync_output = machine.run(&[]);
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    let status_output = machine.run_dotsync(&["status"]);
+    let status_output = machine.run(&["status"]);
     assert_eq!(
         status_output.status.code(),
         Some(0),
@@ -1640,16 +1649,16 @@ fn status_json_contract() {
     );
 
     seed_remote_scope_file(&machine, "mx-xps-cy", relative, "export DOTSYNC=repo\n");
-    let sync_output = machine.sync();
+    let sync_output = machine.run(&[]);
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    machine.write_home_file(relative, "export DOTSYNC=modified\n");
+    machine.write_file(relative, "export DOTSYNC=modified\n");
 
-    let status_output = machine.run_dotsync_json(&["status"]);
+    let status_output = machine.run_json(&["status"]);
     assert_eq!(
         status_output.status.code(),
         Some(0),
@@ -1702,9 +1711,9 @@ fn status_ignores_unmanaged_files() {
         render_output(&init_output)
     );
 
-    machine.write_home_file(relative, "this file is unmanaged\n");
+    machine.write_file(relative, "this file is unmanaged\n");
 
-    let status_output = machine.run_dotsync(&["status"]);
+    let status_output = machine.run(&["status"]);
     assert_eq!(
         status_output.status.code(),
         Some(0),
@@ -1813,18 +1822,18 @@ fn retired_pending_selected_add_modify_and_delete_are_applied_without_touching_u
     seed_remote_scope_file(&machine, "all", removed_relative, "remove me\n");
     merge_remote_scope_into(&machine, "all", "linux");
     merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
-    let sync_output = machine.sync();
+    let sync_output = machine.run(&[]);
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    machine.write_home_file(existing_relative, existing_contents);
-    machine.write_home_file(new_relative, new_contents);
-    machine.delete_home_file(removed_relative);
+    machine.write_file(existing_relative, existing_contents);
+    machine.write_file(new_relative, new_contents);
+    machine.delete_file(removed_relative);
 
-    let commit_output = machine.commit_with_paths("all", "update fish dir", &[".config/fish/"]);
+    let commit_output = machine.run(&["all", "-m", "update fish dir", "--", ".config/fish/"]);
     assert!(
         commit_output.status.success(),
         "{}",
@@ -1840,9 +1849,9 @@ fn retired_pending_selected_add_modify_and_delete_are_applied_without_touching_u
         new_contents
     );
     assert!(!bookmark_has_file(&machine, "all", removed_relative));
-    assert_eq!(machine.read_home_file(existing_relative), existing_contents);
-    assert_eq!(machine.read_home_file(new_relative), new_contents);
-    assert!(!machine.home_file_exists(removed_relative));
+    assert_eq!(machine.read_file(existing_relative), existing_contents);
+    assert_eq!(machine.read_file(new_relative), new_contents);
+    assert!(!machine.file_exists(removed_relative));
 }
 
 retired_ratchet_test!(
