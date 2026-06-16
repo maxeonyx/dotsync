@@ -154,7 +154,9 @@ pub(crate) async fn sync_repo_to_home(
     let repo_entries = collect_managed_tree_entries(&current_commit.tree(), &internal_paths)?;
     let drift_entries = if let Some(state) = &valid_sync_state {
         match repo.store().get_commit(&state.last_synced_revision) {
-            Ok(previous_commit) => collect_managed_tree_entries(&previous_commit.tree(), &internal_paths)?,
+            Ok(previous_commit) => {
+                collect_managed_tree_entries(&previous_commit.tree(), &internal_paths)?
+            }
             Err(_) => repo_entries.clone(),
         }
     } else {

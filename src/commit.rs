@@ -222,8 +222,7 @@ pub async fn commit_and_sync(
         Some(&machine_scope),
     )
     .await?;
-    // Deliberately corrupted for the ratchet red commit: without pushing,
-    // multi-machine workflows cannot observe shared-scope commits.
+    push_scope_updates(paths).await?;
 
     Ok(CommandOutcome::Success(CommitReport {
         committed_scope: options.scope,
