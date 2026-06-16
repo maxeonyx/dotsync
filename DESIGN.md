@@ -40,9 +40,9 @@ These scopes form a directed acyclic graph (DAG):
    mx-xps-cy
 ```
 
-Each scope is a git branch. A scope branch merges from its parent(s). So `linux` merges from `all`, `hyprland` merges from `linux`, and `mx-xps-cy` (a machine) merges from `hyprland`.
+Each scope is a branch. A scope branch merges from its parent(s). So `linux` merges from `all`, `hyprland` merges from `linux`, and `mx-xps-cy` (a machine) merges from `hyprland`.
 
-A machine is just a leaf scope — there's nothing structurally special about it. The only difference is that a machine scope is the one whose files get synced to the live system. dotsync knows which scope is "current" by reading the checked-out branch name.
+A machine is just a leaf scope — there's nothing structurally special about it. The only difference is that a machine scope is the one whose files get synced to the live system. dotsync knows which scope is current from machine-local sync state and the configured scope graph, not from a user-visible checkout.
 
 ### Why not a single branch with directory-based scoping?
 
@@ -74,7 +74,7 @@ Multiple parents also handle edge cases naturally. If a hypothetical machine nee
 
 ## Repo structure
 
-The repo mirrors `~/`. A file at `~/dotfiles/.config/fish/config.fish` syncs to `~/.config/fish/config.fish`. No path mapping, no translation layer. This is critical for agent usability — an agent told "edit the fish config" can find it at the obvious path without consulting any mapping config.
+The hidden repo mirrors `~/`. A repo path `.config/fish/config.fish` corresponds to `~/.config/fish/config.fish`. No path mapping, no translation layer. This is critical for agent usability — an agent told "edit the fish config" edits the obvious live file in home, then dotsync imports that selected home path into the right scope.
 
 Files are implicitly tracked by existing in the repo. There is no whitelist file. If a file is in the repo on the current branch, it gets synced. If you don't want a file synced, don't put it in the repo. This eliminates an entire class of "forgot to add to the whitelist" bugs.
 
@@ -94,19 +94,21 @@ mx-pc-win = { parents = ["windows"] }
 
 This lives on the `all` branch (since every machine needs the full graph).
 
-## Sync direction
+## Sync and commit direction
 
-Sync is always repo -> system. The repo is the single source of truth. We never read config files from `~/` into the repo.
+Plain sync is always repo -> system. The repo is the durable source of truth, and `dotsync` with no scope materializes the current machine scope into `~/`.
 
-If the system file differs from the repo, that's drift. dotsync warns and shows a diff. The user (or agent) decides whether to overwrite the system file or investigate.
+Commits are home -> repo for selected paths only. Users and agents edit files at their real home locations, inspect `dotsync status`, then run `dotsync <scope> -m "message" -- <paths...>` to record the selected home files to the appropriate scope. After committing, dotsync cascades that scope through descendants, syncs the current machine home, and pushes.
 
-### Why not bidirectional?
+If a managed home file differs from the repo outside a commit flow, that's drift. dotsync warns and shows a diff. The user (or agent) decides whether to overwrite the system file or investigate.
+
+### Why not fully bidirectional?
 
 Bidirectional sync requires conflict resolution between the repo and the system, which is a fundamentally different (and harder) problem than git merge conflicts. It also makes the mental model ambiguous: "which is the source of truth?" With unidirectional sync, the answer is always "the repo."
 
-dotsync still *reads* system files — it diffs them against the repo and warns on drift. But it never overwrites the repo with system state. If the system has drifted, the user or agent must manually reconcile (typically by re-making the change in the repo).
+dotsync still *reads* system files — it diffs them against the repo, reports status, and imports selected files during an explicit scoped commit. But it never treats arbitrary home drift as something to sync automatically. A repo update and a local home edit are different events, and the command shape makes the user choose which home paths belong in which scope.
 
-The cost: to contribute a system change, you must first recreate it in the repo. In practice this is trivial — you edit the file in `~/dotfiles/` instead of `~/`. The agent skill enforces this.
+The cost: to contribute a home change, you must name the scope and paths explicitly. That explicitness is the safety boundary that replaces a visible checkout or a broad "sync everything from home" mode.
 
 An open question: some config files may end up with sections that shouldn't be checked in (e.g. secrets injected by an application). We don't have a strategy for this yet. Hopefully it doesn't come up, but if it does we'll need something — possibly `.gitignore` patterns for sections, or splitting the file.
 
@@ -116,7 +118,7 @@ dotsync tracks a minimal machine-local sync state file recording which machine s
 
 1. **Deletion semantics** — when a file is removed from the repo, dotsync can detect that it was previously synced to home and should be removed. Without state, dotsync couldn't distinguish "this file was never managed" from "this file was managed and was removed."
 
-2. **Drift attribution** — comparing home state against the last-synced revision rather than repo HEAD would allow distinguishing "repo advanced elsewhere" from "home drifted locally." (This distinction is not yet fully implemented but the state supports it.)
+2. **Drift attribution** — comparing home state against the last-synced revision rather than repo HEAD distinguishes "repo advanced elsewhere" from "home drifted locally." A plain sync can then accept legitimate remote updates without treating them as local drift, while still stopping before overwriting files that changed in home since the last sync.
 
 The sync state file path is configured in `config.toml` under `[sync] state_path` and lives in the home directory (not the repo). It is never synced as a managed dotfile.
 
@@ -126,9 +128,9 @@ An earlier design rejected state tracking as unnecessary complexity. That was wr
 
 dotsync uses [jj (Jujutsu)](https://github.com/jj-vcs/jj) rather than raw git. The key reason: **jj can manipulate branches without touching the working copy.**
 
-When you contribute a change, it needs to be committed on the right scope branch — not necessarily the branch you have checked out. With git, this requires stashing, checking out the target branch, committing, checking out back, merging, and popping the stash. If you have multiple uncommitted changes going to different scopes, this becomes a nightmare of stash juggling.
+When you contribute a change, it needs to be committed on the right scope branch — not necessarily this machine's leaf scope. With git, this requires a checkout or worktree for the target branch, plus careful staging around unrelated home edits. If you have multiple edited files going to different scopes, this becomes a nightmare of stash juggling or visible workspaces.
 
-With jj, you create a commit directly on the target scope's branch and rebase/merge descendant branches, all without disturbing the working copy (assuming no conflicts). The working copy stays on your machine's branch throughout.
+With jj, dotsync creates a commit directly on the target scope's branch and merges descendant branches in the hidden repo, all without exposing a checkout to the user. Home remains the editing surface; the hidden repo remains implementation detail.
 
 jj is also git-compatible — the repo is a valid git repo, pushable to GitHub, cloneable with git. jj is just a better local interface for the graph manipulation dotsync needs.
 
@@ -138,11 +140,11 @@ One risk: jj is newer and less well-known than git. AI agents may not have stron
 
 There is one command: `dotsync`.
 
-**`dotsync`** (no arguments): Sync repo -> system. If there are uncommitted local changes, errors and directs you to use `dotsync <scope> -m "message"` instead (because those changes need a scope to be committed to).
+**`dotsync`** (no arguments): Sync repo -> system. It does not import home edits; use `dotsync status` and `dotsync <scope> -m "message" -- <paths...>` when home changes should be recorded.
 
-**`dotsync <scope> -m "message" <path>...`**: Commit the selected repo-relative file/directory paths to the named scope branch, merge cascade through all descendant scopes, sync repo -> system, push to remote.
+**`dotsync <scope> -m "message" <path>...`**: Commit the selected home-relative file/directory paths to the named scope branch, merge cascade through all descendant scopes, sync repo -> system, push to remote.
 
-**`dotsync <scope> --all -m "message"`**: Commit the whole current working tree to the named scope branch when you intentionally want the old whole-tree behavior.
+**`dotsync <scope> --all -m "message"`**: Commit every changed managed file for that scope. It does not scan all of home for unrelated new files; new paths are intentionally opted into with explicit path arguments.
 
 Both forms diff system files against the repo before syncing. If any system file has drifted from what the repo expects, dotsync stops, shows the diff, and warns. `--force` still shows the diffs but proceeds anyway — so you always see what's being overwritten, even if you've chosen not to stop for it.
 
@@ -154,10 +156,11 @@ Earlier designs had separate `dotsync` (sync), `dotsync commit` (commit + cascad
 
 dotsync includes an agent skill (`dotfiles`) that triggers whenever any home directory config file is edited. The skill tells agents:
 
-1. Edit files in `~/dotfiles/`, not `~/` directly
-2. Read `.config/dotsync/config.toml` in the repo to see available scopes — the config file contains comments explaining what each scope is for and guiding scope selection
-3. Choose the root-est appropriate scope for the change
-4. Run `dotsync <scope> -m "description"` when done
+1. Edit files directly in `~/` at their real locations
+2. Run `dotsync status` to see changed managed files
+3. Read `.config/dotsync/config.toml` from the `all` scope to see available scopes — the config file contains comments explaining what each scope is for and guiding scope selection
+4. Choose the root-est appropriate scope for the change
+5. Run `dotsync <scope> -m "description" -- <paths...>` when done
 
 This is the mechanism that makes the system agent-friendly. The tool itself is simple plumbing — the skill is what makes agents use the plumbing correctly. The comments in the config file are load-bearing: they're how agents learn "hyprland stuff goes on `hyprland`, not `linux`."
 

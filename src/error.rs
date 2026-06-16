@@ -53,6 +53,20 @@ pub enum DotsyncError {
         count: usize,
         drifts: Vec<FileDrift>,
     },
+    #[error("cascade paused at scope `{scope}` with conflicts in {conflicted_files}")]
+    CascadePaused {
+        scope: String,
+        conflicted_files: String,
+    },
+    #[error("concurrent edit on scope `{scope}` conflicts in {conflicted_files}")]
+    ConcurrentScopeConflict {
+        scope: String,
+        conflicted_files: String,
+    },
+    #[error("paused cascade at scope `{scope}` must be resolved before starting another commit")]
+    PausedCascadeInProgress { scope: String },
+    #[error("no paused cascade to continue")]
+    NoPausedCascade,
     #[error("repo already exists at {path}")]
     RepoAlreadyExists { path: PathBuf },
     #[error("unable to determine machine hostname")]
@@ -85,6 +99,14 @@ impl DotsyncError {
             DotsyncError::ScopeCycle { .. } => basic_error_report("scope_cycle", self),
             DotsyncError::ConfigParse { .. } => basic_error_report("config_parse", self),
             DotsyncError::SyncState { .. } => basic_error_report("sync_state", self),
+            DotsyncError::CascadePaused { .. } => basic_error_report("cascade_paused", self),
+            DotsyncError::ConcurrentScopeConflict { .. } => {
+                basic_error_report("concurrent_scope_conflict", self)
+            }
+            DotsyncError::PausedCascadeInProgress { .. } => {
+                basic_error_report("paused_cascade_in_progress", self)
+            }
+            DotsyncError::NoPausedCascade => basic_error_report("no_paused_cascade", self),
             DotsyncError::RepoAlreadyExists { .. } => basic_error_report("repo_exists", self),
             DotsyncError::MissingHostname => basic_error_report("missing_hostname", self),
             DotsyncError::Io { .. } => basic_error_report("io", self),
@@ -116,7 +138,13 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
         } => Some(format!(
             "bookmark: {bookmark}; local target: {local_target}; remote target: {remote_target}"
         )),
+        DotsyncError::CascadePaused { scope, .. } => Some(format!("paused scope: {scope}")),
+        DotsyncError::ConcurrentScopeConflict { scope, .. } => {
+            Some(format!("conflicted scope: {scope}"))
+        }
+        DotsyncError::PausedCascadeInProgress { scope } => Some(format!("paused scope: {scope}")),
         DotsyncError::NotImplemented(_)
+        | DotsyncError::NoPausedCascade
         | DotsyncError::Io { .. }
         | DotsyncError::ConfigParse { .. }
         | DotsyncError::MissingParent { .. }

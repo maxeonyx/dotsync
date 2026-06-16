@@ -57,7 +57,55 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             "Dotsync stopped before overwriting local drift so you can inspect what would be replaced.",
             &[
                 "If the repo is correct, rerun with `dotsync --force` to overwrite the drift after reviewing the diffs.",
-                "If the live file is the change you wanted, recreate that change in the hidden repo on the correct scope and then rerun dotsync after commit support lands.",
+                "If the live file is the change you wanted, run `dotsync status`, then commit the intended path with `dotsync <scope> -m \"message\" -- <path>`.",
+            ],
+        ),
+        DotsyncError::CascadePaused { .. } => render_structured_error(
+            "cascade paused",
+            "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config.",
+            "This commit flow was merging the scoped change through the scope DAG and reached a branch where the same file had incompatible edits.",
+            "It expects you to resolve the conflicted file in home, then run `dotsync continue` to create the merge commit and resume the cascade.",
+            error_report
+                .current_state
+                .as_deref()
+                .unwrap_or(&error_report.message),
+            &error_report.message,
+            &[
+                "edit each conflicted file at its real path in home and keep the desired final contents.",
+                "run `dotsync continue` from the same machine to finish cascading and syncing.",
+                "do not run another dotsync commit while the cascade is paused.",
+            ],
+        ),
+        DotsyncError::ConcurrentScopeConflict { .. } => render_structured_error(
+            "concurrent scope conflict",
+            "Dotsync stores one shared version of each file on a scope branch, and machines import selected home edits into that scope explicitly.",
+            "This commit flow fetched remote scope history before committing, then found that the selected home file does not match a scope path that changed since this machine's previous local view of that scope.",
+            "It expects you to resolve the home file against the already-published scope version before creating a new shared-scope commit.",
+            error_report
+                .current_state
+                .as_deref()
+                .unwrap_or(&error_report.message),
+            &error_report.message,
+            &[
+                "inspect the already-published scope version before deciding what the shared file should contain.",
+                "edit the conflicted file in home so it contains the resolved shared contents.",
+                "rerun `dotsync <scope> -m \"message\" -- <path>` after resolving the file.",
+            ],
+        ),
+        DotsyncError::PausedCascadeInProgress { .. } => render_structured_error(
+            "paused cascade in progress",
+            "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config.",
+            "This commit flow was about to start a new scoped commit, but a previous cascade is still paused for conflict resolution.",
+            "It expects exactly one cascade to be active at a time so commit history, conflict resolution, and home sync state stay aligned.",
+            error_report
+                .current_state
+                .as_deref()
+                .unwrap_or(&error_report.message),
+            "Dotsync stopped before fetching, committing, or syncing because starting another commit would hide the real paused-cascade task and may mutate unrelated scope state.",
+            &[
+                "edit each conflicted file at its real path in home and keep the desired final contents.",
+                "run `dotsync continue` to finish the paused cascade.",
+                "after `dotsync continue` succeeds, rerun the new commit if it is still needed.",
             ],
         ),
         DotsyncError::InvalidScope { .. } => render_structured_error(
@@ -85,6 +133,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             ],
         ),
         DotsyncError::NotImplemented(_)
+        | DotsyncError::NoPausedCascade
         | DotsyncError::Io { .. }
         | DotsyncError::ConfigParse { .. }
         | DotsyncError::MissingParent { .. }

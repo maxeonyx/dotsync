@@ -90,6 +90,10 @@ impl ScopeHeads {
 }
 
 impl CascadePlan {
+    pub(crate) fn from_steps(steps: Vec<CascadeStep>) -> Self {
+        Self { steps }
+    }
+
     pub(crate) fn remaining_steps(&self) -> &[CascadeStep] {
         &self.steps
     }

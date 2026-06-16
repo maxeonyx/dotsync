@@ -77,6 +77,10 @@ impl MachineEnvironment {
         self.run_dotsync(&[])
     }
 
+    fn sync_force(&self) -> Output {
+        self.run_dotsync(&["--force"])
+    }
+
     fn sync_json(&self) -> Output {
         self.run_dotsync_json(&[])
     }
@@ -760,7 +764,7 @@ fn v03_commit_returns_not_implemented() {
 }
 
 #[test]
-fn v03_continue_returns_not_implemented() {
+fn continue_without_pause_returns_clear_error() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
@@ -775,13 +779,13 @@ fn v03_continue_returns_not_implemented() {
     assert_eq!(
         continue_output.status.code(),
         Some(1),
-        "continue should return a normal not-implemented error in v0.3 task 1\n{}",
+        "continue without a paused cascade should return a normal command error\n{}",
         render_output(&continue_output)
     );
     let stderr = String::from_utf8_lossy(&continue_output.stderr);
     assert!(
-        stderr.to_ascii_lowercase().contains("not implemented"),
-        "continue should report not implemented clearly\n{}",
+        stderr.to_ascii_lowercase().contains("no paused cascade"),
+        "continue should report that no cascade is paused\n{}",
         render_output(&continue_output)
     );
 }
@@ -960,6 +964,393 @@ fn commit_cascades_through_all_descendants() {
             "expected `{relative}` to cascade to `{scope}`"
         );
     }
+}
+
+#[test]
+fn multiple_machines_can_contribute_to_all_without_losing_changes() {
+    let harness = TestHarness::new();
+    let machine_a = harness.machine("machine-a", "linux", "goof-a");
+    let machine_b = harness.machine("machine-b", "linux", "goof-b");
+    let a_relative = ".config/shared-a.conf";
+    let b_relative = ".config/shared-b.conf";
+
+    let init_a = machine_a.init();
+    assert!(init_a.status.success(), "{}", render_output(&init_a));
+    let init_b = machine_b.init();
+    assert!(init_b.status.success(), "{}", render_output(&init_b));
+    let sync_a_after_join = machine_a.sync_force();
+    assert!(
+        sync_a_after_join.status.success(),
+        "{}",
+        render_output(&sync_a_after_join)
+    );
+
+    machine_a.write_home_file(a_relative, "from machine a\n");
+    let commit_a = machine_a.commit_with_paths("all", "add shared a", &[a_relative]);
+    assert!(commit_a.status.success(), "{}", render_output(&commit_a));
+
+    let sync_b = machine_b.sync();
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    assert_eq!(machine_b.read_home_file(a_relative), "from machine a\n");
+
+    machine_b.write_home_file(b_relative, "from machine b\n");
+    let commit_b = machine_b.commit_with_paths("all", "add shared b", &[b_relative]);
+    assert!(commit_b.status.success(), "{}", render_output(&commit_b));
+
+    let sync_a = machine_a.sync();
+    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    assert_eq!(machine_a.read_home_file(a_relative), "from machine a\n");
+    assert_eq!(machine_a.read_home_file(b_relative), "from machine b\n");
+    assert_eq!(machine_b.read_home_file(a_relative), "from machine a\n");
+    assert_eq!(machine_b.read_home_file(b_relative), "from machine b\n");
+    assert_eq!(
+        read_bookmark_file_contents(&machine_a, "all", a_relative),
+        "from machine a\n"
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine_a, "all", b_relative),
+        "from machine b\n"
+    );
+}
+
+#[test]
+fn concurrent_same_scope_file_edits_require_resolution() {
+    let harness = TestHarness::new();
+    let machine_a = harness.machine("machine-a", "linux", "goof-a");
+    let machine_b = harness.machine("machine-b", "linux", "goof-b");
+    let relative = ".config/shared.conf";
+    let base = "setting = \"base\"\n";
+    let from_a = "setting = \"all-a\"\n";
+    let from_b = "setting = \"all-b\"\n";
+
+    let init_a = machine_a.init();
+    assert!(init_a.status.success(), "{}", render_output(&init_a));
+    let init_b = machine_b.init();
+    assert!(init_b.status.success(), "{}", render_output(&init_b));
+    let sync_a_after_join = machine_a.sync_force();
+    assert!(
+        sync_a_after_join.status.success(),
+        "{}",
+        render_output(&sync_a_after_join)
+    );
+
+    // Establish the shared base version first.
+    machine_a.write_home_file(relative, base);
+    let commit_base = machine_a.commit_with_paths("all", "add shared base", &[relative]);
+    assert!(
+        commit_base.status.success(),
+        "{}",
+        render_output(&commit_base)
+    );
+
+    // Both machines start the conflict scenario from the same synced base.
+    let sync_a_to_base = machine_a.sync();
+    assert!(
+        sync_a_to_base.status.success(),
+        "{}",
+        render_output(&sync_a_to_base)
+    );
+    assert_eq!(machine_a.read_home_file(relative), base);
+
+    let sync_b_to_base = machine_b.sync();
+    assert!(
+        sync_b_to_base.status.success(),
+        "{}",
+        render_output(&sync_b_to_base)
+    );
+    assert_eq!(machine_b.read_home_file(relative), base);
+
+    // Divergent local edits start here. B must not sync again before committing.
+    machine_a.write_home_file(relative, from_a);
+    machine_b.write_home_file(relative, from_b);
+    assert_eq!(machine_a.read_home_file(relative), from_a);
+    assert_eq!(
+        machine_b.read_home_file(relative),
+        from_b,
+        "machine B must make its own local edit before machine A publishes"
+    );
+
+    let commit_a = machine_a.commit_with_paths("all", "update shared from a", &[relative]);
+    assert!(commit_a.status.success(), "{}", render_output(&commit_a));
+    assert_eq!(
+        machine_b.read_home_file(relative),
+        from_b,
+        "machine B must not sync to machine A's published edit before committing its own edit"
+    );
+
+    let conflict = machine_b.commit_with_paths("all", "update shared from b", &[relative]);
+    assert_eq!(
+        conflict.status.code(),
+        Some(3),
+        "concurrent same-scope edit should require conflict resolution\n{}",
+        render_output(&conflict)
+    );
+    let stderr = String::from_utf8_lossy(&conflict.stderr);
+    assert!(stderr.contains("conflict"), "{}", render_output(&conflict));
+    assert!(stderr.contains("all"), "{}", render_output(&conflict));
+    assert!(stderr.contains(relative), "{}", render_output(&conflict));
+    assert_eq!(
+        read_bookmark_file_contents(&machine_b, "all", relative),
+        from_a,
+        "failed concurrent commit must leave the shared scope at the already-published version"
+    );
+    assert_eq!(
+        machine_b.read_home_file(relative),
+        from_b,
+        "failed concurrent commit must not overwrite B's unresolved home edit"
+    );
+}
+
+#[test]
+fn shared_scope_conflict_pauses_and_continue_applies_resolution_to_machine_homes() {
+    let harness = TestHarness::new();
+    let machine_a = harness.machine("machine-a", "linux", "goof-a");
+    let machine_b = harness.machine("machine-b", "linux", "goof-b");
+    let relative = ".config/app.conf";
+    let base = "setting = \"base\"\n";
+    let linux_override = "setting = \"linux\"\n";
+    let all_update = "setting = \"all\"\n";
+    let resolved = "setting = \"all+linux\"\n";
+
+    let init_a = machine_a.init();
+    assert!(init_a.status.success(), "{}", render_output(&init_a));
+    let init_b = machine_b.init();
+    assert!(init_b.status.success(), "{}", render_output(&init_b));
+    let sync_a_after_join = machine_a.sync_force();
+    assert!(
+        sync_a_after_join.status.success(),
+        "{}",
+        render_output(&sync_a_after_join)
+    );
+
+    machine_a.write_home_file(relative, base);
+    let commit_base = machine_a.commit_with_paths("all", "add base config", &[relative]);
+    assert!(
+        commit_base.status.success(),
+        "{}",
+        render_output(&commit_base)
+    );
+
+    machine_a.write_home_file(relative, linux_override);
+    let commit_linux = machine_a.commit_with_paths("linux", "customize linux config", &[relative]);
+    assert!(
+        commit_linux.status.success(),
+        "{}",
+        render_output(&commit_linux)
+    );
+
+    let sync_b = machine_b.sync();
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    assert_eq!(machine_b.read_home_file(relative), linux_override);
+
+    machine_b.write_home_file(relative, all_update);
+    let conflict = machine_b.commit_with_paths("all", "update shared config", &[relative]);
+    assert_eq!(
+        conflict.status.code(),
+        Some(3),
+        "conflicting all-to-linux cascade should pause\n{}",
+        render_output(&conflict)
+    );
+    let stderr = String::from_utf8_lossy(&conflict.stderr);
+    assert!(
+        stderr.contains("cascade paused"),
+        "{}",
+        render_output(&conflict)
+    );
+    assert!(stderr.contains("linux"), "{}", render_output(&conflict));
+    assert!(stderr.contains(relative), "{}", render_output(&conflict));
+
+    machine_b.write_home_file(relative, resolved);
+    let continued = machine_b.continue_command();
+    assert!(continued.status.success(), "{}", render_output(&continued));
+    assert_eq!(machine_b.read_home_file(relative), resolved);
+
+    let sync_a = machine_a.sync();
+    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    assert_eq!(machine_a.read_home_file(relative), resolved);
+    assert_eq!(
+        read_bookmark_file_contents(&machine_a, "all", relative),
+        all_update
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine_a, "linux", relative),
+        resolved
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine_a, "goof-a", relative),
+        resolved
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine_a, "goof-b", relative),
+        resolved
+    );
+}
+
+#[test]
+fn continue_preserves_non_conflicting_parent_changes_from_paused_merge() {
+    let harness = TestHarness::new();
+    let machine_a = harness.machine("machine-a", "linux", "goof-a");
+    let machine_b = harness.machine("machine-b", "linux", "goof-b");
+    let conflicting_relative = ".config/app.conf";
+    let shared_relative = ".config/shared.conf";
+    let base_conflict = "setting = \"base\"\n";
+    let base_shared = "shared = \"base\"\n";
+    let linux_override = "setting = \"linux\"\n";
+    let all_update = "setting = \"all\"\n";
+    let shared_update = "shared = \"updated\"\n";
+    let resolved = "setting = \"all+linux\"\n";
+
+    let init_a = machine_a.init();
+    assert!(init_a.status.success(), "{}", render_output(&init_a));
+    let init_b = machine_b.init();
+    assert!(init_b.status.success(), "{}", render_output(&init_b));
+    let sync_a_after_join = machine_a.sync_force();
+    assert!(
+        sync_a_after_join.status.success(),
+        "{}",
+        render_output(&sync_a_after_join)
+    );
+
+    machine_a.write_home_file(conflicting_relative, base_conflict);
+    machine_a.write_home_file(shared_relative, base_shared);
+    let commit_base = machine_a.commit_with_paths(
+        "all",
+        "add base config",
+        &[conflicting_relative, shared_relative],
+    );
+    assert!(
+        commit_base.status.success(),
+        "{}",
+        render_output(&commit_base)
+    );
+
+    machine_a.write_home_file(conflicting_relative, linux_override);
+    let commit_linux =
+        machine_a.commit_with_paths("linux", "customize linux config", &[conflicting_relative]);
+    assert!(
+        commit_linux.status.success(),
+        "{}",
+        render_output(&commit_linux)
+    );
+
+    let sync_b = machine_b.sync();
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    assert_eq!(
+        machine_b.read_home_file(conflicting_relative),
+        linux_override
+    );
+    assert_eq!(machine_b.read_home_file(shared_relative), base_shared);
+
+    machine_b.write_home_file(conflicting_relative, all_update);
+    machine_b.write_home_file(shared_relative, shared_update);
+    let conflict = machine_b.commit_with_paths(
+        "all",
+        "update shared config",
+        &[conflicting_relative, shared_relative],
+    );
+    assert_eq!(
+        conflict.status.code(),
+        Some(3),
+        "conflicting all-to-linux cascade should pause\n{}",
+        render_output(&conflict)
+    );
+
+    machine_b.write_home_file(conflicting_relative, resolved);
+    let continued = machine_b.continue_command();
+    assert!(continued.status.success(), "{}", render_output(&continued));
+    assert_eq!(machine_b.read_home_file(conflicting_relative), resolved);
+    assert_eq!(machine_b.read_home_file(shared_relative), shared_update);
+
+    let sync_a = machine_a.sync();
+    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    assert_eq!(machine_a.read_home_file(conflicting_relative), resolved);
+    assert_eq!(machine_a.read_home_file(shared_relative), shared_update);
+    assert_eq!(
+        read_bookmark_file_contents(&machine_a, "linux", conflicting_relative),
+        resolved
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine_a, "linux", shared_relative),
+        shared_update
+    );
+}
+
+#[test]
+fn commit_while_cascade_paused_is_blocked_without_mutating_scope() {
+    let harness = TestHarness::new();
+    let machine_a = harness.machine("machine-a", "linux", "goof-a");
+    let machine_b = harness.machine("machine-b", "linux", "goof-b");
+    let conflicting_relative = ".config/app.conf";
+    let second_commit_relative = ".config/other.conf";
+
+    let init_a = machine_a.init();
+    assert!(init_a.status.success(), "{}", render_output(&init_a));
+    let init_b = machine_b.init();
+    assert!(init_b.status.success(), "{}", render_output(&init_b));
+    let sync_a_after_join = machine_a.sync_force();
+    assert!(
+        sync_a_after_join.status.success(),
+        "{}",
+        render_output(&sync_a_after_join)
+    );
+
+    machine_a.write_home_file(conflicting_relative, "setting = \"base\"\n");
+    let commit_base =
+        machine_a.commit_with_paths("all", "add base config", &[conflicting_relative]);
+    assert!(
+        commit_base.status.success(),
+        "{}",
+        render_output(&commit_base)
+    );
+
+    machine_a.write_home_file(conflicting_relative, "setting = \"linux\"\n");
+    let commit_linux =
+        machine_a.commit_with_paths("linux", "customize linux config", &[conflicting_relative]);
+    assert!(
+        commit_linux.status.success(),
+        "{}",
+        render_output(&commit_linux)
+    );
+
+    let sync_b = machine_b.sync();
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+
+    machine_b.write_home_file(conflicting_relative, "setting = \"all\"\n");
+    let conflict =
+        machine_b.commit_with_paths("all", "update shared config", &[conflicting_relative]);
+    assert_eq!(
+        conflict.status.code(),
+        Some(3),
+        "conflicting all-to-linux cascade should pause\n{}",
+        render_output(&conflict)
+    );
+
+    let machine_scope_revision_before = bookmark_revision(&machine_b, "goof-b");
+    machine_b.write_home_file(second_commit_relative, "other = true\n");
+
+    let blocked = machine_b.commit_with_paths(
+        "goof-b",
+        "try commit while paused",
+        &[second_commit_relative],
+    );
+
+    assert_eq!(
+        blocked.status.code(),
+        Some(1),
+        "commit while a cascade is paused should be blocked\n{}",
+        render_output(&blocked)
+    );
+    let stderr = String::from_utf8_lossy(&blocked.stderr);
+    assert!(
+        stderr.to_ascii_lowercase().contains("paused cascade"),
+        "{}",
+        render_output(&blocked)
+    );
+    assert_eq!(
+        bookmark_revision(&machine_b, "goof-b"),
+        machine_scope_revision_before,
+        "blocked commit must not mutate the target scope"
+    );
 }
 
 #[test]

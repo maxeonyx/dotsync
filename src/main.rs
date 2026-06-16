@@ -445,6 +445,14 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
             0
         }
         CliOutput::Error(error) => {
+            let exit_code = if matches!(
+                error,
+                DotsyncError::CascadePaused { .. } | DotsyncError::ConcurrentScopeConflict { .. }
+            ) {
+                3
+            } else {
+                1
+            };
             eprintln!("{}", render::render_error_human(&error));
             let error_report = error.to_error_report();
             if !error_report.drifts.is_empty() {
@@ -453,7 +461,7 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
             if matches!(output_format, OutputFormat::Json) {
                 println!("{}", render::render_error_json(&error_report));
             }
-            1
+            exit_code
         }
         CliOutput::Usage(error) => {
             eprintln!("dotsync: {}", error.message);
