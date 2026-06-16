@@ -118,7 +118,7 @@ dotsync tracks a minimal machine-local sync state file recording which machine s
 
 1. **Deletion semantics** — when a file is removed from the repo, dotsync can detect that it was previously synced to home and should be removed. Without state, dotsync couldn't distinguish "this file was never managed" from "this file was managed and was removed."
 
-2. **Drift attribution** — comparing home state against the last-synced revision rather than repo HEAD would allow distinguishing "repo advanced elsewhere" from "home drifted locally." (This distinction is not yet fully implemented but the state supports it.)
+2. **Drift attribution** — comparing home state against the last-synced revision rather than repo HEAD distinguishes "repo advanced elsewhere" from "home drifted locally." A plain sync can then accept legitimate remote updates without treating them as local drift, while still stopping before overwriting files that changed in home since the last sync.
 
 The sync state file path is configured in `config.toml` under `[sync] state_path` and lives in the home directory (not the repo). It is never synced as a managed dotfile.
 
