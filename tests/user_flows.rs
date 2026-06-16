@@ -1188,6 +1188,82 @@ fn continue_preserves_non_conflicting_parent_changes_from_paused_merge() {
 }
 
 #[test]
+fn commit_while_cascade_paused_is_blocked_without_mutating_scope() {
+    let harness = TestHarness::new();
+    let machine_a = harness.machine("machine-a", "linux", "goof-a");
+    let machine_b = harness.machine("machine-b", "linux", "goof-b");
+    let conflicting_relative = ".config/app.conf";
+    let second_commit_relative = ".config/other.conf";
+
+    let init_a = machine_a.init();
+    assert!(init_a.status.success(), "{}", render_output(&init_a));
+    let init_b = machine_b.init();
+    assert!(init_b.status.success(), "{}", render_output(&init_b));
+    let sync_a_after_join = machine_a.sync_force();
+    assert!(
+        sync_a_after_join.status.success(),
+        "{}",
+        render_output(&sync_a_after_join)
+    );
+
+    machine_a.write_home_file(conflicting_relative, "setting = \"base\"\n");
+    let commit_base = machine_a.commit_with_paths("all", "add base config", &[conflicting_relative]);
+    assert!(
+        commit_base.status.success(),
+        "{}",
+        render_output(&commit_base)
+    );
+
+    machine_a.write_home_file(conflicting_relative, "setting = \"linux\"\n");
+    let commit_linux =
+        machine_a.commit_with_paths("linux", "customize linux config", &[conflicting_relative]);
+    assert!(
+        commit_linux.status.success(),
+        "{}",
+        render_output(&commit_linux)
+    );
+
+    let sync_b = machine_b.sync();
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+
+    machine_b.write_home_file(conflicting_relative, "setting = \"all\"\n");
+    let conflict = machine_b.commit_with_paths("all", "update shared config", &[conflicting_relative]);
+    assert_eq!(
+        conflict.status.code(),
+        Some(3),
+        "conflicting all-to-linux cascade should pause\n{}",
+        render_output(&conflict)
+    );
+
+    let machine_scope_revision_before = bookmark_revision(&machine_b, "goof-b");
+    machine_b.write_home_file(second_commit_relative, "other = true\n");
+
+    let blocked = machine_b.commit_with_paths(
+        "goof-b",
+        "try commit while paused",
+        &[second_commit_relative],
+    );
+
+    assert_eq!(
+        blocked.status.code(),
+        Some(1),
+        "commit while a cascade is paused should be blocked\n{}",
+        render_output(&blocked)
+    );
+    let stderr = String::from_utf8_lossy(&blocked.stderr);
+    assert!(
+        stderr.to_ascii_lowercase().contains("paused cascade"),
+        "{}",
+        render_output(&blocked)
+    );
+    assert_eq!(
+        bookmark_revision(&machine_b, "goof-b"),
+        machine_scope_revision_before,
+        "blocked commit must not mutate the target scope"
+    );
+}
+
+#[test]
 fn commit_to_machine_scope_does_not_cascade() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
