@@ -82,8 +82,8 @@ pub async fn commit_and_sync(
 ) -> Result<CommandOutcome<CommitReport>, DotsyncError> {
     reject_commit_if_cascade_paused(paths)?;
 
-    let repo = load_repo_direct(paths).await?;
-    let repo = fetch_origin(repo).await?;
+    let pre_fetch_repo = load_repo_direct(paths).await?;
+    let repo = fetch_origin(pre_fetch_repo.clone()).await?;
     let config = load_config(paths).await?;
     let graph = config.graph.clone();
 
@@ -100,6 +100,8 @@ pub async fn commit_and_sync(
     let old_machine_commit = load_scope_commit(repo.as_ref(), &machine_scope)?;
     let machine_entries =
         load_current_machine_entries(repo.as_ref(), &machine_scope, &internal_paths).await?;
+    let pre_fetch_target_entries =
+        load_scope_entries(pre_fetch_repo.as_ref(), &options.scope, &internal_paths)?;
     let target_entries = load_scope_entries(repo.as_ref(), &options.scope, &internal_paths)?;
     let selected_paths = select_commit_paths(
         paths,
@@ -107,6 +109,16 @@ pub async fn commit_and_sync(
         &options.selection,
         &target_entries,
         &internal_paths,
+    )
+    .await?;
+
+    reject_stale_selected_scope_paths(
+        paths,
+        repo.as_ref(),
+        &options.scope,
+        &pre_fetch_target_entries,
+        &target_entries,
+        &selected_paths,
     )
     .await?;
 
@@ -232,6 +244,63 @@ pub async fn commit_and_sync(
         cascaded_scopes,
         sync,
     }))
+}
+
+async fn reject_stale_selected_scope_paths(
+    paths: &DotsyncPaths,
+    repo: &dyn jj_lib::repo::Repo,
+    scope: &str,
+    pre_fetch_target_entries: &BTreeMap<PathBuf, TreeValue>,
+    current_target_entries: &BTreeMap<PathBuf, TreeValue>,
+    selected_paths: &[PathBuf],
+) -> Result<(), DotsyncError> {
+    let mut conflicted = Vec::new();
+
+    for relative in selected_paths {
+        let pre_fetch_bytes =
+            read_entry_bytes(repo, relative, pre_fetch_target_entries.get(relative)).await?;
+        let current_target_bytes =
+            read_entry_bytes(repo, relative, current_target_entries.get(relative)).await?;
+        let home_bytes = read_home_bytes(paths, relative)?;
+
+        if current_target_bytes != pre_fetch_bytes && home_bytes != current_target_bytes {
+            conflicted.push(relative.display().to_string());
+        }
+    }
+
+    if conflicted.is_empty() {
+        return Ok(());
+    }
+
+    Err(DotsyncError::ConcurrentScopeConflict {
+        scope: scope.to_string(),
+        conflicted_files: conflicted.join(", "),
+    })
+}
+
+async fn read_entry_bytes(
+    repo: &dyn jj_lib::repo::Repo,
+    relative: &Path,
+    value: Option<&TreeValue>,
+) -> Result<Option<Vec<u8>>, DotsyncError> {
+    match value {
+        Some(value) => Ok(Some(
+            read_tree_entry_bytes(repo.store(), relative, value).await?,
+        )),
+        None => Ok(None),
+    }
+}
+
+fn read_home_bytes(paths: &DotsyncPaths, relative: &Path) -> Result<Option<Vec<u8>>, DotsyncError> {
+    let home_path = paths.home_dir.join(relative);
+    match fs::read(&home_path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(DotsyncError::Io {
+            path: home_path,
+            source,
+        }),
+    }
 }
 
 async fn load_current_machine_entries(

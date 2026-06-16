@@ -76,6 +76,22 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 "do not run another dotsync commit while the cascade is paused.",
             ],
         ),
+        DotsyncError::ConcurrentScopeConflict { .. } => render_structured_error(
+            "concurrent scope conflict",
+            "Dotsync stores one shared version of each file on a scope branch, and machines import selected home edits into that scope explicitly.",
+            "This commit flow fetched remote scope history before committing, then found that the selected home file does not match a scope path that changed since this machine's previous local view of that scope.",
+            "It expects you to resolve the home file against the already-published scope version before creating a new shared-scope commit.",
+            error_report
+                .current_state
+                .as_deref()
+                .unwrap_or(&error_report.message),
+            &error_report.message,
+            &[
+                "inspect the already-published scope version before deciding what the shared file should contain.",
+                "edit the conflicted file in home so it contains the resolved shared contents.",
+                "rerun `dotsync <scope> -m \"message\" -- <path>` after resolving the file.",
+            ],
+        ),
         DotsyncError::PausedCascadeInProgress { .. } => render_structured_error(
             "paused cascade in progress",
             "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config.",

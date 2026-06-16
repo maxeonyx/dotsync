@@ -58,6 +58,11 @@ pub enum DotsyncError {
         scope: String,
         conflicted_files: String,
     },
+    #[error("concurrent edit on scope `{scope}` conflicts in {conflicted_files}")]
+    ConcurrentScopeConflict {
+        scope: String,
+        conflicted_files: String,
+    },
     #[error("paused cascade at scope `{scope}` must be resolved before starting another commit")]
     PausedCascadeInProgress { scope: String },
     #[error("no paused cascade to continue")]
@@ -95,6 +100,9 @@ impl DotsyncError {
             DotsyncError::ConfigParse { .. } => basic_error_report("config_parse", self),
             DotsyncError::SyncState { .. } => basic_error_report("sync_state", self),
             DotsyncError::CascadePaused { .. } => basic_error_report("cascade_paused", self),
+            DotsyncError::ConcurrentScopeConflict { .. } => {
+                basic_error_report("concurrent_scope_conflict", self)
+            }
             DotsyncError::PausedCascadeInProgress { .. } => {
                 basic_error_report("paused_cascade_in_progress", self)
             }
@@ -131,6 +139,9 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
             "bookmark: {bookmark}; local target: {local_target}; remote target: {remote_target}"
         )),
         DotsyncError::CascadePaused { scope, .. } => Some(format!("paused scope: {scope}")),
+        DotsyncError::ConcurrentScopeConflict { scope, .. } => {
+            Some(format!("conflicted scope: {scope}"))
+        }
         DotsyncError::PausedCascadeInProgress { scope } => Some(format!("paused scope: {scope}")),
         DotsyncError::NotImplemented(_)
         | DotsyncError::NoPausedCascade
