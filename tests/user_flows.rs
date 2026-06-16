@@ -1147,7 +1147,10 @@ fn continue_preserves_non_conflicting_parent_changes_from_paused_merge() {
 
     let sync_b = machine_b.sync();
     assert!(sync_b.status.success(), "{}", render_output(&sync_b));
-    assert_eq!(machine_b.read_home_file(conflicting_relative), linux_override);
+    assert_eq!(
+        machine_b.read_home_file(conflicting_relative),
+        linux_override
+    );
     assert_eq!(machine_b.read_home_file(shared_relative), base_shared);
 
     machine_b.write_home_file(conflicting_relative, all_update);

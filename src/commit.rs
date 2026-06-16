@@ -13,6 +13,7 @@ use jj_lib::op_store::RefTarget;
 use jj_lib::ref_name::RefNameBuf;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo_path::RepoPathBuf;
+use jj_lib::rewrite::merge_commit_trees;
 
 use crate::cascade::{
     build_cascade_plan, execute_cascade_plan, CascadeCommand, CascadeOutcome, CascadeStep,
@@ -585,13 +586,20 @@ pub async fn continue_after_conflict(
         .iter()
         .map(|id| load_commit_by_hex(tx.repo_mut(), id))
         .collect::<Result<Vec<_>, DotsyncError>>()?;
-    let paused_head = parent_commits
-        .first()
-        .cloned()
-        .ok_or_else(|| DotsyncError::Jj {
+    if parent_commits.is_empty() {
+        return Err(DotsyncError::Jj {
             message: "paused cascade has no parent commits".to_string(),
+        });
+    }
+    let merged_tree = merge_commit_trees(tx.repo_mut(), &parent_commits)
+        .await
+        .map_err(|err| DotsyncError::Jj {
+            message: format!(
+                "merge paused cascade parents for {}: {err}",
+                state.paused_scope
+            ),
         })?;
-    let mut builder = MergedTreeBuilder::new(paused_head.tree());
+    let mut builder = MergedTreeBuilder::new(merged_tree);
     for relative in &state.conflicted_files {
         apply_home_path_to_tree(tx.repo_mut(), paths, relative, &mut builder).await?;
     }
