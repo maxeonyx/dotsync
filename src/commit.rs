@@ -112,10 +112,9 @@ pub async fn commit_and_sync(
     )
     .await?;
 
-    reject_stale_selected_scope_paths(
+    let stale_selected_paths = stale_selected_scope_paths(
         paths,
         repo.as_ref(),
-        &options.scope,
         &pre_fetch_target_entries,
         &target_entries,
         &selected_paths,
@@ -136,30 +135,112 @@ pub async fn commit_and_sync(
     let mut tx = repo.start_transaction();
     let mut scope_heads = ScopeHeads::load_existing(tx.repo_mut().base_repo(), &graph)?;
     let base_commit = scope_heads.require(&options.scope)?;
-    let base_tree = base_commit.tree();
-    let mut builder = MergedTreeBuilder::new(base_tree.clone());
+    let new_commit = if stale_selected_paths.is_empty() {
+        let base_tree = base_commit.tree();
+        let mut builder = MergedTreeBuilder::new(base_tree.clone());
 
-    for relative in &selected_paths {
-        apply_home_path_to_tree(tx.repo_mut(), paths, relative, &mut builder).await?;
-    }
+        for relative in &selected_paths {
+            apply_home_path_to_tree(tx.repo_mut(), paths, relative, &mut builder).await?;
+        }
 
-    let new_tree = builder.write_tree().await.map_err(|err| DotsyncError::Jj {
-        message: format!("write commit tree for {}: {err}", options.scope),
-    })?;
-
-    if new_tree.tree_ids() == base_tree.tree_ids() {
-        return Ok(CommandOutcome::Success(CommitReport::default()));
-    }
-
-    let new_commit = tx
-        .repo_mut()
-        .new_commit(vec![base_commit.id().clone()], new_tree)
-        .set_description(&options.message)
-        .write()
-        .await
-        .map_err(|err| DotsyncError::Jj {
-            message: format!("write commit for {}: {err}", options.scope),
+        let new_tree = builder.write_tree().await.map_err(|err| DotsyncError::Jj {
+            message: format!("write commit tree for {}: {err}", options.scope),
         })?;
+
+        if new_tree.tree_ids() == base_tree.tree_ids() {
+            return Ok(CommandOutcome::Success(CommitReport::default()));
+        }
+
+        tx.repo_mut()
+            .new_commit(vec![base_commit.id().clone()], new_tree)
+            .set_description(&options.message)
+            .write()
+            .await
+            .map_err(|err| DotsyncError::Jj {
+                message: format!("write commit for {}: {err}", options.scope),
+            })?
+    } else {
+        let local_base_commit = load_scope_commit(pre_fetch_repo.as_ref(), &options.scope)?;
+        let local_base_tree = local_base_commit.tree();
+        let mut builder = MergedTreeBuilder::new(local_base_tree.clone());
+
+        for relative in &selected_paths {
+            apply_home_path_to_tree(tx.repo_mut(), paths, relative, &mut builder).await?;
+        }
+
+        let local_tree = builder.write_tree().await.map_err(|err| DotsyncError::Jj {
+            message: format!("write local commit tree for {}: {err}", options.scope),
+        })?;
+        let local_commit = tx
+            .repo_mut()
+            .new_commit(vec![local_base_commit.id().clone()], local_tree)
+            .set_description(&options.message)
+            .write()
+            .await
+            .map_err(|err| DotsyncError::Jj {
+                message: format!("write local commit for {}: {err}", options.scope),
+            })?;
+        let merged_tree =
+            merge_commit_trees(tx.repo_mut(), &[base_commit.clone(), local_commit.clone()])
+                .await
+                .map_err(|err| DotsyncError::Jj {
+                    message: format!("merge concurrent commits for {}: {err}", options.scope),
+                })?;
+
+        if merged_tree.has_conflict() {
+            let conflicted_files = conflicted_files_from_tree(&merged_tree, &options.scope)?;
+            let cascade_command = CascadeCommand {
+                root_scope: options.scope.clone(),
+                description: format!("dotsync: cascade from {}", options.scope),
+            };
+            let plan = build_cascade_plan(&graph, &scope_heads, &cascade_command);
+            tx.commit("dotsync: pause concurrent scope merge")
+                .await
+                .map_err(|err| DotsyncError::Jj {
+                    message: format!(
+                        "commit paused concurrent merge for {}: {err}",
+                        options.scope
+                    ),
+                })?;
+            save_paused_cascade_state(
+                paths,
+                &PausedCascadeState {
+                    machine_scope,
+                    paused_scope: options.scope.clone(),
+                    parent_commit_ids: vec![base_commit.id().hex(), local_commit.id().hex()],
+                    conflicted_files: conflicted_files.iter().map(PathBuf::from).collect(),
+                    remaining_steps: plan
+                        .remaining_steps()
+                        .iter()
+                        .map(|step| PausedCascadeStep {
+                            scope: step.scope.clone(),
+                            parent_scopes: step.parent_scopes.clone(),
+                        })
+                        .collect(),
+                    description: options.message,
+                },
+            )?;
+            return Err(DotsyncError::CascadePaused {
+                scope: options.scope,
+                conflicted_files: conflicted_files.join(", "),
+            });
+        }
+
+        tx.repo_mut()
+            .new_commit(
+                vec![base_commit.id().clone(), local_commit.id().clone()],
+                merged_tree,
+            )
+            .set_description(&options.message)
+            .write()
+            .await
+            .map_err(|err| DotsyncError::Jj {
+                message: format!(
+                    "write merged concurrent commit for {}: {err}",
+                    options.scope
+                ),
+            })?
+    };
     tx.repo_mut().set_local_bookmark_target(
         RefNameBuf::from(options.scope.as_str()).as_ref(),
         RefTarget::normal(new_commit.id().clone()),
@@ -246,14 +327,13 @@ pub async fn commit_and_sync(
     }))
 }
 
-async fn reject_stale_selected_scope_paths(
+async fn stale_selected_scope_paths(
     paths: &DotsyncPaths,
     repo: &dyn jj_lib::repo::Repo,
-    scope: &str,
     pre_fetch_target_entries: &BTreeMap<PathBuf, TreeValue>,
     current_target_entries: &BTreeMap<PathBuf, TreeValue>,
     selected_paths: &[PathBuf],
-) -> Result<(), DotsyncError> {
+) -> Result<Vec<PathBuf>, DotsyncError> {
     let mut conflicted = Vec::new();
 
     for relative in selected_paths {
@@ -264,18 +344,25 @@ async fn reject_stale_selected_scope_paths(
         let home_bytes = read_home_bytes(paths, relative)?;
 
         if current_target_bytes != pre_fetch_bytes && home_bytes != current_target_bytes {
-            conflicted.push(relative.display().to_string());
+            conflicted.push(relative.clone());
         }
     }
 
-    if conflicted.is_empty() {
-        return Ok(());
-    }
+    Ok(conflicted)
+}
 
-    Err(DotsyncError::ConcurrentScopeConflict {
-        scope: scope.to_string(),
-        conflicted_files: conflicted.join(", "),
-    })
+fn conflicted_files_from_tree(
+    tree: &jj_lib::merged_tree::MergedTree,
+    scope: &str,
+) -> Result<Vec<String>, DotsyncError> {
+    tree.conflicts()
+        .map(|(path, value)| {
+            value.map_err(|err| DotsyncError::Jj {
+                message: format!("read conflict for {scope}: {err}"),
+            })?;
+            Ok(path.as_internal_file_string().to_string())
+        })
+        .collect()
 }
 
 async fn read_entry_bytes(

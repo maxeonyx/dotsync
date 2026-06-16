@@ -1022,6 +1022,7 @@ fn concurrent_same_scope_file_edits_require_resolution() {
     let base = "setting = \"base\"\n";
     let from_a = "setting = \"all-a\"\n";
     let from_b = "setting = \"all-b\"\n";
+    let resolved = "setting = \"all-a+all-b\"\n";
 
     let init_a = machine_a.init();
     assert!(init_a.status.success(), "{}", render_output(&init_a));
@@ -1098,6 +1099,19 @@ fn concurrent_same_scope_file_edits_require_resolution() {
         machine_b.read_home_file(relative),
         from_b,
         "failed concurrent commit must not overwrite B's unresolved home edit"
+    );
+
+    machine_b.write_home_file(relative, resolved);
+    let continued = machine_b.continue_command();
+    assert!(continued.status.success(), "{}", render_output(&continued));
+    assert_eq!(machine_b.read_home_file(relative), resolved);
+
+    let sync_a = machine_a.sync();
+    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    assert_eq!(machine_a.read_home_file(relative), resolved);
+    assert_eq!(
+        read_bookmark_file_contents(&machine_a, "all", relative),
+        resolved
     );
 }
 
