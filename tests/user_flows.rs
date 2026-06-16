@@ -65,41 +65,16 @@ impl MachineEnvironment {
     }
 
     fn init(&self) -> Output {
-        self.run_dotsync(&[
-            "init",
+        self.run(&format!(
+            "dotsync init {}",
             self.remote_dir
                 .to_str()
-                .expect("remote path should be valid UTF-8"),
-        ])
+                .expect("remote path should be valid UTF-8")
+        ))
     }
 
-    fn sync(&self) -> Output {
-        self.run_dotsync(&[])
-    }
-
-    fn sync_force(&self) -> Output {
-        self.run_dotsync(&["--force"])
-    }
-
-    fn sync_json(&self) -> Output {
-        self.run_dotsync_json(&[])
-    }
-
-    fn commit(&self, scope: &str, message: &str) -> Output {
-        self.run_dotsync(&[scope, "-m", message])
-    }
-
-    fn commit_with_paths(&self, scope: &str, message: &str, paths: &[&str]) -> Output {
-        let mut args = vec![scope, "-m", message, "--"];
-        args.extend_from_slice(paths);
-        self.run_dotsync(&args)
-    }
-
-    fn continue_command(&self) -> Output {
-        self.run_dotsync(&["continue"])
-    }
-
-    fn run_dotsync(&self, args: &[&str]) -> Output {
+    fn run(&self, command: &str) -> Output {
+        let args = dotsync_args(command);
         let mut command = Command::new(env!("CARGO_BIN_EXE_dotsync"));
         command.args(args);
         command.current_dir(&self.home_dir);
@@ -109,32 +84,19 @@ impl MachineEnvironment {
         command.output().expect("run dotsync")
     }
 
-    fn run_dotsync_json(&self, args: &[&str]) -> Output {
-        let mut all_args = vec!["--output", "json"];
-        all_args.extend_from_slice(args);
-        self.run_dotsync(&all_args)
+    fn delete_file(&self, relative: &str) {
+        fs::remove_file(self.home_dir.join(relative)).expect("delete file");
     }
 
-    fn write_home_file(&self, relative: &str, contents: &str) {
-        self.write_file(self.home_dir.join(relative), contents);
+    fn write_file(&self, relative: &str, contents: &str) {
+        write_file_at(&self.home_dir.join(relative), contents);
     }
 
-    fn delete_home_file(&self, relative: &str) {
-        fs::remove_file(self.home_dir.join(relative)).expect("delete home file");
+    fn read_file(&self, relative: &str) -> String {
+        fs::read_to_string(self.home_dir.join(relative)).expect("read file")
     }
 
-    fn write_file(&self, path: PathBuf, contents: &str) {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create parent dir");
-        }
-        fs::write(path, contents).expect("write file");
-    }
-
-    fn read_home_file(&self, relative: &str) -> String {
-        fs::read_to_string(self.home_dir.join(relative)).expect("read home file")
-    }
-
-    fn home_file_exists(&self, relative: &str) -> bool {
+    fn file_exists(&self, relative: &str) -> bool {
         self.home_dir.join(relative).exists()
     }
 
@@ -159,7 +121,7 @@ impl MachineEnvironment {
     }
 
     fn write_sync_state_raw(&self, contents: &str) {
-        self.write_file(self.sync_state_path(), contents);
+        write_file_at(&self.sync_state_path(), contents);
     }
 }
 
@@ -446,7 +408,6 @@ fn init_creates_no_visible_git_directory() {
 fn drift_detected_human_error_stands_alone() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-    let relative = ".gitconfig";
 
     let init_output = machine.init();
     assert!(
@@ -455,17 +416,22 @@ fn drift_detected_human_error_stands_alone() {
         render_output(&init_output)
     );
 
-    seed_remote_scope_file(&machine, "mx-xps-cy", relative, "[user]\nname = \"Repo\"\n");
-    let sync_output = machine.sync();
+    seed_remote_scope_file(
+        &machine,
+        "mx-xps-cy",
+        ".gitconfig",
+        "[user]\nname = \"Repo\"\n",
+    );
+    let sync_output = machine.run("dotsync");
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    machine.write_home_file(relative, "[user]\nname = \"Drifted\"\n");
+    machine.write_file(".gitconfig", "[user]\nname = \"Drifted\"\n");
 
-    let sync_output = machine.sync();
+    let sync_output = machine.run("dotsync");
     assert_eq!(
         sync_output.status.code(),
         Some(1),
@@ -483,7 +449,7 @@ fn drift_detected_human_error_stands_alone() {
             "Drifted files are listed below with diffs.",
             "stopped before overwriting",
             "--force",
-            relative,
+            ".gitconfig",
         ],
         &sync_output,
     );
@@ -493,7 +459,6 @@ fn drift_detected_human_error_stands_alone() {
 fn drift_detected_json_contract_stays_compatible() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-    let relative = ".gitconfig";
 
     let init_output = machine.init();
     assert!(
@@ -502,17 +467,22 @@ fn drift_detected_json_contract_stays_compatible() {
         render_output(&init_output)
     );
 
-    seed_remote_scope_file(&machine, "mx-xps-cy", relative, "[user]\nname = \"Repo\"\n");
-    let sync_output = machine.sync();
+    seed_remote_scope_file(
+        &machine,
+        "mx-xps-cy",
+        ".gitconfig",
+        "[user]\nname = \"Repo\"\n",
+    );
+    let sync_output = machine.run("dotsync");
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    machine.write_home_file(relative, "[user]\nname = \"Drifted\"\n");
+    machine.write_file(".gitconfig", "[user]\nname = \"Drifted\"\n");
 
-    let sync_output = machine.sync_json();
+    let sync_output = machine.run("dotsync --output json");
     assert_eq!(
         sync_output.status.code(),
         Some(1),
@@ -530,10 +500,10 @@ fn drift_detected_json_contract_stays_compatible() {
         .as_array()
         .expect("drifts should be an array");
     assert_eq!(drifts.len(), 1);
-    assert_eq!(drifts[0]["path"], relative);
+    assert_eq!(drifts[0]["path"], ".gitconfig");
     assert_eq!(
         drifts[0]["system_path"],
-        machine.home_dir.join(relative).display().to_string()
+        machine.home_dir.join(".gitconfig").display().to_string()
     );
     assert!(drifts[0]["diff"].as_str().is_some());
 }
@@ -542,7 +512,6 @@ fn drift_detected_json_contract_stays_compatible() {
 fn missing_state_file_disables_deletion() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-    let relative = ".gitconfig";
 
     let init_output = machine.init();
     assert!(
@@ -551,26 +520,31 @@ fn missing_state_file_disables_deletion() {
         render_output(&init_output)
     );
 
-    seed_remote_scope_file(&machine, "mx-xps-cy", relative, "[user]\nname = \"Max\"\n");
-    let sync_output = machine.sync();
+    seed_remote_scope_file(
+        &machine,
+        "mx-xps-cy",
+        ".gitconfig",
+        "[user]\nname = \"Max\"\n",
+    );
+    let sync_output = machine.run("dotsync");
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
-    assert!(machine.home_file_exists(relative));
+    assert!(machine.file_exists(".gitconfig"));
 
     machine.delete_sync_state();
-    remove_remote_scope_file(&machine, "mx-xps-cy", relative);
+    remove_remote_scope_file(&machine, "mx-xps-cy", ".gitconfig");
 
-    let sync_output = machine.sync();
+    let sync_output = machine.run("dotsync");
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
     assert!(
-        machine.home_file_exists(relative),
+        machine.file_exists(".gitconfig"),
         "without sync state, dotsync should fail safe and leave the previously managed file in home"
     );
 }
@@ -589,7 +563,7 @@ fn invalid_state_file_returns_clear_error() {
 
     machine.write_sync_state_raw("not valid json\n");
 
-    let sync_output = machine.sync();
+    let sync_output = machine.run("dotsync");
     assert!(
         !sync_output.status.success(),
         "sync should fail when the sync state file is corrupt\n{}",
@@ -617,7 +591,7 @@ fn invalid_sync_state_human_error_stands_alone() {
 
     machine.write_sync_state_raw("not valid json\n");
 
-    let sync_output = machine.sync();
+    let sync_output = machine.run("dotsync");
     assert_eq!(
         sync_output.status.code(),
         Some(1),
@@ -644,7 +618,6 @@ fn invalid_sync_state_human_error_stands_alone() {
 fn sync_uses_state_machine_scope_even_if_checkout_changes() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-    let relative = ".config/machine-only.txt";
 
     let init_output = machine.init();
     assert!(
@@ -653,29 +626,37 @@ fn sync_uses_state_machine_scope_even_if_checkout_changes() {
         render_output(&init_output)
     );
 
-    seed_remote_scope_file(&machine, "mx-xps-cy", relative, "machine config\n");
-    let sync_output = machine.sync();
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
+    seed_remote_scope_file(
+        &machine,
+        "mx-xps-cy",
+        ".config/machine-only.txt",
+        "machine config\n",
     );
-    assert_eq!(machine.read_home_file(relative), "machine config\n");
-
-    machine.delete_home_file(relative);
-    machine.write_sync_state_raw(&format!(
-        "{{\n  \"machine_scope\": \"mx-xps-cy\",\n  \"last_synced_revision\": \"{}\"\n}}\n",
-        bookmark_revision(&machine, "mx-xps-cy")
-    ));
-
-    let sync_output = machine.sync();
+    let sync_output = machine.run("dotsync");
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
     assert_eq!(
-        machine.read_home_file(relative),
+        machine.read_file(".config/machine-only.txt"),
+        "machine config\n"
+    );
+
+    machine.delete_file(".config/machine-only.txt");
+    machine.write_sync_state_raw(&format!(
+        "{{\n  \"machine_scope\": \"mx-xps-cy\",\n  \"last_synced_revision\": \"{}\"\n}}\n",
+        bookmark_revision(&machine, "mx-xps-cy")
+    ));
+
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+    assert_eq!(
+        machine.read_file(".config/machine-only.txt"),
         "machine config\n",
         "sync state machine scope should govern sync regardless of any unrelated repo metadata"
     );
@@ -720,18 +701,15 @@ fn v03_plain_sync_ignores_unrelated_home_changes() {
         render_output(&init_output)
     );
 
-    machine.write_home_file("untracked-notes.txt", "leave me alone\n");
+    machine.write_file("untracked-notes.txt", "leave me alone\n");
 
-    let sync_output = machine.sync();
+    let sync_output = machine.run("dotsync");
     assert!(
         sync_output.status.success(),
         "plain dotsync should ignore unrelated home-directory changes in bare-repo mode\n{}",
         render_output(&sync_output)
     );
-    assert_eq!(
-        machine.read_home_file("untracked-notes.txt"),
-        "leave me alone\n"
-    );
+    assert_eq!(machine.read_file("untracked-notes.txt"), "leave me alone\n");
 }
 
 #[test]
@@ -746,9 +724,9 @@ fn v03_commit_returns_not_implemented() {
         render_output(&init_output)
     );
 
-    machine.write_home_file(".gitconfig", "[user]\nname = \"Max\"\n");
+    machine.write_file(".gitconfig", "[user]\nname = \"Max\"\n");
 
-    let commit_output = machine.commit("all", "not implemented yet");
+    let commit_output = machine.run("dotsync all -m 'not implemented yet'");
     assert_eq!(
         commit_output.status.code(),
         Some(1),
@@ -775,7 +753,7 @@ fn continue_without_pause_returns_clear_error() {
         render_output(&init_output)
     );
 
-    let continue_output = machine.continue_command();
+    let continue_output = machine.run("dotsync continue");
     assert_eq!(
         continue_output.status.code(),
         Some(1),
@@ -794,9 +772,6 @@ fn continue_without_pause_returns_clear_error() {
 fn commit_explicit_path_adds_file_to_scope_and_syncs() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-    let existing_relative = ".config/existing.txt";
-    let new_relative = ".gitconfig";
-    let new_contents = "[user]\nname = \"Max\"\n";
 
     let init_output = machine.init();
     assert!(
@@ -805,17 +780,17 @@ fn commit_explicit_path_adds_file_to_scope_and_syncs() {
         render_output(&init_output)
     );
 
-    seed_remote_scope_file(&machine, "mx-xps-cy", existing_relative, "existing\n");
-    let sync_output = machine.sync();
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".config/existing.txt", "existing\n");
+    let sync_output = machine.run("dotsync");
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    machine.write_home_file(new_relative, new_contents);
+    machine.write_file(".gitconfig", "[user]\nname = \"Max\"\n");
 
-    let commit_output = machine.commit_with_paths("all", "add gitconfig", &[new_relative]);
+    let commit_output = machine.run("dotsync all -m 'add gitconfig' -- .gitconfig");
     assert!(
         commit_output.status.success(),
         "{}",
@@ -823,23 +798,21 @@ fn commit_explicit_path_adds_file_to_scope_and_syncs() {
     );
 
     assert_eq!(
-        read_bookmark_file_contents(&machine, "all", new_relative),
-        new_contents
+        read_bookmark_file_contents(&machine, "all", ".gitconfig"),
+        "[user]\nname = \"Max\"\n"
     );
     assert_eq!(
-        read_bookmark_file_contents(&machine, "mx-xps-cy", new_relative),
-        new_contents
+        read_bookmark_file_contents(&machine, "mx-xps-cy", ".gitconfig"),
+        "[user]\nname = \"Max\"\n"
     );
-    assert!(machine.home_file_exists(new_relative));
-    assert_eq!(machine.read_home_file(new_relative), new_contents);
+    assert!(machine.file_exists(".gitconfig"));
+    assert_eq!(machine.read_file(".gitconfig"), "[user]\nname = \"Max\"\n");
 }
 
 #[test]
 fn commit_modifies_existing_file_on_scope() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-    let relative = ".bashrc";
-    let updated_contents = "export PATH=\"$HOME/bin:$PATH\"\n";
 
     let init_output = machine.init();
     assert!(
@@ -848,21 +821,21 @@ fn commit_modifies_existing_file_on_scope() {
         render_output(&init_output)
     );
 
-    seed_remote_scope_file(&machine, "linux", relative, "export PATH=\"$PATH\"\n");
-    let sync_output = machine.sync();
+    seed_remote_scope_file(&machine, "linux", ".bashrc", "export PATH=\"$PATH\"\n");
+    let sync_output = machine.run("dotsync");
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    machine.write_home_file(relative, updated_contents);
+    machine.write_file(".bashrc", "export PATH=\"$HOME/bin:$PATH\"\n");
     machine.write_sync_state_raw(&format!(
         "{{\"machine_scope\":\"all\",\"last_synced_revision\":\"{}\"}}",
         bookmark_revision(&machine, "all")
     ));
 
-    let commit_output = machine.commit_with_paths("linux", "update bashrc", &[relative]);
+    let commit_output = machine.run("dotsync linux -m 'update bashrc' -- .bashrc");
     assert!(
         commit_output.status.success(),
         "{}",
@@ -870,21 +843,23 @@ fn commit_modifies_existing_file_on_scope() {
     );
 
     assert_eq!(
-        read_bookmark_file_contents(&machine, "linux", relative),
-        updated_contents
+        read_bookmark_file_contents(&machine, "linux", ".bashrc"),
+        "export PATH=\"$HOME/bin:$PATH\"\n"
     );
     assert_eq!(
-        read_bookmark_file_contents(&machine, "mx-xps-cy", relative),
-        updated_contents
+        read_bookmark_file_contents(&machine, "mx-xps-cy", ".bashrc"),
+        "export PATH=\"$HOME/bin:$PATH\"\n"
     );
-    assert_eq!(machine.read_home_file(relative), updated_contents);
+    assert_eq!(
+        machine.read_file(".bashrc"),
+        "export PATH=\"$HOME/bin:$PATH\"\n"
+    );
 }
 
 #[test]
 fn commit_deletes_file_from_scope() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-    let relative = ".config/remove-me.txt";
 
     let init_output = machine.init();
     assert!(
@@ -893,37 +868,39 @@ fn commit_deletes_file_from_scope() {
         render_output(&init_output)
     );
 
-    seed_remote_scope_file(&machine, "all", relative, "delete me\n");
+    seed_remote_scope_file(&machine, "all", ".config/remove-me.txt", "delete me\n");
     merge_remote_scope_into(&machine, "all", "linux");
     merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
-    let sync_output = machine.sync();
+    let sync_output = machine.run("dotsync");
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
-    assert!(machine.home_file_exists(relative));
+    assert!(machine.file_exists(".config/remove-me.txt"));
 
-    machine.delete_home_file(relative);
+    machine.delete_file(".config/remove-me.txt");
 
-    let commit_output = machine.commit_with_paths("all", "remove file", &[relative]);
+    let commit_output = machine.run("dotsync all -m 'remove file' -- .config/remove-me.txt");
     assert!(
         commit_output.status.success(),
         "{}",
         render_output(&commit_output)
     );
 
-    assert!(!bookmark_has_file(&machine, "all", relative));
-    assert!(!bookmark_has_file(&machine, "mx-xps-cy", relative));
-    assert!(!machine.home_file_exists(relative));
+    assert!(!bookmark_has_file(&machine, "all", ".config/remove-me.txt"));
+    assert!(!bookmark_has_file(
+        &machine,
+        "mx-xps-cy",
+        ".config/remove-me.txt"
+    ));
+    assert!(!machine.file_exists(".config/remove-me.txt"));
 }
 
 #[test]
 fn commit_cascades_through_all_descendants() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-    let relative = ".config/shared.txt";
-    let new_contents = "shared everywhere\n";
 
     let init_output = machine.init();
     assert!(
@@ -941,16 +918,16 @@ fn commit_cascades_through_all_descendants() {
         ".config/hyprland-only.txt",
         "hyprland\n",
     );
-    let sync_output = machine.sync();
+    let sync_output = machine.run("dotsync");
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    machine.write_home_file(relative, new_contents);
+    machine.write_file(".config/shared.txt", "shared everywhere\n");
 
-    let commit_output = machine.commit_with_paths("all", "add shared file", &[relative]);
+    let commit_output = machine.run("dotsync all -m 'add shared file' -- .config/shared.txt");
     assert!(
         commit_output.status.success(),
         "{}",
@@ -959,9 +936,9 @@ fn commit_cascades_through_all_descendants() {
 
     for scope in ["all", "linux", "hyprland", "mx-xps-cy"] {
         assert_eq!(
-            read_bookmark_file_contents(&machine, scope, relative),
-            new_contents,
-            "expected `{relative}` to cascade to `{scope}`"
+            read_bookmark_file_contents(&machine, scope, ".config/shared.txt"),
+            "shared everywhere\n",
+            "expected `.config/shared.txt` to cascade to `{scope}`"
         );
     }
 }
@@ -971,44 +948,57 @@ fn multiple_machines_can_contribute_to_all_without_losing_changes() {
     let harness = TestHarness::new();
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
-    let a_relative = ".config/shared-a.conf";
-    let b_relative = ".config/shared-b.conf";
 
     let init_a = machine_a.init();
     assert!(init_a.status.success(), "{}", render_output(&init_a));
     let init_b = machine_b.init();
     assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a_after_join = machine_a.sync_force();
+    let sync_a_after_join = machine_a.run("dotsync --force");
     assert!(
         sync_a_after_join.status.success(),
         "{}",
         render_output(&sync_a_after_join)
     );
 
-    machine_a.write_home_file(a_relative, "from machine a\n");
-    let commit_a = machine_a.commit_with_paths("all", "add shared a", &[a_relative]);
+    machine_a.write_file(".config/shared-a.conf", "from machine a\n");
+    let commit_a = machine_a.run("dotsync all -m 'add shared a' -- .config/shared-a.conf");
     assert!(commit_a.status.success(), "{}", render_output(&commit_a));
 
-    let sync_b = machine_b.sync();
+    let sync_b = machine_b.run("dotsync");
     assert!(sync_b.status.success(), "{}", render_output(&sync_b));
-    assert_eq!(machine_b.read_home_file(a_relative), "from machine a\n");
+    assert_eq!(
+        machine_b.read_file(".config/shared-a.conf"),
+        "from machine a\n"
+    );
 
-    machine_b.write_home_file(b_relative, "from machine b\n");
-    let commit_b = machine_b.commit_with_paths("all", "add shared b", &[b_relative]);
+    machine_b.write_file(".config/shared-b.conf", "from machine b\n");
+    let commit_b = machine_b.run("dotsync all -m 'add shared b' -- .config/shared-b.conf");
     assert!(commit_b.status.success(), "{}", render_output(&commit_b));
 
-    let sync_a = machine_a.sync();
+    let sync_a = machine_a.run("dotsync");
     assert!(sync_a.status.success(), "{}", render_output(&sync_a));
-    assert_eq!(machine_a.read_home_file(a_relative), "from machine a\n");
-    assert_eq!(machine_a.read_home_file(b_relative), "from machine b\n");
-    assert_eq!(machine_b.read_home_file(a_relative), "from machine a\n");
-    assert_eq!(machine_b.read_home_file(b_relative), "from machine b\n");
     assert_eq!(
-        read_bookmark_file_contents(&machine_a, "all", a_relative),
+        machine_a.read_file(".config/shared-a.conf"),
         "from machine a\n"
     );
     assert_eq!(
-        read_bookmark_file_contents(&machine_a, "all", b_relative),
+        machine_a.read_file(".config/shared-b.conf"),
+        "from machine b\n"
+    );
+    assert_eq!(
+        machine_b.read_file(".config/shared-a.conf"),
+        "from machine a\n"
+    );
+    assert_eq!(
+        machine_b.read_file(".config/shared-b.conf"),
+        "from machine b\n"
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine_a, "all", ".config/shared-a.conf"),
+        "from machine a\n"
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine_a, "all", ".config/shared-b.conf"),
         "from machine b\n"
     );
 }
@@ -1018,17 +1008,12 @@ fn concurrent_same_scope_file_edits_require_resolution() {
     let harness = TestHarness::new();
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
-    let relative = ".config/shared.conf";
-    let base = "setting = \"base\"\n";
-    let from_a = "setting = \"all-a\"\n";
-    let from_b = "setting = \"all-b\"\n";
-    let resolved = "setting = \"all-a+all-b\"\n";
 
     let init_a = machine_a.init();
     assert!(init_a.status.success(), "{}", render_output(&init_a));
     let init_b = machine_b.init();
     assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a_after_join = machine_a.sync_force();
+    let sync_a_after_join = machine_a.run("dotsync --force");
     assert!(
         sync_a_after_join.status.success(),
         "{}",
@@ -1036,8 +1021,8 @@ fn concurrent_same_scope_file_edits_require_resolution() {
     );
 
     // Establish the shared base version first.
-    machine_a.write_home_file(relative, base);
-    let commit_base = machine_a.commit_with_paths("all", "add shared base", &[relative]);
+    machine_a.write_file(".config/shared.conf", "setting = \"base\"\n");
+    let commit_base = machine_a.run("dotsync all -m 'add shared base' -- .config/shared.conf");
     assert!(
         commit_base.status.success(),
         "{}",
@@ -1045,41 +1030,50 @@ fn concurrent_same_scope_file_edits_require_resolution() {
     );
 
     // Both machines start the conflict scenario from the same synced base.
-    let sync_a_to_base = machine_a.sync();
+    let sync_a_to_base = machine_a.run("dotsync");
     assert!(
         sync_a_to_base.status.success(),
         "{}",
         render_output(&sync_a_to_base)
     );
-    assert_eq!(machine_a.read_home_file(relative), base);
+    assert_eq!(
+        machine_a.read_file(".config/shared.conf"),
+        "setting = \"base\"\n"
+    );
 
-    let sync_b_to_base = machine_b.sync();
+    let sync_b_to_base = machine_b.run("dotsync");
     assert!(
         sync_b_to_base.status.success(),
         "{}",
         render_output(&sync_b_to_base)
     );
-    assert_eq!(machine_b.read_home_file(relative), base);
+    assert_eq!(
+        machine_b.read_file(".config/shared.conf"),
+        "setting = \"base\"\n"
+    );
 
     // Divergent local edits start here. B must not sync again before committing.
-    machine_a.write_home_file(relative, from_a);
-    machine_b.write_home_file(relative, from_b);
-    assert_eq!(machine_a.read_home_file(relative), from_a);
+    machine_a.write_file(".config/shared.conf", "setting = \"all-a\"\n");
+    machine_b.write_file(".config/shared.conf", "setting = \"all-b\"\n");
     assert_eq!(
-        machine_b.read_home_file(relative),
-        from_b,
+        machine_a.read_file(".config/shared.conf"),
+        "setting = \"all-a\"\n"
+    );
+    assert_eq!(
+        machine_b.read_file(".config/shared.conf"),
+        "setting = \"all-b\"\n",
         "machine B must make its own local edit before machine A publishes"
     );
 
-    let commit_a = machine_a.commit_with_paths("all", "update shared from a", &[relative]);
+    let commit_a = machine_a.run("dotsync all -m 'update shared from a' -- .config/shared.conf");
     assert!(commit_a.status.success(), "{}", render_output(&commit_a));
     assert_eq!(
-        machine_b.read_home_file(relative),
-        from_b,
+        machine_b.read_file(".config/shared.conf"),
+        "setting = \"all-b\"\n",
         "machine B must not sync to machine A's published edit before committing its own edit"
     );
 
-    let conflict = machine_b.commit_with_paths("all", "update shared from b", &[relative]);
+    let conflict = machine_b.run("dotsync all -m 'update shared from b' -- .config/shared.conf");
     assert_eq!(
         conflict.status.code(),
         Some(3),
@@ -1089,29 +1083,39 @@ fn concurrent_same_scope_file_edits_require_resolution() {
     let stderr = String::from_utf8_lossy(&conflict.stderr);
     assert!(stderr.contains("conflict"), "{}", render_output(&conflict));
     assert!(stderr.contains("all"), "{}", render_output(&conflict));
-    assert!(stderr.contains(relative), "{}", render_output(&conflict));
+    assert!(
+        stderr.contains(".config/shared.conf"),
+        "{}",
+        render_output(&conflict)
+    );
     assert_eq!(
-        read_bookmark_file_contents(&machine_b, "all", relative),
-        from_a,
+        read_bookmark_file_contents(&machine_b, "all", ".config/shared.conf"),
+        "setting = \"all-a\"\n",
         "failed concurrent commit must leave the shared scope at the already-published version"
     );
     assert_eq!(
-        machine_b.read_home_file(relative),
-        from_b,
+        machine_b.read_file(".config/shared.conf"),
+        "setting = \"all-b\"\n",
         "failed concurrent commit must not overwrite B's unresolved home edit"
     );
 
-    machine_b.write_home_file(relative, resolved);
-    let continued = machine_b.continue_command();
+    machine_b.write_file(".config/shared.conf", "setting = \"all-a+all-b\"\n");
+    let continued = machine_b.run("dotsync continue");
     assert!(continued.status.success(), "{}", render_output(&continued));
-    assert_eq!(machine_b.read_home_file(relative), resolved);
-
-    let sync_a = machine_a.sync();
-    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
-    assert_eq!(machine_a.read_home_file(relative), resolved);
     assert_eq!(
-        read_bookmark_file_contents(&machine_a, "all", relative),
-        resolved
+        machine_b.read_file(".config/shared.conf"),
+        "setting = \"all-a+all-b\"\n"
+    );
+
+    let sync_a = machine_a.run("dotsync");
+    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    assert_eq!(
+        machine_a.read_file(".config/shared.conf"),
+        "setting = \"all-a+all-b\"\n"
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine_a, "all", ".config/shared.conf"),
+        "setting = \"all-a+all-b\"\n"
     );
 }
 
@@ -1120,45 +1124,44 @@ fn shared_scope_conflict_pauses_and_continue_applies_resolution_to_machine_homes
     let harness = TestHarness::new();
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
-    let relative = ".config/app.conf";
-    let base = "setting = \"base\"\n";
-    let linux_override = "setting = \"linux\"\n";
-    let all_update = "setting = \"all\"\n";
-    let resolved = "setting = \"all+linux\"\n";
 
     let init_a = machine_a.init();
     assert!(init_a.status.success(), "{}", render_output(&init_a));
     let init_b = machine_b.init();
     assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a_after_join = machine_a.sync_force();
+    let sync_a_after_join = machine_a.run("dotsync --force");
     assert!(
         sync_a_after_join.status.success(),
         "{}",
         render_output(&sync_a_after_join)
     );
 
-    machine_a.write_home_file(relative, base);
-    let commit_base = machine_a.commit_with_paths("all", "add base config", &[relative]);
+    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
+    let commit_base = machine_a.run("dotsync all -m 'add base config' -- .config/app.conf");
     assert!(
         commit_base.status.success(),
         "{}",
         render_output(&commit_base)
     );
 
-    machine_a.write_home_file(relative, linux_override);
-    let commit_linux = machine_a.commit_with_paths("linux", "customize linux config", &[relative]);
+    machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
+    let commit_linux =
+        machine_a.run("dotsync linux -m 'customize linux config' -- .config/app.conf");
     assert!(
         commit_linux.status.success(),
         "{}",
         render_output(&commit_linux)
     );
 
-    let sync_b = machine_b.sync();
+    let sync_b = machine_b.run("dotsync");
     assert!(sync_b.status.success(), "{}", render_output(&sync_b));
-    assert_eq!(machine_b.read_home_file(relative), linux_override);
+    assert_eq!(
+        machine_b.read_file(".config/app.conf"),
+        "setting = \"linux\"\n"
+    );
 
-    machine_b.write_home_file(relative, all_update);
-    let conflict = machine_b.commit_with_paths("all", "update shared config", &[relative]);
+    machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
+    let conflict = machine_b.run("dotsync all -m 'update shared config' -- .config/app.conf");
     assert_eq!(
         conflict.status.code(),
         Some(3),
@@ -1172,31 +1175,41 @@ fn shared_scope_conflict_pauses_and_continue_applies_resolution_to_machine_homes
         render_output(&conflict)
     );
     assert!(stderr.contains("linux"), "{}", render_output(&conflict));
-    assert!(stderr.contains(relative), "{}", render_output(&conflict));
+    assert!(
+        stderr.contains(".config/app.conf"),
+        "{}",
+        render_output(&conflict)
+    );
 
-    machine_b.write_home_file(relative, resolved);
-    let continued = machine_b.continue_command();
+    machine_b.write_file(".config/app.conf", "setting = \"all+linux\"\n");
+    let continued = machine_b.run("dotsync continue");
     assert!(continued.status.success(), "{}", render_output(&continued));
-    assert_eq!(machine_b.read_home_file(relative), resolved);
+    assert_eq!(
+        machine_b.read_file(".config/app.conf"),
+        "setting = \"all+linux\"\n"
+    );
 
-    let sync_a = machine_a.sync();
+    let sync_a = machine_a.run("dotsync");
     assert!(sync_a.status.success(), "{}", render_output(&sync_a));
-    assert_eq!(machine_a.read_home_file(relative), resolved);
     assert_eq!(
-        read_bookmark_file_contents(&machine_a, "all", relative),
-        all_update
+        machine_a.read_file(".config/app.conf"),
+        "setting = \"all+linux\"\n"
     );
     assert_eq!(
-        read_bookmark_file_contents(&machine_a, "linux", relative),
-        resolved
+        read_bookmark_file_contents(&machine_a, "all", ".config/app.conf"),
+        "setting = \"all\"\n"
     );
     assert_eq!(
-        read_bookmark_file_contents(&machine_a, "goof-a", relative),
-        resolved
+        read_bookmark_file_contents(&machine_a, "linux", ".config/app.conf"),
+        "setting = \"all+linux\"\n"
     );
     assert_eq!(
-        read_bookmark_file_contents(&machine_a, "goof-b", relative),
-        resolved
+        read_bookmark_file_contents(&machine_a, "goof-a", ".config/app.conf"),
+        "setting = \"all+linux\"\n"
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine_a, "goof-b", ".config/app.conf"),
+        "setting = \"all+linux\"\n"
     );
 }
 
@@ -1205,63 +1218,52 @@ fn continue_preserves_non_conflicting_parent_changes_from_paused_merge() {
     let harness = TestHarness::new();
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
-    let conflicting_relative = ".config/app.conf";
-    let shared_relative = ".config/shared.conf";
-    let base_conflict = "setting = \"base\"\n";
-    let base_shared = "shared = \"base\"\n";
-    let linux_override = "setting = \"linux\"\n";
-    let all_update = "setting = \"all\"\n";
-    let shared_update = "shared = \"updated\"\n";
-    let resolved = "setting = \"all+linux\"\n";
 
     let init_a = machine_a.init();
     assert!(init_a.status.success(), "{}", render_output(&init_a));
     let init_b = machine_b.init();
     assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a_after_join = machine_a.sync_force();
+    let sync_a_after_join = machine_a.run("dotsync --force");
     assert!(
         sync_a_after_join.status.success(),
         "{}",
         render_output(&sync_a_after_join)
     );
 
-    machine_a.write_home_file(conflicting_relative, base_conflict);
-    machine_a.write_home_file(shared_relative, base_shared);
-    let commit_base = machine_a.commit_with_paths(
-        "all",
-        "add base config",
-        &[conflicting_relative, shared_relative],
-    );
+    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
+    machine_a.write_file(".config/shared.conf", "shared = \"base\"\n");
+    let commit_base =
+        machine_a.run("dotsync all -m 'add base config' -- .config/app.conf .config/shared.conf");
     assert!(
         commit_base.status.success(),
         "{}",
         render_output(&commit_base)
     );
 
-    machine_a.write_home_file(conflicting_relative, linux_override);
+    machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
     let commit_linux =
-        machine_a.commit_with_paths("linux", "customize linux config", &[conflicting_relative]);
+        machine_a.run("dotsync linux -m 'customize linux config' -- .config/app.conf");
     assert!(
         commit_linux.status.success(),
         "{}",
         render_output(&commit_linux)
     );
 
-    let sync_b = machine_b.sync();
+    let sync_b = machine_b.run("dotsync");
     assert!(sync_b.status.success(), "{}", render_output(&sync_b));
     assert_eq!(
-        machine_b.read_home_file(conflicting_relative),
-        linux_override
+        machine_b.read_file(".config/app.conf"),
+        "setting = \"linux\"\n"
     );
-    assert_eq!(machine_b.read_home_file(shared_relative), base_shared);
+    assert_eq!(
+        machine_b.read_file(".config/shared.conf"),
+        "shared = \"base\"\n"
+    );
 
-    machine_b.write_home_file(conflicting_relative, all_update);
-    machine_b.write_home_file(shared_relative, shared_update);
-    let conflict = machine_b.commit_with_paths(
-        "all",
-        "update shared config",
-        &[conflicting_relative, shared_relative],
-    );
+    machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
+    machine_b.write_file(".config/shared.conf", "shared = \"updated\"\n");
+    let conflict = machine_b
+        .run("dotsync all -m 'update shared config' -- .config/app.conf .config/shared.conf");
     assert_eq!(
         conflict.status.code(),
         Some(3),
@@ -1269,23 +1271,35 @@ fn continue_preserves_non_conflicting_parent_changes_from_paused_merge() {
         render_output(&conflict)
     );
 
-    machine_b.write_home_file(conflicting_relative, resolved);
-    let continued = machine_b.continue_command();
+    machine_b.write_file(".config/app.conf", "setting = \"all+linux\"\n");
+    let continued = machine_b.run("dotsync continue");
     assert!(continued.status.success(), "{}", render_output(&continued));
-    assert_eq!(machine_b.read_home_file(conflicting_relative), resolved);
-    assert_eq!(machine_b.read_home_file(shared_relative), shared_update);
-
-    let sync_a = machine_a.sync();
-    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
-    assert_eq!(machine_a.read_home_file(conflicting_relative), resolved);
-    assert_eq!(machine_a.read_home_file(shared_relative), shared_update);
     assert_eq!(
-        read_bookmark_file_contents(&machine_a, "linux", conflicting_relative),
-        resolved
+        machine_b.read_file(".config/app.conf"),
+        "setting = \"all+linux\"\n"
     );
     assert_eq!(
-        read_bookmark_file_contents(&machine_a, "linux", shared_relative),
-        shared_update
+        machine_b.read_file(".config/shared.conf"),
+        "shared = \"updated\"\n"
+    );
+
+    let sync_a = machine_a.run("dotsync");
+    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    assert_eq!(
+        machine_a.read_file(".config/app.conf"),
+        "setting = \"all+linux\"\n"
+    );
+    assert_eq!(
+        machine_a.read_file(".config/shared.conf"),
+        "shared = \"updated\"\n"
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine_a, "linux", ".config/app.conf"),
+        "setting = \"all+linux\"\n"
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine_a, "linux", ".config/shared.conf"),
+        "shared = \"updated\"\n"
     );
 }
 
@@ -1294,44 +1308,40 @@ fn commit_while_cascade_paused_is_blocked_without_mutating_scope() {
     let harness = TestHarness::new();
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
-    let conflicting_relative = ".config/app.conf";
-    let second_commit_relative = ".config/other.conf";
 
     let init_a = machine_a.init();
     assert!(init_a.status.success(), "{}", render_output(&init_a));
     let init_b = machine_b.init();
     assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a_after_join = machine_a.sync_force();
+    let sync_a_after_join = machine_a.run("dotsync --force");
     assert!(
         sync_a_after_join.status.success(),
         "{}",
         render_output(&sync_a_after_join)
     );
 
-    machine_a.write_home_file(conflicting_relative, "setting = \"base\"\n");
-    let commit_base =
-        machine_a.commit_with_paths("all", "add base config", &[conflicting_relative]);
+    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
+    let commit_base = machine_a.run("dotsync all -m 'add base config' -- .config/app.conf");
     assert!(
         commit_base.status.success(),
         "{}",
         render_output(&commit_base)
     );
 
-    machine_a.write_home_file(conflicting_relative, "setting = \"linux\"\n");
+    machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
     let commit_linux =
-        machine_a.commit_with_paths("linux", "customize linux config", &[conflicting_relative]);
+        machine_a.run("dotsync linux -m 'customize linux config' -- .config/app.conf");
     assert!(
         commit_linux.status.success(),
         "{}",
         render_output(&commit_linux)
     );
 
-    let sync_b = machine_b.sync();
+    let sync_b = machine_b.run("dotsync");
     assert!(sync_b.status.success(), "{}", render_output(&sync_b));
 
-    machine_b.write_home_file(conflicting_relative, "setting = \"all\"\n");
-    let conflict =
-        machine_b.commit_with_paths("all", "update shared config", &[conflicting_relative]);
+    machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
+    let conflict = machine_b.run("dotsync all -m 'update shared config' -- .config/app.conf");
     assert_eq!(
         conflict.status.code(),
         Some(3),
@@ -1340,13 +1350,10 @@ fn commit_while_cascade_paused_is_blocked_without_mutating_scope() {
     );
 
     let machine_scope_revision_before = bookmark_revision(&machine_b, "goof-b");
-    machine_b.write_home_file(second_commit_relative, "other = true\n");
+    machine_b.write_file(".config/other.conf", "other = true\n");
 
-    let blocked = machine_b.commit_with_paths(
-        "goof-b",
-        "try commit while paused",
-        &[second_commit_relative],
-    );
+    let blocked =
+        machine_b.run("dotsync goof-b -m 'try commit while paused' -- .config/other.conf");
 
     assert_eq!(
         blocked.status.code(),
@@ -1371,8 +1378,6 @@ fn commit_while_cascade_paused_is_blocked_without_mutating_scope() {
 fn commit_to_machine_scope_does_not_cascade() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-    let relative = ".config/machine-local.txt";
-    let contents = "machine only\n";
 
     let init_output = machine.init();
     assert!(
@@ -1381,9 +1386,10 @@ fn commit_to_machine_scope_does_not_cascade() {
         render_output(&init_output)
     );
 
-    machine.write_home_file(relative, contents);
+    machine.write_file(".config/machine-local.txt", "machine only\n");
 
-    let commit_output = machine.commit_with_paths("mx-xps-cy", "add machine file", &[relative]);
+    let commit_output =
+        machine.run("dotsync mx-xps-cy -m 'add machine file' -- .config/machine-local.txt");
     assert!(
         commit_output.status.success(),
         "{}",
@@ -1391,19 +1397,25 @@ fn commit_to_machine_scope_does_not_cascade() {
     );
 
     assert_eq!(
-        read_bookmark_file_contents(&machine, "mx-xps-cy", relative),
-        contents
+        read_bookmark_file_contents(&machine, "mx-xps-cy", ".config/machine-local.txt"),
+        "machine only\n"
     );
-    assert!(!bookmark_has_file(&machine, "linux", relative));
-    assert!(!bookmark_has_file(&machine, "all", relative));
+    assert!(!bookmark_has_file(
+        &machine,
+        "linux",
+        ".config/machine-local.txt"
+    ));
+    assert!(!bookmark_has_file(
+        &machine,
+        "all",
+        ".config/machine-local.txt"
+    ));
 }
 
 #[test]
 fn commit_without_paths_imports_all_diffs() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-    let relative = ".config/app.conf";
-    let updated_contents = "setting = \"updated\"\n";
 
     let init_output = machine.init();
     assert!(
@@ -1412,17 +1424,22 @@ fn commit_without_paths_imports_all_diffs() {
         render_output(&init_output)
     );
 
-    seed_remote_scope_file(&machine, "mx-xps-cy", relative, "setting = \"original\"\n");
-    let sync_output = machine.sync();
+    seed_remote_scope_file(
+        &machine,
+        "mx-xps-cy",
+        ".config/app.conf",
+        "setting = \"original\"\n",
+    );
+    let sync_output = machine.run("dotsync");
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    machine.write_home_file(relative, updated_contents);
+    machine.write_file(".config/app.conf", "setting = \"updated\"\n");
 
-    let commit_output = machine.commit("mx-xps-cy", "update");
+    let commit_output = machine.run("dotsync mx-xps-cy -m update");
     assert!(
         commit_output.status.success(),
         "{}",
@@ -1430,8 +1447,8 @@ fn commit_without_paths_imports_all_diffs() {
     );
 
     assert_eq!(
-        read_bookmark_file_contents(&machine, "mx-xps-cy", relative),
-        updated_contents
+        read_bookmark_file_contents(&machine, "mx-xps-cy", ".config/app.conf"),
+        "setting = \"updated\"\n"
     );
 }
 
@@ -1439,7 +1456,6 @@ fn commit_without_paths_imports_all_diffs() {
 fn commit_noop_when_no_changes() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-    let relative = ".config/unchanged.txt";
 
     let init_output = machine.init();
     assert!(
@@ -1448,8 +1464,8 @@ fn commit_noop_when_no_changes() {
         render_output(&init_output)
     );
 
-    seed_remote_scope_file(&machine, "mx-xps-cy", relative, "same\n");
-    let sync_output = machine.sync();
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".config/unchanged.txt", "same\n");
+    let sync_output = machine.run("dotsync");
     assert!(
         sync_output.status.success(),
         "{}",
@@ -1458,7 +1474,7 @@ fn commit_noop_when_no_changes() {
 
     let revision_before = bookmark_revision(&machine, "mx-xps-cy");
 
-    let commit_output = machine.commit("mx-xps-cy", "noop");
+    let commit_output = machine.run("dotsync mx-xps-cy -m noop");
     assert_eq!(
         commit_output.status.code(),
         Some(0),
@@ -1482,7 +1498,7 @@ fn commit_invalid_scope_errors() {
         render_output(&init_output)
     );
 
-    let commit_output = machine.commit_with_paths("nonexistent", "test", &[".gitconfig"]);
+    let commit_output = machine.run("dotsync nonexistent -m test -- .gitconfig");
     assert_eq!(
         commit_output.status.code(),
         Some(1),
@@ -1502,7 +1518,6 @@ fn commit_invalid_scope_errors() {
 fn status_shows_modified_file() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-    let relative = ".bashrc";
 
     let init_output = machine.init();
     assert!(
@@ -1511,17 +1526,17 @@ fn status_shows_modified_file() {
         render_output(&init_output)
     );
 
-    seed_remote_scope_file(&machine, "mx-xps-cy", relative, "export DOTSYNC=repo\n");
-    let sync_output = machine.sync();
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
+    let sync_output = machine.run("dotsync");
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    machine.write_home_file(relative, "export DOTSYNC=modified\n");
+    machine.write_file(".bashrc", "export DOTSYNC=modified\n");
 
-    let status_output = machine.run_dotsync(&["status"]);
+    let status_output = machine.run("dotsync status");
     assert_eq!(
         status_output.status.code(),
         Some(0),
@@ -1531,7 +1546,7 @@ fn status_shows_modified_file() {
 
     let stderr = String::from_utf8_lossy(&status_output.stderr);
     assert!(
-        stderr.contains(relative),
+        stderr.contains(".bashrc"),
         "{}",
         render_output(&status_output)
     );
@@ -1546,7 +1561,6 @@ fn status_shows_modified_file() {
 fn status_shows_deleted_file() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-    let relative = ".bashrc";
 
     let init_output = machine.init();
     assert!(
@@ -1555,17 +1569,17 @@ fn status_shows_deleted_file() {
         render_output(&init_output)
     );
 
-    seed_remote_scope_file(&machine, "mx-xps-cy", relative, "export DOTSYNC=repo\n");
-    let sync_output = machine.sync();
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
+    let sync_output = machine.run("dotsync");
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    machine.delete_home_file(relative);
+    machine.delete_file(".bashrc");
 
-    let status_output = machine.run_dotsync(&["status"]);
+    let status_output = machine.run("dotsync status");
     assert_eq!(
         status_output.status.code(),
         Some(0),
@@ -1575,7 +1589,7 @@ fn status_shows_deleted_file() {
 
     let stderr = String::from_utf8_lossy(&status_output.stderr);
     assert!(
-        stderr.contains(relative),
+        stderr.contains(".bashrc"),
         "{}",
         render_output(&status_output)
     );
@@ -1590,7 +1604,6 @@ fn status_shows_deleted_file() {
 fn status_clean_shows_no_changes() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-    let relative = ".bashrc";
 
     let init_output = machine.init();
     assert!(
@@ -1599,15 +1612,15 @@ fn status_clean_shows_no_changes() {
         render_output(&init_output)
     );
 
-    seed_remote_scope_file(&machine, "mx-xps-cy", relative, "export DOTSYNC=repo\n");
-    let sync_output = machine.sync();
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
+    let sync_output = machine.run("dotsync");
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    let status_output = machine.run_dotsync(&["status"]);
+    let status_output = machine.run("dotsync status");
     assert_eq!(
         status_output.status.code(),
         Some(0),
@@ -1630,7 +1643,6 @@ fn status_clean_shows_no_changes() {
 fn status_json_contract() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-    let relative = ".bashrc";
 
     let init_output = machine.init();
     assert!(
@@ -1639,17 +1651,17 @@ fn status_json_contract() {
         render_output(&init_output)
     );
 
-    seed_remote_scope_file(&machine, "mx-xps-cy", relative, "export DOTSYNC=repo\n");
-    let sync_output = machine.sync();
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
+    let sync_output = machine.run("dotsync");
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    machine.write_home_file(relative, "export DOTSYNC=modified\n");
+    machine.write_file(".bashrc", "export DOTSYNC=modified\n");
 
-    let status_output = machine.run_dotsync_json(&["status"]);
+    let status_output = machine.run("dotsync --output json status");
     assert_eq!(
         status_output.status.code(),
         Some(0),
@@ -1681,7 +1693,7 @@ fn status_json_contract() {
         files.iter().any(|file| {
             file["path"]
                 .as_str()
-                .is_some_and(|path| path.contains(relative))
+                .is_some_and(|path| path.contains(".bashrc"))
                 && file["status"] == "modified"
         }),
         "expected .bashrc modified entry\n{}",
@@ -1693,7 +1705,6 @@ fn status_json_contract() {
 fn status_ignores_unmanaged_files() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-    let relative = ".unmanaged-status-test";
 
     let init_output = machine.init();
     assert!(
@@ -1702,9 +1713,9 @@ fn status_ignores_unmanaged_files() {
         render_output(&init_output)
     );
 
-    machine.write_home_file(relative, "this file is unmanaged\n");
+    machine.write_file(".unmanaged-status-test", "this file is unmanaged\n");
 
-    let status_output = machine.run_dotsync(&["status"]);
+    let status_output = machine.run("dotsync status");
     assert_eq!(
         status_output.status.code(),
         Some(0),
@@ -1714,7 +1725,7 @@ fn status_ignores_unmanaged_files() {
 
     let stderr = String::from_utf8_lossy(&status_output.stderr);
     assert!(
-        !stderr.contains(relative),
+        !stderr.contains(".unmanaged-status-test"),
         "{}",
         render_output(&status_output)
     );
@@ -1748,6 +1759,34 @@ fn render_output(output: &Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
+}
+
+fn dotsync_args(command: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+
+    for character in command.chars() {
+        match (quote, character) {
+            (Some(active), character) if character == active => quote = None,
+            (Some(_), character) => current.push(character),
+            (None, '\'' | '"') => quote = Some(character),
+            (None, character) if character.is_whitespace() => {
+                if !current.is_empty() {
+                    parts.push(std::mem::take(&mut current));
+                }
+            }
+            (None, character) => current.push(character),
+        }
+    }
+
+    assert!(quote.is_none(), "unterminated quote in command: {command}");
+    if !current.is_empty() {
+        parts.push(current);
+    }
+
+    assert_eq!(parts.first().map(String::as_str), Some("dotsync"));
+    parts.into_iter().skip(1).collect()
 }
 
 #[test]
@@ -1791,11 +1830,6 @@ fn retired_pending_selected_add_modify_and_delete_are_applied_without_touching_u
 {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-    let existing_relative = ".config/fish/config.fish";
-    let removed_relative = ".config/fish/removed.fish";
-    let new_relative = ".config/fish/completions/git.fish";
-    let existing_contents = "set -g fish_greeting off\n";
-    let new_contents = "complete -c git\n";
 
     let init_output = machine.init();
     assert!(
@@ -1807,24 +1841,24 @@ fn retired_pending_selected_add_modify_and_delete_are_applied_without_touching_u
     seed_remote_scope_file(
         &machine,
         "all",
-        existing_relative,
+        ".config/fish/config.fish",
         "set -g fish_greeting on\n",
     );
-    seed_remote_scope_file(&machine, "all", removed_relative, "remove me\n");
+    seed_remote_scope_file(&machine, "all", ".config/fish/removed.fish", "remove me\n");
     merge_remote_scope_into(&machine, "all", "linux");
     merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
-    let sync_output = machine.sync();
+    let sync_output = machine.run("dotsync");
     assert!(
         sync_output.status.success(),
         "{}",
         render_output(&sync_output)
     );
 
-    machine.write_home_file(existing_relative, existing_contents);
-    machine.write_home_file(new_relative, new_contents);
-    machine.delete_home_file(removed_relative);
+    machine.write_file(".config/fish/config.fish", "set -g fish_greeting off\n");
+    machine.write_file(".config/fish/completions/git.fish", "complete -c git\n");
+    machine.delete_file(".config/fish/removed.fish");
 
-    let commit_output = machine.commit_with_paths("all", "update fish dir", &[".config/fish/"]);
+    let commit_output = machine.run("dotsync all -m 'update fish dir' -- .config/fish/");
     assert!(
         commit_output.status.success(),
         "{}",
@@ -1832,17 +1866,27 @@ fn retired_pending_selected_add_modify_and_delete_are_applied_without_touching_u
     );
 
     assert_eq!(
-        read_bookmark_file_contents(&machine, "all", existing_relative),
-        existing_contents
+        read_bookmark_file_contents(&machine, "all", ".config/fish/config.fish"),
+        "set -g fish_greeting off\n"
     );
     assert_eq!(
-        read_bookmark_file_contents(&machine, "all", new_relative),
-        new_contents
+        read_bookmark_file_contents(&machine, "all", ".config/fish/completions/git.fish"),
+        "complete -c git\n"
     );
-    assert!(!bookmark_has_file(&machine, "all", removed_relative));
-    assert_eq!(machine.read_home_file(existing_relative), existing_contents);
-    assert_eq!(machine.read_home_file(new_relative), new_contents);
-    assert!(!machine.home_file_exists(removed_relative));
+    assert!(!bookmark_has_file(
+        &machine,
+        "all",
+        ".config/fish/removed.fish"
+    ));
+    assert_eq!(
+        machine.read_file(".config/fish/config.fish"),
+        "set -g fish_greeting off\n"
+    );
+    assert_eq!(
+        machine.read_file(".config/fish/completions/git.fish"),
+        "complete -c git\n"
+    );
+    assert!(!machine.file_exists(".config/fish/removed.fish"));
 }
 
 retired_ratchet_test!(
