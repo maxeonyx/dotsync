@@ -57,7 +57,23 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             "Dotsync stopped before overwriting local drift so you can inspect what would be replaced.",
             &[
                 "If the repo is correct, rerun with `dotsync --force` to overwrite the drift after reviewing the diffs.",
-                "If the live file is the change you wanted, recreate that change in the hidden repo on the correct scope and then rerun dotsync after commit support lands.",
+                "If the live file is the change you wanted, run `dotsync status`, then commit the intended path with `dotsync <scope> -m \"message\" -- <path>`.",
+            ],
+        ),
+        DotsyncError::CascadePaused { .. } => render_structured_error(
+            "cascade paused",
+            "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config.",
+            "This commit flow was merging the scoped change through the scope DAG and reached a branch where the same file had incompatible edits.",
+            "It expects you to resolve the conflicted file in home, then run `dotsync continue` to create the merge commit and resume the cascade.",
+            error_report
+                .current_state
+                .as_deref()
+                .unwrap_or(&error_report.message),
+            &error_report.message,
+            &[
+                "edit each conflicted file at its real path in home and keep the desired final contents.",
+                "run `dotsync continue` from the same machine to finish cascading and syncing.",
+                "do not run another dotsync commit while the cascade is paused.",
             ],
         ),
         DotsyncError::InvalidScope { .. } => render_structured_error(
@@ -85,6 +101,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             ],
         ),
         DotsyncError::NotImplemented(_)
+        | DotsyncError::NoPausedCascade
         | DotsyncError::Io { .. }
         | DotsyncError::ConfigParse { .. }
         | DotsyncError::MissingParent { .. }
