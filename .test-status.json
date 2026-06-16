@@ -13,6 +13,7 @@
     "dotsync::user_flows$commit_noop_when_no_changes": "passing",
     "dotsync::user_flows$commit_to_machine_scope_does_not_cascade": "passing",
     "dotsync::user_flows$commit_without_paths_imports_all_diffs": "passing",
+    "dotsync::user_flows$continue_preserves_non_conflicting_parent_changes_from_paused_merge": "pending",
     "dotsync::user_flows$continue_without_pause_returns_clear_error": "passing",
     "dotsync::user_flows$drift_detected_human_error_stands_alone": "passing",
     "dotsync::user_flows$drift_detected_json_contract_stays_compatible": "passing",

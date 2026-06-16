@@ -1099,6 +1099,92 @@ fn shared_scope_conflict_pauses_and_continue_applies_resolution_to_machine_homes
 }
 
 #[test]
+fn continue_preserves_non_conflicting_parent_changes_from_paused_merge() {
+    let harness = TestHarness::new();
+    let machine_a = harness.machine("machine-a", "linux", "goof-a");
+    let machine_b = harness.machine("machine-b", "linux", "goof-b");
+    let conflicting_relative = ".config/app.conf";
+    let shared_relative = ".config/shared.conf";
+    let base_conflict = "setting = \"base\"\n";
+    let base_shared = "shared = \"base\"\n";
+    let linux_override = "setting = \"linux\"\n";
+    let all_update = "setting = \"all\"\n";
+    let shared_update = "shared = \"updated\"\n";
+    let resolved = "setting = \"all+linux\"\n";
+
+    let init_a = machine_a.init();
+    assert!(init_a.status.success(), "{}", render_output(&init_a));
+    let init_b = machine_b.init();
+    assert!(init_b.status.success(), "{}", render_output(&init_b));
+    let sync_a_after_join = machine_a.sync_force();
+    assert!(
+        sync_a_after_join.status.success(),
+        "{}",
+        render_output(&sync_a_after_join)
+    );
+
+    machine_a.write_home_file(conflicting_relative, base_conflict);
+    machine_a.write_home_file(shared_relative, base_shared);
+    let commit_base = machine_a.commit_with_paths(
+        "all",
+        "add base config",
+        &[conflicting_relative, shared_relative],
+    );
+    assert!(
+        commit_base.status.success(),
+        "{}",
+        render_output(&commit_base)
+    );
+
+    machine_a.write_home_file(conflicting_relative, linux_override);
+    let commit_linux =
+        machine_a.commit_with_paths("linux", "customize linux config", &[conflicting_relative]);
+    assert!(
+        commit_linux.status.success(),
+        "{}",
+        render_output(&commit_linux)
+    );
+
+    let sync_b = machine_b.sync();
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    assert_eq!(machine_b.read_home_file(conflicting_relative), linux_override);
+    assert_eq!(machine_b.read_home_file(shared_relative), base_shared);
+
+    machine_b.write_home_file(conflicting_relative, all_update);
+    machine_b.write_home_file(shared_relative, shared_update);
+    let conflict = machine_b.commit_with_paths(
+        "all",
+        "update shared config",
+        &[conflicting_relative, shared_relative],
+    );
+    assert_eq!(
+        conflict.status.code(),
+        Some(3),
+        "conflicting all-to-linux cascade should pause\n{}",
+        render_output(&conflict)
+    );
+
+    machine_b.write_home_file(conflicting_relative, resolved);
+    let continued = machine_b.continue_command();
+    assert!(continued.status.success(), "{}", render_output(&continued));
+    assert_eq!(machine_b.read_home_file(conflicting_relative), resolved);
+    assert_eq!(machine_b.read_home_file(shared_relative), shared_update);
+
+    let sync_a = machine_a.sync();
+    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    assert_eq!(machine_a.read_home_file(conflicting_relative), resolved);
+    assert_eq!(machine_a.read_home_file(shared_relative), shared_update);
+    assert_eq!(
+        read_bookmark_file_contents(&machine_a, "linux", conflicting_relative),
+        resolved
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine_a, "linux", shared_relative),
+        shared_update
+    );
+}
+
+#[test]
 fn commit_to_machine_scope_does_not_cascade() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
