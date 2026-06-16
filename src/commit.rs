@@ -80,6 +80,8 @@ pub async fn commit_and_sync(
     paths: &DotsyncPaths,
     options: CommitOptions,
 ) -> Result<CommandOutcome<CommitReport>, DotsyncError> {
+    reject_commit_if_cascade_paused(paths)?;
+
     let repo = load_repo_direct(paths).await?;
     let repo = fetch_origin(repo).await?;
     let config = load_config(paths).await?;
@@ -748,6 +750,16 @@ fn remove_paused_cascade_state(paths: &DotsyncPaths) -> Result<(), DotsyncError>
         Ok(()) => Ok(()),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(source) => Err(DotsyncError::Io { path, source }),
+    }
+}
+
+fn reject_commit_if_cascade_paused(paths: &DotsyncPaths) -> Result<(), DotsyncError> {
+    match load_paused_cascade_state(paths) {
+        Ok(state) => Err(DotsyncError::PausedCascadeInProgress {
+            scope: state.paused_scope,
+        }),
+        Err(DotsyncError::NoPausedCascade) => Ok(()),
+        Err(error) => Err(error),
     }
 }
 

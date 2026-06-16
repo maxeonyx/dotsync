@@ -1207,7 +1207,8 @@ fn commit_while_cascade_paused_is_blocked_without_mutating_scope() {
     );
 
     machine_a.write_home_file(conflicting_relative, "setting = \"base\"\n");
-    let commit_base = machine_a.commit_with_paths("all", "add base config", &[conflicting_relative]);
+    let commit_base =
+        machine_a.commit_with_paths("all", "add base config", &[conflicting_relative]);
     assert!(
         commit_base.status.success(),
         "{}",
@@ -1227,7 +1228,8 @@ fn commit_while_cascade_paused_is_blocked_without_mutating_scope() {
     assert!(sync_b.status.success(), "{}", render_output(&sync_b));
 
     machine_b.write_home_file(conflicting_relative, "setting = \"all\"\n");
-    let conflict = machine_b.commit_with_paths("all", "update shared config", &[conflicting_relative]);
+    let conflict =
+        machine_b.commit_with_paths("all", "update shared config", &[conflicting_relative]);
     assert_eq!(
         conflict.status.code(),
         Some(3),

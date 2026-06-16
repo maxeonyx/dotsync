@@ -76,6 +76,22 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 "do not run another dotsync commit while the cascade is paused.",
             ],
         ),
+        DotsyncError::PausedCascadeInProgress { .. } => render_structured_error(
+            "paused cascade in progress",
+            "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config.",
+            "This commit flow was about to start a new scoped commit, but a previous cascade is still paused for conflict resolution.",
+            "It expects exactly one cascade to be active at a time so commit history, conflict resolution, and home sync state stay aligned.",
+            error_report
+                .current_state
+                .as_deref()
+                .unwrap_or(&error_report.message),
+            "Dotsync stopped before fetching, committing, or syncing because starting another commit would hide the real paused-cascade task and may mutate unrelated scope state.",
+            &[
+                "edit each conflicted file at its real path in home and keep the desired final contents.",
+                "run `dotsync continue` to finish the paused cascade.",
+                "after `dotsync continue` succeeds, rerun the new commit if it is still needed.",
+            ],
+        ),
         DotsyncError::InvalidScope { .. } => render_structured_error(
             "invalid scope",
             "Dotsync stores dotfiles in a scope DAG so shared config can live on shared ancestor scopes and machine-specific config can stay isolated on leaf scopes.",
