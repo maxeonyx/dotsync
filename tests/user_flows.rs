@@ -1034,6 +1034,7 @@ fn concurrent_same_scope_file_edits_require_resolution() {
         render_output(&sync_a_after_join)
     );
 
+    // Establish the shared base version first.
     machine_a.write_home_file(relative, base);
     let commit_base = machine_a.commit_with_paths("all", "add shared base", &[relative]);
     assert!(
@@ -1042,6 +1043,7 @@ fn concurrent_same_scope_file_edits_require_resolution() {
         render_output(&commit_base)
     );
 
+    // Both machines start the conflict scenario from the same synced base.
     let sync_a_to_base = machine_a.sync();
     assert!(
         sync_a_to_base.status.success(),
@@ -1058,6 +1060,7 @@ fn concurrent_same_scope_file_edits_require_resolution() {
     );
     assert_eq!(machine_b.read_home_file(relative), base);
 
+    // Divergent local edits start here. B must not sync again before committing.
     machine_a.write_home_file(relative, from_a);
     machine_b.write_home_file(relative, from_b);
     assert_eq!(machine_a.read_home_file(relative), from_a);
