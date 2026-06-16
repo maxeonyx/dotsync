@@ -1042,6 +1042,14 @@ fn concurrent_same_scope_file_edits_require_resolution() {
         render_output(&commit_base)
     );
 
+    let sync_a_to_base = machine_a.sync();
+    assert!(
+        sync_a_to_base.status.success(),
+        "{}",
+        render_output(&sync_a_to_base)
+    );
+    assert_eq!(machine_a.read_home_file(relative), base);
+
     let sync_b_to_base = machine_b.sync();
     assert!(
         sync_b_to_base.status.success(),
@@ -1050,14 +1058,14 @@ fn concurrent_same_scope_file_edits_require_resolution() {
     );
     assert_eq!(machine_b.read_home_file(relative), base);
 
+    machine_a.write_home_file(relative, from_a);
     machine_b.write_home_file(relative, from_b);
+    assert_eq!(machine_a.read_home_file(relative), from_a);
     assert_eq!(
         machine_b.read_home_file(relative),
         from_b,
         "machine B must make its own local edit before machine A publishes"
     );
-
-    machine_a.write_home_file(relative, from_a);
 
     let commit_a = machine_a.commit_with_paths("all", "update shared from a", &[relative]);
     assert!(commit_a.status.success(), "{}", render_output(&commit_a));
