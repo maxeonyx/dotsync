@@ -1014,6 +1014,72 @@ fn multiple_machines_can_contribute_to_all_without_losing_changes() {
 }
 
 #[test]
+fn concurrent_same_scope_file_edits_require_resolution() {
+    let harness = TestHarness::new();
+    let machine_a = harness.machine("machine-a", "linux", "goof-a");
+    let machine_b = harness.machine("machine-b", "linux", "goof-b");
+    let relative = ".config/shared.conf";
+    let base = "setting = \"base\"\n";
+    let from_a = "setting = \"all-a\"\n";
+    let from_b = "setting = \"all-b\"\n";
+
+    let init_a = machine_a.init();
+    assert!(init_a.status.success(), "{}", render_output(&init_a));
+    let init_b = machine_b.init();
+    assert!(init_b.status.success(), "{}", render_output(&init_b));
+    let sync_a_after_join = machine_a.sync_force();
+    assert!(
+        sync_a_after_join.status.success(),
+        "{}",
+        render_output(&sync_a_after_join)
+    );
+
+    machine_a.write_home_file(relative, base);
+    let commit_base = machine_a.commit_with_paths("all", "add shared base", &[relative]);
+    assert!(
+        commit_base.status.success(),
+        "{}",
+        render_output(&commit_base)
+    );
+
+    let sync_b_to_base = machine_b.sync();
+    assert!(
+        sync_b_to_base.status.success(),
+        "{}",
+        render_output(&sync_b_to_base)
+    );
+    assert_eq!(machine_b.read_home_file(relative), base);
+
+    machine_a.write_home_file(relative, from_a);
+    machine_b.write_home_file(relative, from_b);
+
+    let commit_a = machine_a.commit_with_paths("all", "update shared from a", &[relative]);
+    assert!(commit_a.status.success(), "{}", render_output(&commit_a));
+
+    let conflict = machine_b.commit_with_paths("all", "update shared from b", &[relative]);
+    assert_eq!(
+        conflict.status.code(),
+        Some(3),
+        "concurrent same-scope edit should require conflict resolution\n{}",
+        render_output(&conflict)
+    );
+    let stderr = String::from_utf8_lossy(&conflict.stderr);
+    assert!(stderr.contains("conflict"), "{}", render_output(&conflict));
+    assert!(stderr.contains("all"), "{}", render_output(&conflict));
+    assert!(stderr.contains(relative), "{}", render_output(&conflict));
+    assert_eq!(
+        read_bookmark_file_contents(&machine_b, "all", relative),
+        from_a,
+        "failed concurrent commit must leave the shared scope at the already-published version"
+    );
+    assert_eq!(
+        machine_b.read_home_file(relative),
+        from_b,
+        "failed concurrent commit must not overwrite B's unresolved home edit"
+    );
+}
+
+#[test]
 fn shared_scope_conflict_pauses_and_continue_applies_resolution_to_machine_homes() {
     let harness = TestHarness::new();
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
