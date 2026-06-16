@@ -1050,11 +1050,22 @@ fn concurrent_same_scope_file_edits_require_resolution() {
     );
     assert_eq!(machine_b.read_home_file(relative), base);
 
-    machine_a.write_home_file(relative, from_a);
     machine_b.write_home_file(relative, from_b);
+    assert_eq!(
+        machine_b.read_home_file(relative),
+        from_b,
+        "machine B must make its own local edit before machine A publishes"
+    );
+
+    machine_a.write_home_file(relative, from_a);
 
     let commit_a = machine_a.commit_with_paths("all", "update shared from a", &[relative]);
     assert!(commit_a.status.success(), "{}", render_output(&commit_a));
+    assert_eq!(
+        machine_b.read_home_file(relative),
+        from_b,
+        "machine B must not sync to machine A's published edit before committing its own edit"
+    );
 
     let conflict = machine_b.commit_with_paths("all", "update shared from b", &[relative]);
     assert_eq!(
