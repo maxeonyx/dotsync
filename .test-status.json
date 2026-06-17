@@ -5,6 +5,7 @@
     "dotsync::help_examples$help_examples": "passing",
     "dotsync::help_text$init_help_explains_remote_url_and_setup": "passing",
     "dotsync::help_text$top_level_help_explains_scope_and_basic_workflow": "passing",
+    "dotsync::user_flows$abort_paused_cascade_restores_pre_pause_state_and_clears_pause": "pending",
     "dotsync::user_flows$commit_cascades_through_all_descendants": "passing",
     "dotsync::user_flows$commit_deletes_file_from_scope": "passing",
     "dotsync::user_flows$commit_explicit_path_adds_file_to_scope_and_syncs": "passing",
