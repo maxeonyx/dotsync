@@ -166,8 +166,8 @@ The message MUST contain all of the following:
 ### Instructions (what to do)
 - Edit the conflicted files in `~/dotfiles/` to resolve the conflict (remove conflict markers, keep the desired content)
 - Run `dotsync continue` to resume the cascade
+- Or run `dotsync abort` to discard the paused cascade and restore the pre-pause state
 - Note that the cascade may pause again at a later scope — this is normal, just repeat the process
-- (`dotsync abort` is planned but not yet implemented)
 
 ### Agent-specific guidance
 - The scope being resolved may be a different machine's branch — this is expected and necessary

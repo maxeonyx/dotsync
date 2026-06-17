@@ -73,6 +73,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             &[
                 "edit each conflicted file at its real path in home and keep the desired final contents.",
                 "run `dotsync continue` from the same machine to finish cascading and syncing.",
+                "or run `dotsync abort` from the same machine to discard the paused cascade and restore the pre-pause state.",
                 "do not run another dotsync commit while the cascade is paused.",
             ],
         ),
@@ -105,6 +106,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             &[
                 "edit each conflicted file at its real path in home and keep the desired final contents.",
                 "run `dotsync continue` to finish the paused cascade.",
+                "or run `dotsync abort` to discard the paused cascade and restore the pre-pause state.",
                 "after `dotsync continue` succeeds, rerun the new commit if it is still needed.",
             ],
         ),
