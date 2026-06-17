@@ -52,6 +52,8 @@ struct PausedCascadeState {
     description: String,
     #[serde(default)]
     original_scope_commit_ids: BTreeMap<String, String>,
+    #[serde(default)]
+    abort_restore_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -228,6 +230,7 @@ pub async fn commit_and_sync(
                         .collect(),
                     description: options.message,
                     original_scope_commit_ids: original_scope_commit_ids.clone(),
+                    abort_restore_paths: selected_paths.clone(),
                 },
             )?;
             return Err(DotsyncError::CascadePaused {
@@ -297,6 +300,7 @@ pub async fn commit_and_sync(
                         remaining_steps,
                         description: cascade_command.description,
                         original_scope_commit_ids,
+                        abort_restore_paths: selected_paths.clone(),
                     },
                 )?;
                 return Err(DotsyncError::CascadePaused {
@@ -847,6 +851,7 @@ pub async fn continue_after_conflict(
                     remaining_steps,
                     description: state.description,
                     original_scope_commit_ids: state.original_scope_commit_ids,
+                    abort_restore_paths: state.abort_restore_paths,
                 },
             )?;
             return Err(DotsyncError::CascadePaused {
@@ -910,13 +915,15 @@ pub async fn abort_paused_cascade(
         })?;
     remove_paused_cascade_state(paths)?;
 
-    let sync = crate::sync::sync_repo_to_home(
-        paths,
-        options,
-        &state.conflicted_files,
-        Some(&state.machine_scope),
-    )
-    .await?;
+    let restore_paths = if state.abort_restore_paths.is_empty() {
+        &state.conflicted_files
+    } else {
+        &state.abort_restore_paths
+    };
+
+    let sync =
+        crate::sync::sync_repo_to_home(paths, options, restore_paths, Some(&state.machine_scope))
+            .await?;
 
     Ok(CommandOutcome::Success(AbortReport {
         aborted_scope: state.paused_scope,

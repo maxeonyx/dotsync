@@ -872,9 +872,8 @@ fn abort_paused_cascade_restores_non_conflicting_selected_paths() {
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
     machine_a.write_file(".config/other.conf", "other = false\n");
-    let commit_base = machine_a.run(
-        "dotsync commit all -m 'add base config' -- .config/app.conf .config/other.conf",
-    );
+    let commit_base = machine_a
+        .run("dotsync commit all -m 'add base config' -- .config/app.conf .config/other.conf");
     assert!(
         commit_base.status.success(),
         "{}",
@@ -895,9 +894,8 @@ fn abort_paused_cascade_restores_non_conflicting_selected_paths() {
 
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     machine_b.write_file(".config/other.conf", "other = true\n");
-    let conflict = machine_b.run(
-        "dotsync commit all -m 'update shared config' -- .config/app.conf .config/other.conf",
-    );
+    let conflict = machine_b
+        .run("dotsync commit all -m 'update shared config' -- .config/app.conf .config/other.conf");
     assert_eq!(
         conflict.status.code(),
         Some(3),
