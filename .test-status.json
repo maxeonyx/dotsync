@@ -17,6 +17,8 @@
     "dotsync::user_flows$concurrent_same_scope_file_edits_require_resolution": "passing",
     "dotsync::user_flows$continue_preserves_non_conflicting_parent_changes_from_paused_merge": "passing",
     "dotsync::user_flows$continue_without_pause_returns_clear_error": "passing",
+    "dotsync::user_flows$diff_shows_line_oriented_home_drift_without_syncing": "pending",
+    "dotsync::user_flows$discovery_commands_show_scopes_config_tree_and_file_contents": "pending",
     "dotsync::user_flows$drift_detected_human_error_stands_alone": "passing",
     "dotsync::user_flows$drift_detected_json_contract_stays_compatible": "passing",
     "dotsync::user_flows$explicit_commit_command_adds_file_to_scope_and_syncs": "passing",

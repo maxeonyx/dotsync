@@ -456,6 +456,125 @@ fn drift_detected_human_error_stands_alone() {
 }
 
 #[test]
+fn diff_shows_line_oriented_home_drift_without_syncing() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".gitconfig", "line one\nline two\n");
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    machine.write_file(".gitconfig", "line one\nchanged two\n");
+
+    let diff_output = machine.run("dotsync diff");
+    assert_eq!(
+        diff_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&diff_output)
+    );
+
+    assert_eq!(machine.read_file(".gitconfig"), "line one\nchanged two\n");
+    let stderr = String::from_utf8_lossy(&diff_output.stderr);
+    assert!(stderr.contains("dotsync: 1 drifted managed file(s)"));
+    assert!(stderr.contains("- .gitconfig"), "{}", render_output(&diff_output));
+    assert!(stderr.contains("--- repo"), "{}", render_output(&diff_output));
+    assert!(stderr.contains("+++ system"), "{}", render_output(&diff_output));
+    assert!(stderr.contains(" line one"), "{}", render_output(&diff_output));
+    assert!(stderr.contains("-line two"), "{}", render_output(&diff_output));
+    assert!(stderr.contains("+changed two"), "{}", render_output(&diff_output));
+}
+
+#[test]
+fn discovery_commands_show_scopes_config_tree_and_file_contents() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "all", ".gitconfig", "[user]\nname = Shared\n");
+    merge_remote_scope_into(&machine, "all", "linux");
+    merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    let scopes_output = machine.run("dotsync scopes");
+    assert!(
+        scopes_output.status.success(),
+        "{}",
+        render_output(&scopes_output)
+    );
+    let scopes_stderr = String::from_utf8_lossy(&scopes_output.stderr);
+    assert!(scopes_stderr.contains("all"), "{}", render_output(&scopes_output));
+    assert!(
+        scopes_stderr.contains("linux <- all"),
+        "{}",
+        render_output(&scopes_output)
+    );
+    assert!(
+        scopes_stderr.contains("mx-xps-cy <- linux"),
+        "{}",
+        render_output(&scopes_output)
+    );
+
+    let config_output = machine.run("dotsync config all");
+    assert!(
+        config_output.status.success(),
+        "{}",
+        render_output(&config_output)
+    );
+    let config_stdout = String::from_utf8_lossy(&config_output.stdout);
+    assert!(config_stdout.contains("[scopes]"), "{}", render_output(&config_output));
+    assert!(
+        config_stdout.contains("mx-xps-cy = { parents = [\"linux\"] }"),
+        "{}",
+        render_output(&config_output)
+    );
+
+    let tree_output = machine.run("dotsync tree mx-xps-cy");
+    assert!(
+        tree_output.status.success(),
+        "{}",
+        render_output(&tree_output)
+    );
+    let tree_stdout = String::from_utf8_lossy(&tree_output.stdout);
+    assert!(tree_stdout.contains(".gitconfig"), "{}", render_output(&tree_output));
+    assert!(
+        tree_stdout.contains(".config/dotsync/config.toml"),
+        "{}",
+        render_output(&tree_output)
+    );
+
+    let file_output = machine.run("dotsync file mx-xps-cy .gitconfig");
+    assert!(
+        file_output.status.success(),
+        "{}",
+        render_output(&file_output)
+    );
+    assert_eq!(String::from_utf8_lossy(&file_output.stdout), "[user]\nname = Shared\n");
+}
+
+#[test]
 fn drift_detected_json_contract_stays_compatible() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
