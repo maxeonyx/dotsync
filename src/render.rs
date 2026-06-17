@@ -57,7 +57,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             "Dotsync stopped before overwriting local drift so you can inspect what would be replaced.",
             &[
                 "If the repo is correct, rerun with `dotsync --force` to overwrite the drift after reviewing the diffs.",
-                "If the live file is the change you wanted, run `dotsync status`, then commit the intended path with `dotsync <scope> -m \"message\" -- <path>`.",
+                "If the live file is the change you wanted, run `dotsync status`, then commit the intended path with `dotsync commit <scope> -m \"message\" -- <path>`.",
             ],
         ),
         DotsyncError::CascadePaused { .. } => render_structured_error(
@@ -89,7 +89,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             &[
                 "inspect the already-published scope version before deciding what the shared file should contain.",
                 "edit the conflicted file in home so it contains the resolved shared contents.",
-                "rerun `dotsync <scope> -m \"message\" -- <path>` after resolving the file.",
+                "rerun `dotsync commit <scope> -m \"message\" -- <path>` after resolving the file.",
             ],
         ),
         DotsyncError::PausedCascadeInProgress { .. } => render_structured_error(

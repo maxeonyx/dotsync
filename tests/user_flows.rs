@@ -726,7 +726,7 @@ fn v03_commit_returns_not_implemented() {
 
     machine.write_file(".gitconfig", "[user]\nname = \"Max\"\n");
 
-    let commit_output = machine.run("dotsync all -m 'not implemented yet'");
+    let commit_output = machine.run("dotsync commit all -m 'not implemented yet'");
     assert_eq!(
         commit_output.status.code(),
         Some(1),
@@ -769,6 +769,64 @@ fn continue_without_pause_returns_clear_error() {
 }
 
 #[test]
+fn explicit_commit_command_adds_file_to_scope_and_syncs() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_file(".gitconfig", "[user]\nname = \"Max\"\n");
+
+    let commit_output = machine.run("dotsync commit all -m 'add gitconfig' -- .gitconfig");
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
+
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "all", ".gitconfig"),
+        "[user]\nname = \"Max\"\n"
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "mx-xps-cy", ".gitconfig"),
+        "[user]\nname = \"Max\"\n"
+    );
+    assert_eq!(machine.read_file(".gitconfig"), "[user]\nname = \"Max\"\n");
+}
+
+#[test]
+fn unknown_command_is_not_treated_as_scope_commit() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let output = machine.run("dotsync diff");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "unknown top-level command should be a usage error\n{}",
+        render_output(&output)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.to_ascii_lowercase().contains("unknown command"),
+        "{}",
+        render_output(&output)
+    );
+    assert!(
+        !stderr.contains("requires -m/--message"),
+        "unknown commands must not be parsed as scope commits\n{}",
+        render_output(&output)
+    );
+}
+
+#[test]
 fn commit_explicit_path_adds_file_to_scope_and_syncs() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
@@ -790,7 +848,7 @@ fn commit_explicit_path_adds_file_to_scope_and_syncs() {
 
     machine.write_file(".gitconfig", "[user]\nname = \"Max\"\n");
 
-    let commit_output = machine.run("dotsync all -m 'add gitconfig' -- .gitconfig");
+    let commit_output = machine.run("dotsync commit all -m 'add gitconfig' -- .gitconfig");
     assert!(
         commit_output.status.success(),
         "{}",
@@ -835,7 +893,7 @@ fn commit_modifies_existing_file_on_scope() {
         bookmark_revision(&machine, "all")
     ));
 
-    let commit_output = machine.run("dotsync linux -m 'update bashrc' -- .bashrc");
+    let commit_output = machine.run("dotsync commit linux -m 'update bashrc' -- .bashrc");
     assert!(
         commit_output.status.success(),
         "{}",
@@ -881,7 +939,7 @@ fn commit_deletes_file_from_scope() {
 
     machine.delete_file(".config/remove-me.txt");
 
-    let commit_output = machine.run("dotsync all -m 'remove file' -- .config/remove-me.txt");
+    let commit_output = machine.run("dotsync commit all -m 'remove file' -- .config/remove-me.txt");
     assert!(
         commit_output.status.success(),
         "{}",
@@ -927,7 +985,8 @@ fn commit_cascades_through_all_descendants() {
 
     machine.write_file(".config/shared.txt", "shared everywhere\n");
 
-    let commit_output = machine.run("dotsync all -m 'add shared file' -- .config/shared.txt");
+    let commit_output =
+        machine.run("dotsync commit all -m 'add shared file' -- .config/shared.txt");
     assert!(
         commit_output.status.success(),
         "{}",
@@ -961,7 +1020,7 @@ fn multiple_machines_can_contribute_to_all_without_losing_changes() {
     );
 
     machine_a.write_file(".config/shared-a.conf", "from machine a\n");
-    let commit_a = machine_a.run("dotsync all -m 'add shared a' -- .config/shared-a.conf");
+    let commit_a = machine_a.run("dotsync commit all -m 'add shared a' -- .config/shared-a.conf");
     assert!(commit_a.status.success(), "{}", render_output(&commit_a));
 
     let sync_b = machine_b.run("dotsync");
@@ -972,7 +1031,7 @@ fn multiple_machines_can_contribute_to_all_without_losing_changes() {
     );
 
     machine_b.write_file(".config/shared-b.conf", "from machine b\n");
-    let commit_b = machine_b.run("dotsync all -m 'add shared b' -- .config/shared-b.conf");
+    let commit_b = machine_b.run("dotsync commit all -m 'add shared b' -- .config/shared-b.conf");
     assert!(commit_b.status.success(), "{}", render_output(&commit_b));
 
     let sync_a = machine_a.run("dotsync");
@@ -1022,7 +1081,8 @@ fn concurrent_same_scope_file_edits_require_resolution() {
 
     // Establish the shared base version first.
     machine_a.write_file(".config/shared.conf", "setting = \"base\"\n");
-    let commit_base = machine_a.run("dotsync all -m 'add shared base' -- .config/shared.conf");
+    let commit_base =
+        machine_a.run("dotsync commit all -m 'add shared base' -- .config/shared.conf");
     assert!(
         commit_base.status.success(),
         "{}",
@@ -1065,7 +1125,8 @@ fn concurrent_same_scope_file_edits_require_resolution() {
         "machine B must make its own local edit before machine A publishes"
     );
 
-    let commit_a = machine_a.run("dotsync all -m 'update shared from a' -- .config/shared.conf");
+    let commit_a =
+        machine_a.run("dotsync commit all -m 'update shared from a' -- .config/shared.conf");
     assert!(commit_a.status.success(), "{}", render_output(&commit_a));
     assert_eq!(
         machine_b.read_file(".config/shared.conf"),
@@ -1073,7 +1134,8 @@ fn concurrent_same_scope_file_edits_require_resolution() {
         "machine B must not sync to machine A's published edit before committing its own edit"
     );
 
-    let conflict = machine_b.run("dotsync all -m 'update shared from b' -- .config/shared.conf");
+    let conflict =
+        machine_b.run("dotsync commit all -m 'update shared from b' -- .config/shared.conf");
     assert_eq!(
         conflict.status.code(),
         Some(3),
@@ -1137,7 +1199,7 @@ fn shared_scope_conflict_pauses_and_continue_applies_resolution_to_machine_homes
     );
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
-    let commit_base = machine_a.run("dotsync all -m 'add base config' -- .config/app.conf");
+    let commit_base = machine_a.run("dotsync commit all -m 'add base config' -- .config/app.conf");
     assert!(
         commit_base.status.success(),
         "{}",
@@ -1146,7 +1208,7 @@ fn shared_scope_conflict_pauses_and_continue_applies_resolution_to_machine_homes
 
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
     let commit_linux =
-        machine_a.run("dotsync linux -m 'customize linux config' -- .config/app.conf");
+        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
     assert!(
         commit_linux.status.success(),
         "{}",
@@ -1161,7 +1223,8 @@ fn shared_scope_conflict_pauses_and_continue_applies_resolution_to_machine_homes
     );
 
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
-    let conflict = machine_b.run("dotsync all -m 'update shared config' -- .config/app.conf");
+    let conflict =
+        machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
     assert_eq!(
         conflict.status.code(),
         Some(3),
@@ -1232,8 +1295,8 @@ fn continue_preserves_non_conflicting_parent_changes_from_paused_merge() {
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
     machine_a.write_file(".config/shared.conf", "shared = \"base\"\n");
-    let commit_base =
-        machine_a.run("dotsync all -m 'add base config' -- .config/app.conf .config/shared.conf");
+    let commit_base = machine_a
+        .run("dotsync commit all -m 'add base config' -- .config/app.conf .config/shared.conf");
     assert!(
         commit_base.status.success(),
         "{}",
@@ -1242,7 +1305,7 @@ fn continue_preserves_non_conflicting_parent_changes_from_paused_merge() {
 
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
     let commit_linux =
-        machine_a.run("dotsync linux -m 'customize linux config' -- .config/app.conf");
+        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
     assert!(
         commit_linux.status.success(),
         "{}",
@@ -1262,8 +1325,9 @@ fn continue_preserves_non_conflicting_parent_changes_from_paused_merge() {
 
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     machine_b.write_file(".config/shared.conf", "shared = \"updated\"\n");
-    let conflict = machine_b
-        .run("dotsync all -m 'update shared config' -- .config/app.conf .config/shared.conf");
+    let conflict = machine_b.run(
+        "dotsync commit all -m 'update shared config' -- .config/app.conf .config/shared.conf",
+    );
     assert_eq!(
         conflict.status.code(),
         Some(3),
@@ -1321,7 +1385,7 @@ fn commit_while_cascade_paused_is_blocked_without_mutating_scope() {
     );
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
-    let commit_base = machine_a.run("dotsync all -m 'add base config' -- .config/app.conf");
+    let commit_base = machine_a.run("dotsync commit all -m 'add base config' -- .config/app.conf");
     assert!(
         commit_base.status.success(),
         "{}",
@@ -1330,7 +1394,7 @@ fn commit_while_cascade_paused_is_blocked_without_mutating_scope() {
 
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
     let commit_linux =
-        machine_a.run("dotsync linux -m 'customize linux config' -- .config/app.conf");
+        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
     assert!(
         commit_linux.status.success(),
         "{}",
@@ -1341,7 +1405,8 @@ fn commit_while_cascade_paused_is_blocked_without_mutating_scope() {
     assert!(sync_b.status.success(), "{}", render_output(&sync_b));
 
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
-    let conflict = machine_b.run("dotsync all -m 'update shared config' -- .config/app.conf");
+    let conflict =
+        machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
     assert_eq!(
         conflict.status.code(),
         Some(3),
@@ -1353,7 +1418,7 @@ fn commit_while_cascade_paused_is_blocked_without_mutating_scope() {
     machine_b.write_file(".config/other.conf", "other = true\n");
 
     let blocked =
-        machine_b.run("dotsync goof-b -m 'try commit while paused' -- .config/other.conf");
+        machine_b.run("dotsync commit goof-b -m 'try commit while paused' -- .config/other.conf");
 
     assert_eq!(
         blocked.status.code(),
@@ -1389,7 +1454,7 @@ fn commit_to_machine_scope_does_not_cascade() {
     machine.write_file(".config/machine-local.txt", "machine only\n");
 
     let commit_output =
-        machine.run("dotsync mx-xps-cy -m 'add machine file' -- .config/machine-local.txt");
+        machine.run("dotsync commit mx-xps-cy -m 'add machine file' -- .config/machine-local.txt");
     assert!(
         commit_output.status.success(),
         "{}",
@@ -1439,7 +1504,7 @@ fn commit_without_paths_imports_all_diffs() {
 
     machine.write_file(".config/app.conf", "setting = \"updated\"\n");
 
-    let commit_output = machine.run("dotsync mx-xps-cy -m update");
+    let commit_output = machine.run("dotsync commit mx-xps-cy -m update");
     assert!(
         commit_output.status.success(),
         "{}",
@@ -1474,7 +1539,7 @@ fn commit_noop_when_no_changes() {
 
     let revision_before = bookmark_revision(&machine, "mx-xps-cy");
 
-    let commit_output = machine.run("dotsync mx-xps-cy -m noop");
+    let commit_output = machine.run("dotsync commit mx-xps-cy -m noop");
     assert_eq!(
         commit_output.status.code(),
         Some(0),
@@ -1498,7 +1563,7 @@ fn commit_invalid_scope_errors() {
         render_output(&init_output)
     );
 
-    let commit_output = machine.run("dotsync nonexistent -m test -- .gitconfig");
+    let commit_output = machine.run("dotsync commit nonexistent -m test -- .gitconfig");
     assert_eq!(
         commit_output.status.code(),
         Some(1),
@@ -1858,7 +1923,7 @@ fn retired_pending_selected_add_modify_and_delete_are_applied_without_touching_u
     machine.write_file(".config/fish/completions/git.fish", "complete -c git\n");
     machine.delete_file(".config/fish/removed.fish");
 
-    let commit_output = machine.run("dotsync all -m 'update fish dir' -- .config/fish/");
+    let commit_output = machine.run("dotsync commit all -m 'update fish dir' -- .config/fish/");
     assert!(
         commit_output.status.success(),
         "{}",

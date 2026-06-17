@@ -22,7 +22,7 @@ This creates an isolated environment with:
 
 **Expected:**
 - Agent edits `~/.config/starship.toml`
-- Agent runs `dotsync all -m "add starship config" -- .config/starship.toml`
+- Agent runs `dotsync commit all -m "add starship config" -- .config/starship.toml`
 - File exists in `all` scope tree
 - File cascaded to all descendants
 
@@ -32,7 +32,7 @@ This creates an isolated environment with:
 
 **Expected:**
 - Agent edits `~/.config/fish/config.fish`
-- Agent runs `dotsync linux -m "add RUST_BACKTRACE to fish" -- .config/fish/config.fish`
+- Agent runs `dotsync commit linux -m "add RUST_BACKTRACE to fish" -- .config/fish/config.fish`
 - Change is on `linux` scope (not `all`, not machine)
 
 ### 3. Machine-specific change
@@ -41,7 +41,7 @@ This creates an isolated environment with:
 
 **Expected:**
 - Agent edits `~/.config/hypr/hyprland.conf`
-- Agent runs `dotsync mx-xps-cy -m "set DP-1 monitor" -- .config/hypr/hyprland.conf`
+- Agent runs `dotsync commit mx-xps-cy -m "set DP-1 monitor" -- .config/hypr/hyprland.conf`
 - Change is on machine scope
 
 ### 4. Check status before committing
