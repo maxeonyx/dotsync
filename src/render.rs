@@ -132,6 +132,21 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 "After that, let dotsync recreate valid sync state from a successful sync.",
             ],
         ),
+        DotsyncError::NotInitialized { .. } => render_structured_error(
+            "not initialized",
+            "Dotsync keeps its hidden repo at ~/.local/share/dotsync/repo and syncs committed scope state into your home directory.",
+            "This command needs the hidden repo before it can inspect scopes, compare files, or sync managed config.",
+            "Run `dotsync init <remote-url>` once so dotsync can clone or create its repo state.",
+            error_report
+                .current_state
+                .as_deref()
+                .unwrap_or(&error_report.message),
+            "Dotsync stopped before reading repo state because this home directory has not been initialized.",
+            &[
+                "run `dotsync init <remote-url>` with the git remote that stores your dotsync repo.",
+                "after init succeeds, rerun this command.",
+            ],
+        ),
         DotsyncError::NotImplemented(_)
         | DotsyncError::NoPausedCascade
         | DotsyncError::Io { .. }

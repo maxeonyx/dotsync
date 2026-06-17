@@ -29,13 +29,17 @@ pub(crate) fn default_settings() -> Result<UserSettings, DotsyncError> {
 pub(crate) async fn load_repo_direct(
     paths: &DotsyncPaths,
 ) -> Result<Arc<ReadonlyRepo>, DotsyncError> {
+    let jj_repo_dir = paths.repo_root.join(".jj/repo");
+    if !jj_repo_dir.exists() {
+        return Err(DotsyncError::NotInitialized {
+            path: paths.repo_root.clone(),
+        });
+    }
+
     let settings = default_settings()?;
-    let loader = RepoLoader::init_from_file_system(
-        &settings,
-        &paths.repo_root.join(".jj/repo"),
-        &StoreFactories::default(),
-    )
-    .map_err(|err| jj_error(format!("load repo loader from file system: {err}")))?;
+    let loader =
+        RepoLoader::init_from_file_system(&settings, &jj_repo_dir, &StoreFactories::default())
+            .map_err(|err| jj_error(format!("load repo loader from file system: {err}")))?;
     loader
         .load_at_head()
         .await

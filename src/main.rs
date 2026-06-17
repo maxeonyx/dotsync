@@ -87,7 +87,7 @@ enum Command {
     #[command(about = INIT_ABOUT, long_about = INIT_LONG_ABOUT)]
     Init {
         /// Git remote URL or local path for the dotsync repo
-        remote_url: String,
+        remote_url: Option<String>,
     },
     /// Commit selected home changes to a scope, cascade, sync, and push
     Commit {
@@ -193,7 +193,14 @@ impl TryFrom<Cli> for Action {
 
     fn try_from(cli: Cli) -> Result<Self, Self::Error> {
         match cli.command {
-            Some(Command::Init { remote_url }) => Ok(Self::Init { remote_url }),
+            Some(Command::Init { remote_url }) => {
+                let Some(remote_url) = remote_url else {
+                    return Err(usage_error(
+                        "init requires a remote URL; run `dotsync init <remote-url>` with the git remote that stores your dotsync repo",
+                    ));
+                };
+                Ok(Self::Init { remote_url })
+            }
             Some(Command::Continue) => Ok(Self::Continue { force: cli.force }),
             Some(Command::Status) => Ok(Self::Status { force: false }),
             Some(Command::Commit {

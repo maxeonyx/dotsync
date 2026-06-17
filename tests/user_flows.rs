@@ -1593,7 +1593,11 @@ fn status_before_init_explains_how_to_initialize() {
     );
 
     let stderr = String::from_utf8_lossy(&status_output.stderr);
-    assert!(stderr.starts_with("dotsync:"), "{}", render_output(&status_output));
+    assert!(
+        stderr.starts_with("dotsync:"),
+        "{}",
+        render_output(&status_output)
+    );
     for expected in [
         "not initialized",
         "~/.local/share/dotsync/repo",
@@ -1621,7 +1625,11 @@ fn init_without_remote_explains_required_remote_url() {
     );
 
     let stderr = String::from_utf8_lossy(&init_output.stderr);
-    assert!(stderr.starts_with("dotsync:"), "{}", render_output(&init_output));
+    assert!(
+        stderr.starts_with("dotsync:"),
+        "{}",
+        render_output(&init_output)
+    );
     for expected in [
         "init requires a remote URL",
         "dotsync init <remote-url>",
