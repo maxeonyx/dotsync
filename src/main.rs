@@ -16,12 +16,12 @@ A scope is a branch in the dotsync DAG. Shared config lives on ancestor scopes s
 
 Basic workflow:
   - plain `dotsync` syncs your current machine scope into home
-  - edit files in home, then run `dotsync <scope> -m \"message\" <path>...` to record the change on the right scope
+  - edit files in home, then run `dotsync commit <scope> -m \"message\" <path>...` to record the change on the right scope
   - run `dotsync continue` if a cascade pauses for conflicts";
 
 const TOP_LEVEL_AFTER_HELP: &str = "Examples:
   $ dotsync
-  $ dotsync linux -m \"add bashrc\" .bashrc
+  $ dotsync commit linux -m \"add bashrc\" .bashrc
   $ dotsync init <url>";
 
 const INIT_ABOUT: &str = "Clone or join a dotsync remote";
@@ -55,23 +55,9 @@ struct Cli {
     #[arg(long = "output", value_enum, default_value = "human")]
     output_format: OutputFormat,
 
-    /// Scope to commit changes to; omit for sync-only mode
-    scope: Option<String>,
-
-    /// Commit message (required when scope is provided)
-    #[arg(short = 'm', long = "message", requires = "scope")]
-    message: Option<String>,
-
     /// Proceed even when drift is detected
-    #[arg(long)]
+    #[arg(long, global = true)]
     force: bool,
-
-    /// Commit every repo change
-    #[arg(long)]
-    all: bool,
-
-    /// Repo-relative file or directory paths to commit
-    paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,14 +65,14 @@ enum Action {
     Sync {
         force: bool,
     },
+    Init {
+        remote_url: String,
+    },
     Commit {
         scope: String,
         message: String,
         force: bool,
         selection: CommitSelection,
-    },
-    Init {
-        remote_url: String,
     },
     Continue {
         force: bool,
@@ -103,10 +89,28 @@ enum Command {
         /// Git remote URL or local path for the dotsync repo
         remote_url: String,
     },
+    /// Commit selected home changes to a scope, cascade, sync, and push
+    Commit {
+        /// Scope to commit changes to
+        scope: String,
+
+        /// Commit message
+        #[arg(short = 'm', long = "message")]
+        message: String,
+
+        /// Commit every managed file that differs from the repo
+        #[arg(long)]
+        all: bool,
+
+        /// Repo-relative file or directory paths to commit
+        paths: Vec<PathBuf>,
+    },
     #[command(about = CONTINUE_ABOUT)]
     Continue,
     /// Show managed files that differ from the repo
     Status,
+    #[command(external_subcommand)]
+    Unknown(Vec<String>),
 }
 
 #[derive(Debug, Clone)]
@@ -188,22 +192,24 @@ impl TryFrom<Cli> for Action {
     type Error = UsageError;
 
     fn try_from(cli: Cli) -> Result<Self, Self::Error> {
-        match (cli.command, cli.scope, cli.message) {
-            (Some(Command::Init { remote_url }), None, None) => Ok(Self::Init { remote_url }),
-            (Some(Command::Continue), None, None) => Ok(Self::Continue { force: cli.force }),
-            (Some(Command::Status), None, None) => Ok(Self::Status { force: false }),
-            (None, None, None) if !cli.all && cli.paths.is_empty() => {
-                Ok(Self::Sync { force: cli.force })
-            }
-            (None, Some(scope), Some(message)) => {
-                let selection = match (cli.all, cli.paths.is_empty()) {
+        match cli.command {
+            Some(Command::Init { remote_url }) => Ok(Self::Init { remote_url }),
+            Some(Command::Continue) => Ok(Self::Continue { force: cli.force }),
+            Some(Command::Status) => Ok(Self::Status { force: false }),
+            Some(Command::Commit {
+                scope,
+                message,
+                all,
+                paths,
+            }) => {
+                let selection = match (all, paths.is_empty()) {
                     (true, false) => {
                         return Err(usage_error(
                             "commit mode accepts explicit paths or --all, not both",
                         ));
                     }
                     (true, true) => CommitSelection::All,
-                    (false, _) => CommitSelection::Paths(cli.paths),
+                    (false, _) => CommitSelection::Paths(paths),
                 };
 
                 Ok(Self::Commit {
@@ -213,23 +219,13 @@ impl TryFrom<Cli> for Action {
                     selection,
                 })
             }
-            (None, Some(_), None) => Err(usage_error("<scope> requires -m/--message")),
-            (None, None, None) => Err(usage_error(
-                "sync mode does not accept commit path arguments or --all",
-            )),
-            (Some(Command::Init { .. }), Some(_), _)
-            | (Some(Command::Init { .. }), None, Some(_)) => Err(usage_error(
-                "`init` does not take scope or message arguments",
-            )),
-            (Some(Command::Status), Some(_), _) | (Some(Command::Status), None, Some(_)) => Err(
-                usage_error("`status` does not take scope or message arguments"),
-            ),
-            (Some(Command::Continue), Some(_), _) | (Some(Command::Continue), None, Some(_)) => {
-                Err(usage_error(
-                    "`continue` does not take scope or message arguments",
-                ))
+            Some(Command::Unknown(args)) => {
+                let command = args.first().map(String::as_str).unwrap_or("<empty>");
+                Err(usage_error(&format!(
+                    "unknown command `{command}`; run `dotsync --help` for supported commands"
+                )))
             }
-            (None, None, Some(_)) => unreachable!("clap requires scope when message is set"),
+            None => Ok(Self::Sync { force: cli.force }),
         }
     }
 }

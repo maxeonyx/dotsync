@@ -13,7 +13,7 @@ fn top_level_help_explains_scope_and_basic_workflow() {
     for expected in [
         "A scope is a branch in the dotsync DAG",
         "plain `dotsync` syncs your current machine scope into home",
-        "dotsync <scope> -m \"message\"",
+        "dotsync commit <scope> -m \"message\"",
         "Examples:",
     ] {
         assert!(

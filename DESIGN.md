@@ -98,7 +98,7 @@ This lives on the `all` branch (since every machine needs the full graph).
 
 Plain sync is always repo -> system. The repo is the durable source of truth, and `dotsync` with no scope materializes the current machine scope into `~/`.
 
-Commits are home -> repo for selected paths only. Users and agents edit files at their real home locations, inspect `dotsync status`, then run `dotsync <scope> -m "message" -- <paths...>` to record the selected home files to the appropriate scope. After committing, dotsync cascades that scope through descendants, syncs the current machine home, and pushes.
+Commits are home -> repo for selected paths only. Users and agents edit files at their real home locations, inspect `dotsync status`, then run `dotsync commit <scope> -m "message" -- <paths...>` to record the selected home files to the appropriate scope. After committing, dotsync cascades that scope through descendants, syncs the current machine home, and pushes.
 
 If a managed home file differs from the repo outside a commit flow, that's drift. dotsync warns and shows a diff. The user (or agent) decides whether to overwrite the system file or investigate.
 
@@ -140,11 +140,11 @@ One risk: jj is newer and less well-known than git. AI agents may not have stron
 
 There is one command: `dotsync`.
 
-**`dotsync`** (no arguments): Sync repo -> system. It does not import home edits; use `dotsync status` and `dotsync <scope> -m "message" -- <paths...>` when home changes should be recorded.
+**`dotsync`** (no arguments): Sync repo -> system. It does not import home edits; use `dotsync status` and `dotsync commit <scope> -m "message" -- <paths...>` when home changes should be recorded.
 
-**`dotsync <scope> -m "message" <path>...`**: Commit the selected home-relative file/directory paths to the named scope branch, merge cascade through all descendant scopes, sync repo -> system, push to remote.
+**`dotsync commit <scope> -m "message" <path>...`**: Commit the selected home-relative file/directory paths to the named scope branch, merge cascade through all descendant scopes, sync repo -> system, push to remote.
 
-**`dotsync <scope> --all -m "message"`**: Commit every changed managed file for that scope. It does not scan all of home for unrelated new files; new paths are intentionally opted into with explicit path arguments.
+**`dotsync commit <scope> --all -m "message"`**: Commit every changed managed file for that scope. It does not scan all of home for unrelated new files; new paths are intentionally opted into with explicit path arguments.
 
 Both forms diff system files against the repo before syncing. If any system file has drifted from what the repo expects, dotsync stops, shows the diff, and warns. `--force` still shows the diffs but proceeds anyway — so you always see what's being overwritten, even if you've chosen not to stop for it.
 
@@ -160,7 +160,7 @@ dotsync includes an agent skill (`dotfiles`) that triggers whenever any home dir
 2. Run `dotsync status` to see changed managed files
 3. Read `.config/dotsync/config.toml` from the `all` scope to see available scopes — the config file contains comments explaining what each scope is for and guiding scope selection
 4. Choose the root-est appropriate scope for the change
-5. Run `dotsync <scope> -m "description" -- <paths...>` when done
+5. Run `dotsync commit <scope> -m "description" -- <paths...>` when done
 
 This is the mechanism that makes the system agent-friendly. The tool itself is simple plumbing — the skill is what makes agents use the plumbing correctly. The comments in the config file are load-bearing: they're how agents learn "hyprland stuff goes on `hyprland`, not `linux`."
 

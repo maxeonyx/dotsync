@@ -8,7 +8,7 @@ The fundamental model change: eliminate the user-visible staging area (`~/dotfil
 
 1. **No workspace/working copy.** jj-lib supports operating on a bare repo — read/write trees programmatically, never check out to disk. Store the repo at `~/.local/share/dotsync/repo/`.
 
-2. **Edit-in-place workflow.** The source of truth flips: home directory is where edits happen, dotsync imports them into the repo. `dotsync <scope> -m "msg" -- <paths>` commits selected home paths to a scope.
+2. **Edit-in-place workflow.** The source of truth flips: home directory is where edits happen, dotsync imports them into the repo. `dotsync commit <scope> -m "msg" -- <paths>` commits selected home paths to a scope.
 
 3. **One-file-one-scope ownership (default).** Each managed file path is owned by exactly one scope. Enforced at commit time — reject if a path belongs to a different scope. Drop-in convention for machine-specific overrides (main config in parent scope, drop-in files in child scope). Escape hatch for monolithic files that can't be split.
 
@@ -34,7 +34,7 @@ The fundamental model change: eliminate the user-visible staging area (`~/dotfil
 
 4 passing black-box CLI tests. Ratchet clean.
 
-Working: `dotsync init`, `dotsync` (sync), `dotsync <scope> -m "msg"` (commit + cascade + sync + push), `--force`, `--output json` on all commands, drift detection, scope isolation, multi-machine via shared remote, merge cascade with conflict pause/resume via `dotsync continue`, full DAG traversal (all machines), return to home branch after cascade, structured JSON error/usage/drift/conflict output, rich human conflict messages with ASCII DAG rendering.
+Working: `dotsync init`, `dotsync` (sync), `dotsync commit <scope> -m "msg"` (commit + cascade + sync + push), `--force`, `--output json` on all commands, drift detection, scope isolation, multi-machine via shared remote, merge cascade with conflict pause/resume via `dotsync continue`, full DAG traversal (all machines), return to home branch after cascade, structured JSON error/usage/drift/conflict output, rich human conflict messages with ASCII DAG rendering.
 
 ### Code structure
 - `src/cascade.rs`: cascade domain model (`CascadeOutcome::{Completed, Paused}`), traversal, merge execution, `PersistedCascadeState`, `CascadeStateStore`, `ScopeDagRenderer` for human conflict messages
