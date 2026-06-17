@@ -1,7 +1,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
-    commit_and_sync, continue_after_conflict, init, status, sync, ChangeStatus, CommandOutcome,
-    CommitOptions, CommitSelection, DotsyncError, DotsyncPaths, FileDrift, SyncOptions,
+    commit_and_sync, continue_after_conflict, diff_home, init, list_scope_tree, list_scopes,
+    read_config_at_scope, read_scope_file, status, sync, ChangeStatus, CommandOutcome,
+    CommitOptions, CommitSelection, DiffReport, DotsyncError, DotsyncPaths, FileDrift,
+    ScopeListReport, SyncOptions, TreeReport,
 };
 mod render;
 use serde_json::json;
@@ -80,6 +82,18 @@ enum Action {
     Status {
         force: bool,
     },
+    Diff,
+    Scopes,
+    Config {
+        scope: String,
+    },
+    Tree {
+        scope: String,
+    },
+    File {
+        scope: String,
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -109,6 +123,28 @@ enum Command {
     Continue,
     /// Show managed files that differ from the repo
     Status,
+    /// Show line-oriented diffs for managed home files that differ from the repo
+    Diff,
+    /// Show configured scopes and their parents
+    Scopes,
+    /// Print the dotsync config file as it exists on a scope
+    Config {
+        /// Scope to inspect
+        scope: String,
+    },
+    /// List managed files visible on a scope
+    Tree {
+        /// Scope to inspect
+        scope: String,
+    },
+    /// Print a managed file as it exists on a scope
+    File {
+        /// Scope to inspect
+        scope: String,
+
+        /// Repo-relative file path to print
+        path: PathBuf,
+    },
     #[command(external_subcommand)]
     Unknown(Vec<String>),
 }
@@ -118,6 +154,8 @@ struct SuccessOutput {
     json: serde_json::Value,
     human: String,
     notes: Vec<String>,
+    stdout: Option<String>,
+    exit_code: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -196,6 +234,11 @@ impl TryFrom<Cli> for Action {
             Some(Command::Init { remote_url }) => Ok(Self::Init { remote_url }),
             Some(Command::Continue) => Ok(Self::Continue { force: cli.force }),
             Some(Command::Status) => Ok(Self::Status { force: false }),
+            Some(Command::Diff) => Ok(Self::Diff),
+            Some(Command::Scopes) => Ok(Self::Scopes),
+            Some(Command::Config { scope }) => Ok(Self::Config { scope }),
+            Some(Command::Tree { scope }) => Ok(Self::Tree { scope }),
+            Some(Command::File { scope, path }) => Ok(Self::File { scope, path }),
             Some(Command::Commit {
                 scope,
                 message,
@@ -242,6 +285,11 @@ async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
         Action::Init { remote_url } => run_init(remote_url).await,
         Action::Continue { force } => run_continue(force).await,
         Action::Status { force } => run_status(force).await,
+        Action::Diff => run_diff().await,
+        Action::Scopes => run_scopes().await,
+        Action::Config { scope } => run_config(scope).await,
+        Action::Tree { scope } => run_tree(scope).await,
+        Action::File { scope, path } => run_file(scope, path).await,
     }
 }
 
@@ -268,6 +316,8 @@ async fn run_init(remote_url: String) -> Result<CliOutput, DotsyncError> {
             report.sync.synced_paths.len()
         ),
         notes: Vec::new(),
+        stdout: None,
+        exit_code: 0,
     }))
 }
 
@@ -287,6 +337,8 @@ async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
                 report.sync.synced_paths.len()
             ),
             notes: render::success_notes_for_drifts(&report.sync.drifts),
+            stdout: None,
+            exit_code: 0,
         })),
     }
 }
@@ -308,6 +360,8 @@ async fn run_sync(force: bool) -> Result<CliOutput, DotsyncError> {
             report.current_scope
         ),
         notes: render::success_notes_for_drifts(&report.drifts),
+        stdout: None,
+        exit_code: 0,
     }))
 }
 
@@ -338,7 +392,93 @@ async fn run_status(_force: bool) -> Result<CliOutput, DotsyncError> {
         }),
         human: render_status_human(&report),
         notes: Vec::new(),
+        stdout: None,
+        exit_code: 0,
     }))
+}
+
+async fn run_diff() -> Result<CliOutput, DotsyncError> {
+    let paths = discover_paths()?;
+    let report = diff_home(&paths).await?;
+    let changed_count = report.drifts.len();
+    let drifts = report
+        .drifts
+        .iter()
+        .map(render::render_drift_json)
+        .collect::<Vec<_>>();
+    let exit_code = if report.drifts.is_empty() { 0 } else { 1 };
+
+    Ok(CliOutput::Success(SuccessOutput {
+        json: json!({
+            "status": "ok",
+            "command": "diff",
+            "machine_scope": report.machine_scope,
+            "changed_count": changed_count,
+            "drifts": drifts,
+        }),
+        human: render_diff_human(&report),
+        notes: Vec::new(),
+        stdout: None,
+        exit_code,
+    }))
+}
+
+async fn run_scopes() -> Result<CliOutput, DotsyncError> {
+    let paths = discover_paths()?;
+    let report = list_scopes(&paths).await?;
+    Ok(CliOutput::Success(SuccessOutput {
+        json: json!({
+            "status": "ok",
+            "command": "scopes",
+            "scopes": report.scopes.iter().map(|scope| json!({
+                "name": scope.name,
+                "parents": scope.parents,
+            })).collect::<Vec<_>>(),
+        }),
+        human: render_scopes_human(&report),
+        notes: Vec::new(),
+        stdout: None,
+        exit_code: 0,
+    }))
+}
+
+async fn run_config(scope: String) -> Result<CliOutput, DotsyncError> {
+    let paths = discover_paths()?;
+    let report = read_config_at_scope(&paths, &scope).await?;
+    Ok(file_success_output(
+        "config",
+        &report.scope,
+        &report.path,
+        report.contents,
+    ))
+}
+
+async fn run_tree(scope: String) -> Result<CliOutput, DotsyncError> {
+    let paths = discover_paths()?;
+    let report = list_scope_tree(&paths, &scope).await?;
+    Ok(CliOutput::Success(SuccessOutput {
+        json: json!({
+            "status": "ok",
+            "command": "tree",
+            "scope": report.scope,
+            "files": report.paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
+        }),
+        human: String::new(),
+        notes: Vec::new(),
+        stdout: Some(render_tree_stdout(&report)),
+        exit_code: 0,
+    }))
+}
+
+async fn run_file(scope: String, path: PathBuf) -> Result<CliOutput, DotsyncError> {
+    let paths = discover_paths()?;
+    let report = read_scope_file(&paths, &scope, &path).await?;
+    Ok(file_success_output(
+        "file",
+        &report.scope,
+        &report.path,
+        report.contents,
+    ))
 }
 
 async fn run_commit(
@@ -373,6 +513,8 @@ async fn run_commit(
                 report.sync.synced_paths.len()
             ),
             notes: render::success_notes_for_drifts(&report.sync.drifts),
+            stdout: None,
+            exit_code: 0,
         })),
     }
 }
@@ -414,6 +556,68 @@ fn render_status_human(report: &dotsync::StatusReport) -> String {
     lines.join("\n")
 }
 
+fn render_diff_human(report: &DiffReport) -> String {
+    if report.drifts.is_empty() {
+        return format!("dotsync: no changes for {}", report.machine_scope);
+    }
+
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "dotsync: {} drifted managed file(s) for {}",
+        report.drifts.len(),
+        report.machine_scope
+    ));
+    lines.extend(render::render_drifts_human(&report.drifts));
+    lines.join("\n")
+}
+
+fn render_scopes_human(report: &ScopeListReport) -> String {
+    let mut lines = Vec::with_capacity(report.scopes.len() + 1);
+    lines.push("dotsync: configured scopes".to_string());
+    lines.extend(report.scopes.iter().map(|scope| {
+        if scope.parents.is_empty() {
+            scope.name.clone()
+        } else {
+            format!("{} <- {}", scope.name, scope.parents.join(", "))
+        }
+    }));
+    lines.join("\n")
+}
+
+fn render_tree_stdout(report: &TreeReport) -> String {
+    let mut lines = report
+        .paths
+        .iter()
+        .map(|path| render::display_path(path))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !lines.is_empty() {
+        lines.push('\n');
+    }
+    lines
+}
+
+fn file_success_output(
+    command: &str,
+    scope: &str,
+    path: &std::path::Path,
+    contents: Vec<u8>,
+) -> CliOutput {
+    CliOutput::Success(SuccessOutput {
+        json: json!({
+            "status": "ok",
+            "command": command,
+            "scope": scope,
+            "path": render::display_path(path),
+            "contents": String::from_utf8_lossy(&contents),
+        }),
+        human: String::new(),
+        notes: Vec::new(),
+        stdout: Some(String::from_utf8_lossy(&contents).into_owned()),
+        exit_code: 0,
+    })
+}
+
 fn render_change_status_human(status: ChangeStatus) -> &'static str {
     match status {
         ChangeStatus::Modified => "M",
@@ -434,11 +638,14 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
             for note in success.notes {
                 eprintln!("{note}");
             }
-            eprintln!("{}", success.human);
             if matches!(output_format, OutputFormat::Json) {
                 println!("{}", success.json);
+            } else if let Some(stdout) = success.stdout {
+                print!("{stdout}");
+            } else {
+                eprintln!("{}", success.human);
             }
-            0
+            success.exit_code
         }
         CliOutput::Error(error) => {
             let exit_code = if matches!(
