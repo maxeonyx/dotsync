@@ -1,6 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use jj_lib::commit::Commit;
+use jj_lib::object_id::ObjectId;
 use jj_lib::op_store::RefTarget;
 use jj_lib::ref_name::RefNameBuf;
 use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo as _};
@@ -86,6 +87,13 @@ impl ScopeHeads {
 
     pub(crate) fn update(&mut self, scope: impl Into<String>, commit: Commit) {
         self.heads.insert(scope.into(), commit);
+    }
+
+    pub(crate) fn commit_ids_by_scope(&self) -> BTreeMap<String, String> {
+        self.heads
+            .iter()
+            .map(|(scope, commit)| (scope.clone(), commit.id().hex()))
+            .collect()
     }
 }
 

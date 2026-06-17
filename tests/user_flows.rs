@@ -829,7 +829,10 @@ fn abort_paused_cascade_restores_pre_pause_state_and_clears_pause() {
 
     assert_eq!(bookmark_revision(&machine_b, "all"), all_before_pause);
     assert_eq!(bookmark_revision(&machine_b, "linux"), linux_before_pause);
-    assert_eq!(bookmark_revision(&machine_b, "goof-b"), machine_before_pause);
+    assert_eq!(
+        bookmark_revision(&machine_b, "goof-b"),
+        machine_before_pause
+    );
     assert_eq!(
         machine_b.read_file(".config/app.conf"),
         "setting = \"linux\"\n"
@@ -838,11 +841,7 @@ fn abort_paused_cascade_restores_pre_pause_state_and_clears_pause() {
     let status = machine_b.run("dotsync status");
     assert!(status.status.success(), "{}", render_output(&status));
     let stderr = String::from_utf8_lossy(&status.stderr);
-    assert!(
-        stderr.contains("no changes"),
-        "{}",
-        render_output(&status)
-    );
+    assert!(stderr.contains("no changes"), "{}", render_output(&status));
 
     machine_b.write_file(".config/other.conf", "other = true\n");
     let commit_after_abort =

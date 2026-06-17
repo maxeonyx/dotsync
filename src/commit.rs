@@ -50,6 +50,8 @@ struct PausedCascadeState {
     conflicted_files: Vec<PathBuf>,
     remaining_steps: Vec<PausedCascadeStep>,
     description: String,
+    #[serde(default)]
+    original_scope_commit_ids: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -68,6 +70,12 @@ pub struct CommitReport {
 #[derive(Debug, Clone, Default)]
 pub struct ContinueReport {
     pub cascaded_scopes: Vec<String>,
+    pub sync: SyncReport,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AbortReport {
+    pub aborted_scope: String,
     pub sync: SyncReport,
 }
 
@@ -134,6 +142,7 @@ pub async fn commit_and_sync(
 
     let mut tx = repo.start_transaction();
     let mut scope_heads = ScopeHeads::load_existing(tx.repo_mut().base_repo(), &graph)?;
+    let original_scope_commit_ids = scope_heads.commit_ids_by_scope();
     let base_commit = scope_heads.require(&options.scope)?;
     let new_commit = if stale_selected_paths.is_empty() {
         let base_tree = base_commit.tree();
@@ -218,6 +227,7 @@ pub async fn commit_and_sync(
                         })
                         .collect(),
                     description: options.message,
+                    original_scope_commit_ids: original_scope_commit_ids.clone(),
                 },
             )?;
             return Err(DotsyncError::CascadePaused {
@@ -286,6 +296,7 @@ pub async fn commit_and_sync(
                         conflicted_files: conflicted_files.iter().map(PathBuf::from).collect(),
                         remaining_steps,
                         description: cascade_command.description,
+                        original_scope_commit_ids,
                     },
                 )?;
                 return Err(DotsyncError::CascadePaused {
@@ -835,6 +846,7 @@ pub async fn continue_after_conflict(
                     conflicted_files: conflicted_files.iter().map(PathBuf::from).collect(),
                     remaining_steps,
                     description: state.description,
+                    original_scope_commit_ids: state.original_scope_commit_ids,
                 },
             )?;
             return Err(DotsyncError::CascadePaused {
@@ -867,6 +879,47 @@ pub async fn continue_after_conflict(
     push_scope_updates(paths).await?;
     Ok(CommandOutcome::Success(ContinueReport {
         cascaded_scopes,
+        sync,
+    }))
+}
+
+pub async fn abort_paused_cascade(
+    paths: &DotsyncPaths,
+    options: SyncOptions,
+) -> Result<CommandOutcome<AbortReport>, DotsyncError> {
+    let state = load_paused_cascade_state(paths)?;
+    if state.original_scope_commit_ids.is_empty() {
+        return Err(DotsyncError::Jj {
+            message: "paused cascade state does not include an abort checkpoint; resolve the conflict and run `dotsync continue` instead".to_string(),
+        });
+    }
+
+    let repo = load_repo_direct(paths).await?;
+    let mut tx = repo.start_transaction();
+    for (scope, commit_id) in &state.original_scope_commit_ids {
+        let commit = load_commit_by_hex(tx.repo_mut(), commit_id)?;
+        tx.repo_mut().set_local_bookmark_target(
+            RefNameBuf::from(scope.as_str()).as_ref(),
+            RefTarget::normal(commit.id().clone()),
+        );
+    }
+    tx.commit("dotsync: abort cascade")
+        .await
+        .map_err(|err| DotsyncError::Jj {
+            message: format!("commit aborted cascade: {err}"),
+        })?;
+    remove_paused_cascade_state(paths)?;
+
+    let sync = crate::sync::sync_repo_to_home(
+        paths,
+        options,
+        &state.conflicted_files,
+        Some(&state.machine_scope),
+    )
+    .await?;
+
+    Ok(CommandOutcome::Success(AbortReport {
+        aborted_scope: state.paused_scope,
         sync,
     }))
 }
