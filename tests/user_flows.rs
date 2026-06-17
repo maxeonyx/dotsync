@@ -769,6 +769,64 @@ fn continue_without_pause_returns_clear_error() {
 }
 
 #[test]
+fn explicit_commit_command_adds_file_to_scope_and_syncs() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_file(".gitconfig", "[user]\nname = \"Max\"\n");
+
+    let commit_output = machine.run("dotsync commit all -m 'add gitconfig' -- .gitconfig");
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
+
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "all", ".gitconfig"),
+        "[user]\nname = \"Max\"\n"
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "mx-xps-cy", ".gitconfig"),
+        "[user]\nname = \"Max\"\n"
+    );
+    assert_eq!(machine.read_file(".gitconfig"), "[user]\nname = \"Max\"\n");
+}
+
+#[test]
+fn unknown_command_is_not_treated_as_scope_commit() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let output = machine.run("dotsync diff");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "unknown top-level command should be a usage error\n{}",
+        render_output(&output)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.to_ascii_lowercase().contains("unknown command"),
+        "{}",
+        render_output(&output)
+    );
+    assert!(
+        !stderr.contains("requires -m/--message"),
+        "unknown commands must not be parsed as scope commits\n{}",
+        render_output(&output)
+    );
+}
+
+#[test]
 fn commit_explicit_path_adds_file_to_scope_and_syncs() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
