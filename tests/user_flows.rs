@@ -1580,6 +1580,62 @@ fn commit_invalid_scope_errors() {
 }
 
 #[test]
+fn status_before_init_explains_how_to_initialize() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let status_output = machine.run("dotsync status");
+    assert_eq!(
+        status_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&status_output)
+    );
+
+    let stderr = String::from_utf8_lossy(&status_output.stderr);
+    assert!(stderr.starts_with("dotsync:"), "{}", render_output(&status_output));
+    for expected in [
+        "not initialized",
+        "~/.local/share/dotsync/repo",
+        "dotsync init <remote-url>",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "status before init missing {expected:?}:\n{}",
+            render_output(&status_output)
+        );
+    }
+}
+
+#[test]
+fn init_without_remote_explains_required_remote_url() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.run("dotsync init");
+    assert_eq!(
+        init_output.status.code(),
+        Some(2),
+        "{}",
+        render_output(&init_output)
+    );
+
+    let stderr = String::from_utf8_lossy(&init_output.stderr);
+    assert!(stderr.starts_with("dotsync:"), "{}", render_output(&init_output));
+    for expected in [
+        "init requires a remote URL",
+        "dotsync init <remote-url>",
+        "git remote that stores your dotsync repo",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "init without remote missing {expected:?}:\n{}",
+            render_output(&init_output)
+        );
+    }
+}
+
+#[test]
 fn status_shows_modified_file() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
