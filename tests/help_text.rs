@@ -48,6 +48,29 @@ fn init_help_explains_remote_url_and_setup() {
     }
 }
 
+#[test]
+fn init_help_explains_interactive_remote_prompt() {
+    let output = Command::new(env!("CARGO_BIN_EXE_dotsync"))
+        .args(["init", "--help"])
+        .output()
+        .expect("run dotsync init --help");
+
+    assert!(output.status.success(), "{}", render_output(&output));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for expected in [
+        "interactive terminal",
+        "prompts for REMOTE_URL",
+        "non-interactive usage must pass REMOTE_URL",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "init help missing {expected:?}:\n{}",
+            stdout
+        );
+    }
+}
+
 fn render_output(output: &std::process::Output) -> String {
     format!(
         "status: {:?}\nstdout:\n{}\nstderr:\n{}",
