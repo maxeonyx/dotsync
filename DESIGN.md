@@ -150,6 +150,10 @@ There is one command: `dotsync`.
 
 **`dotsync view`**: Show a read-only overview of checked-in scope and file state. With `--scope <scope>`, show the managed file tree visible on that scope. With `--file <path>`, show the scopes where that file exists. With both `--scope <scope>` and `--file <path>`, print that file as it exists on that scope.
 
+**`dotsync continue`**: Continue a paused cascade after the conflicted home files have been edited to their resolved contents.
+
+**`dotsync abort`**: Abort a paused cascade, restore scope branches to their pre-pause revisions, clear the pause marker, and sync the current machine home back to the restored repo state.
+
 Syncing and commit forms diff system files against the repo before syncing. If any system file has drifted from what the repo expects, dotsync stops, shows the diff, and warns. `--force` still shows the diffs but proceeds anyway — so you always see what's being overwritten, even if you've chosen not to stop for it.
 
 ### Why one command?

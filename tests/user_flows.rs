@@ -1003,6 +1003,156 @@ fn continue_without_pause_returns_clear_error() {
 }
 
 #[test]
+fn abort_paused_cascade_restores_pre_pause_state_and_clears_pause() {
+    let harness = TestHarness::new();
+    let machine_a = harness.machine("machine-a", "linux", "goof-a");
+    let machine_b = harness.machine("machine-b", "linux", "goof-b");
+
+    let init_a = machine_a.init();
+    assert!(init_a.status.success(), "{}", render_output(&init_a));
+    let init_b = machine_b.init();
+    assert!(init_b.status.success(), "{}", render_output(&init_b));
+    let sync_a_after_join = machine_a.run("dotsync --force");
+    assert!(
+        sync_a_after_join.status.success(),
+        "{}",
+        render_output(&sync_a_after_join)
+    );
+
+    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
+    let commit_base = machine_a.run("dotsync commit all -m 'add base config' -- .config/app.conf");
+    assert!(
+        commit_base.status.success(),
+        "{}",
+        render_output(&commit_base)
+    );
+
+    machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
+    let commit_linux =
+        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
+    assert!(
+        commit_linux.status.success(),
+        "{}",
+        render_output(&commit_linux)
+    );
+
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    let all_before_pause = bookmark_revision(&machine_b, "all");
+    let linux_before_pause = bookmark_revision(&machine_b, "linux");
+    let machine_before_pause = bookmark_revision(&machine_b, "goof-b");
+
+    machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
+    let conflict =
+        machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
+    assert_eq!(
+        conflict.status.code(),
+        Some(3),
+        "conflicting all-to-linux cascade should pause\n{}",
+        render_output(&conflict)
+    );
+
+    let aborted = machine_b.run("dotsync abort");
+    assert!(aborted.status.success(), "{}", render_output(&aborted));
+    let stderr = String::from_utf8_lossy(&aborted.stderr);
+    assert!(
+        stderr.contains("aborted cascade"),
+        "{}",
+        render_output(&aborted)
+    );
+
+    assert_eq!(bookmark_revision(&machine_b, "all"), all_before_pause);
+    assert_eq!(bookmark_revision(&machine_b, "linux"), linux_before_pause);
+    assert_eq!(
+        bookmark_revision(&machine_b, "goof-b"),
+        machine_before_pause
+    );
+    assert_eq!(
+        machine_b.read_file(".config/app.conf"),
+        "setting = \"linux\"\n"
+    );
+
+    let status = machine_b.run("dotsync status");
+    assert!(status.status.success(), "{}", render_output(&status));
+    let stderr = String::from_utf8_lossy(&status.stderr);
+    assert!(stderr.contains("no changes"), "{}", render_output(&status));
+
+    machine_b.write_file(".config/other.conf", "other = true\n");
+    let commit_after_abort =
+        machine_b.run("dotsync commit goof-b -m 'commit after abort' -- .config/other.conf");
+    assert!(
+        commit_after_abort.status.success(),
+        "{}",
+        render_output(&commit_after_abort)
+    );
+}
+
+#[test]
+fn abort_paused_cascade_restores_non_conflicting_selected_paths() {
+    let harness = TestHarness::new();
+    let machine_a = harness.machine("machine-a", "linux", "goof-a");
+    let machine_b = harness.machine("machine-b", "linux", "goof-b");
+
+    let init_a = machine_a.init();
+    assert!(init_a.status.success(), "{}", render_output(&init_a));
+    let init_b = machine_b.init();
+    assert!(init_b.status.success(), "{}", render_output(&init_b));
+    let sync_a_after_join = machine_a.run("dotsync --force");
+    assert!(
+        sync_a_after_join.status.success(),
+        "{}",
+        render_output(&sync_a_after_join)
+    );
+
+    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
+    machine_a.write_file(".config/other.conf", "other = false\n");
+    let commit_base = machine_a
+        .run("dotsync commit all -m 'add base config' -- .config/app.conf .config/other.conf");
+    assert!(
+        commit_base.status.success(),
+        "{}",
+        render_output(&commit_base)
+    );
+
+    machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
+    let commit_linux =
+        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
+    assert!(
+        commit_linux.status.success(),
+        "{}",
+        render_output(&commit_linux)
+    );
+
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+
+    machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
+    machine_b.write_file(".config/other.conf", "other = true\n");
+    let conflict = machine_b
+        .run("dotsync commit all -m 'update shared config' -- .config/app.conf .config/other.conf");
+    assert_eq!(
+        conflict.status.code(),
+        Some(3),
+        "conflicting all-to-linux cascade should pause\n{}",
+        render_output(&conflict)
+    );
+
+    let aborted = machine_b.run("dotsync abort");
+    assert!(aborted.status.success(), "{}", render_output(&aborted));
+
+    assert_eq!(
+        machine_b.read_file(".config/app.conf"),
+        "setting = \"linux\"\n"
+    );
+    assert_eq!(machine_b.read_file(".config/other.conf"), "other = false\n");
+
+    let status = machine_b.run("dotsync status");
+    assert!(status.status.success(), "{}", render_output(&status));
+    let stderr = String::from_utf8_lossy(&status.stderr);
+    assert!(stderr.contains("no changes"), "{}", render_output(&status));
+}
+
+#[test]
 fn explicit_commit_command_adds_file_to_scope_and_syncs() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");

@@ -1,8 +1,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
-    commit_and_sync, continue_after_conflict, diff_home, init, list_scope_tree, list_scopes,
-    read_scope_file, status, sync, ChangeStatus, CommandOutcome, CommitOptions, CommitSelection,
-    DiffReport, DotsyncError, DotsyncPaths, FileDrift, ScopeListReport, SyncOptions, TreeReport,
+    abort_paused_cascade, commit_and_sync, continue_after_conflict, diff_home, init,
+    list_scope_tree, list_scopes, read_scope_file, status, sync, ChangeStatus, CommandOutcome,
+    CommitOptions, CommitSelection, DiffReport, DotsyncError, DotsyncPaths, FileDrift,
+    ScopeListReport, SyncOptions, TreeReport,
 };
 mod render;
 use serde_json::json;
@@ -19,7 +20,8 @@ A scope is a branch in the dotsync DAG. Shared config lives on ancestor scopes s
 Basic workflow:
   - plain `dotsync` syncs your current machine scope into home
   - edit files in home, then run `dotsync commit <scope> -m \"message\" <path>...` to record the change on the right scope
-  - run `dotsync continue` if a cascade pauses for conflicts";
+  - run `dotsync continue` if a cascade pauses for conflicts
+  - run `dotsync abort` to discard a paused cascade";
 
 const TOP_LEVEL_AFTER_HELP: &str = "Examples:
   $ dotsync
@@ -33,6 +35,7 @@ const INIT_LONG_ABOUT: &str = "REMOTE_URL is the git remote that stores your dot
 `dotsync init` clones the repo into ~/.local/share/dotsync/repo, detects this machine, sets up any missing scope branches for its OS and machine, and syncs the resulting machine scope into home.";
 
 const CONTINUE_ABOUT: &str = "Continue a paused merge cascade after resolving conflicts";
+const ABORT_ABOUT: &str = "Abort a paused merge cascade and restore the pre-pause state";
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum OutputFormat {
@@ -79,6 +82,9 @@ enum Action {
     Continue {
         force: bool,
     },
+    Abort {
+        force: bool,
+    },
     Status {
         force: bool,
     },
@@ -114,6 +120,8 @@ enum Command {
     },
     #[command(about = CONTINUE_ABOUT)]
     Continue,
+    #[command(about = ABORT_ABOUT)]
+    Abort,
     /// Show managed files that differ from the repo
     Status,
     /// Show line-oriented diffs for managed home files that differ from the repo
@@ -216,6 +224,7 @@ impl TryFrom<Cli> for Action {
         match cli.command {
             Some(Command::Init { remote_url }) => Ok(Self::Init { remote_url }),
             Some(Command::Continue) => Ok(Self::Continue { force: cli.force }),
+            Some(Command::Abort) => Ok(Self::Abort { force: cli.force }),
             Some(Command::Status) => Ok(Self::Status { force: false }),
             Some(Command::Diff) => Ok(Self::Diff),
             Some(Command::View { scope, file }) => Ok(Self::View { scope, file }),
@@ -264,6 +273,7 @@ async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
         } => run_commit(scope, message, force, selection).await,
         Action::Init { remote_url } => run_init(remote_url).await,
         Action::Continue { force } => run_continue(force).await,
+        Action::Abort { force } => run_abort(force).await,
         Action::Status { force } => run_status(force).await,
         Action::Diff => run_diff().await,
         Action::View { scope, file } => run_view(scope, file).await,
@@ -311,6 +321,30 @@ async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
             }),
             human: format!(
                 "dotsync: resumed cascade and synced {} file(s)",
+                report.sync.synced_paths.len()
+            ),
+            notes: render::success_notes_for_drifts(&report.sync.drifts),
+            stdout: None,
+            exit_code: 0,
+        })),
+    }
+}
+
+async fn run_abort(force: bool) -> Result<CliOutput, DotsyncError> {
+    let paths = discover_paths()?;
+    match abort_paused_cascade(&paths, SyncOptions { force }).await? {
+        CommandOutcome::Success(report) => Ok(CliOutput::Success(SuccessOutput {
+            json: json!({
+                "status": "ok",
+                "command": "abort",
+                "aborted_scope": report.aborted_scope,
+                "scope": report.sync.current_scope,
+                "machine_scope": report.sync.current_scope,
+                "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>()
+            }),
+            human: format!(
+                "dotsync: aborted cascade at {} and synced {} file(s)",
+                report.aborted_scope,
                 report.sync.synced_paths.len()
             ),
             notes: render::success_notes_for_drifts(&report.sync.drifts),
