@@ -1580,7 +1580,7 @@ fn commit_invalid_scope_errors() {
 }
 
 #[test]
-fn status_before_init_explains_how_to_initialize() {
+fn status_before_init_matches_full_recovery_message() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
@@ -1593,26 +1593,15 @@ fn status_before_init_explains_how_to_initialize() {
     );
 
     let stderr = String::from_utf8_lossy(&status_output.stderr);
-    assert!(
-        stderr.starts_with("dotsync:"),
-        "{}",
-        render_output(&status_output)
+    let expected = format!(
+        "dotsync: not initialized\n\nWhat happened:\nDotsync could not find its hidden repo at {}.\n\nWhat to do:\n- Run `dotsync init <remote-url>` from this home directory.\n- Then rerun `dotsync status`.\n\nThe remote URL is the git remote that stores your dotsync repo.\n",
+        machine.repo_dir.display()
     );
-    for expected in [
-        "not initialized",
-        "~/.local/share/dotsync/repo",
-        "dotsync init <remote-url>",
-    ] {
-        assert!(
-            stderr.contains(expected),
-            "status before init missing {expected:?}:\n{}",
-            render_output(&status_output)
-        );
-    }
+    assert_eq!(stderr, expected, "{}", render_output(&status_output));
 }
 
 #[test]
-fn init_without_remote_explains_required_remote_url() {
+fn init_without_remote_noninteractive_matches_full_recovery_message() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
@@ -1625,22 +1614,8 @@ fn init_without_remote_explains_required_remote_url() {
     );
 
     let stderr = String::from_utf8_lossy(&init_output.stderr);
-    assert!(
-        stderr.starts_with("dotsync:"),
-        "{}",
-        render_output(&init_output)
-    );
-    for expected in [
-        "init requires a remote URL",
-        "dotsync init <remote-url>",
-        "git remote that stores your dotsync repo",
-    ] {
-        assert!(
-            stderr.contains(expected),
-            "init without remote missing {expected:?}:\n{}",
-            render_output(&init_output)
-        );
-    }
+    let expected = "dotsync: init needs the repo remote URL\n\nUsage:\n  dotsync init <remote-url>\n\nThe remote URL is the git remote that stores your dotsync repo.\n\nExample:\n  dotsync init git@github.com:maxeonyx/dotfiles.git\n";
+    assert_eq!(stderr, expected, "{}", render_output(&init_output));
 }
 
 #[test]
