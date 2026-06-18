@@ -31,7 +31,17 @@ const INIT_LONG_ABOUT: &str = "REMOTE_URL is the git remote that stores your dot
 
 `dotsync init` clones the repo into ~/.local/share/dotsync/repo, detects this machine, sets up any missing scope branches for its OS and machine, and syncs the resulting machine scope into home.
 
-When run from an interactive terminal, `dotsync init` prompts for REMOTE_URL if it is omitted; non-interactive usage must pass REMOTE_URL up front.";
+If REMOTE_URL is omitted, dotsync asks for it.";
+
+const INIT_REMOTE_URL_USAGE: &str = "init needs the repo remote URL
+
+Usage:
+  dotsync init <remote-url>
+
+The remote URL is the git remote that stores your dotsync repo.
+
+Example:
+  dotsync init git@github.com:maxeonyx/dotfiles.git";
 
 const CONTINUE_ABOUT: &str = "Continue a paused merge cascade after resolving conflicts";
 
@@ -263,9 +273,7 @@ fn init_remote_from_args(
         return Ok(InitRemote::Prompt);
     }
 
-    Err(usage_error(
-        "init requires a remote URL; run `dotsync init <remote-url>` with the git remote that stores your dotsync repo",
-    ))
+    Err(usage_error(INIT_REMOTE_URL_USAGE))
 }
 
 async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
@@ -328,9 +336,7 @@ fn prompt_init_remote_url() -> Result<String, UsageError> {
         .map_err(|err| usage_error(&format!("init could not read remote URL: {err}")))?;
     let remote_url = remote_url.trim().to_string();
     if remote_url.is_empty() {
-        return Err(usage_error(
-            "init requires a remote URL; run `dotsync init <remote-url>` with the git remote that stores your dotsync repo",
-        ));
+        return Err(usage_error(INIT_REMOTE_URL_USAGE));
     }
     Ok(remote_url)
 }
