@@ -148,13 +148,7 @@ There is one command: `dotsync`.
 
 **`dotsync diff`**: Show line-oriented diffs for managed home files that differ from the current machine scope. This is read-only and exits 1 when drift is present so scripts and agents can distinguish clean from dirty state.
 
-**`dotsync scopes`**: Show the configured scope DAG as scope names with their parent scopes.
-
-**`dotsync config <scope>`**: Print the dotsync config file as it exists on the named scope.
-
-**`dotsync tree <scope>`**: List managed files visible on the named scope.
-
-**`dotsync file <scope> <path>`**: Print a managed file as it exists on the named scope.
+**`dotsync view`**: Show a read-only overview of checked-in scope and file state. With `--scope <scope>`, show the managed file tree visible on that scope. With `--file <path>`, show the scopes where that file exists. With both `--scope <scope>` and `--file <path>`, print that file as it exists on that scope.
 
 Syncing and commit forms diff system files against the repo before syncing. If any system file has drifted from what the repo expects, dotsync stops, shows the diff, and warns. `--force` still shows the diffs but proceeds anyway — so you always see what's being overwritten, even if you've chosen not to stop for it.
 

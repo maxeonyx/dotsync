@@ -533,7 +533,7 @@ fn diff_shows_line_oriented_home_drift_without_syncing() {
 }
 
 #[test]
-fn discovery_commands_show_scopes_config_tree_and_file_contents() {
+fn view_summarizes_checked_in_scopes_and_files() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
@@ -554,73 +554,149 @@ fn discovery_commands_show_scopes_config_tree_and_file_contents() {
         render_output(&sync_output)
     );
 
-    let scopes_output = machine.run("dotsync scopes");
+    let view_output = machine.run("dotsync view");
     assert!(
-        scopes_output.status.success(),
+        view_output.status.success(),
         "{}",
-        render_output(&scopes_output)
+        render_output(&view_output)
     );
-    let scopes_stderr = String::from_utf8_lossy(&scopes_output.stderr);
+    let stdout = String::from_utf8_lossy(&view_output.stdout);
     assert!(
-        scopes_stderr.contains("all"),
+        stdout.contains("Scopes"),
         "{}",
-        render_output(&scopes_output)
-    );
-    assert!(
-        scopes_stderr.contains("linux <- all"),
-        "{}",
-        render_output(&scopes_output)
+        render_output(&view_output)
     );
     assert!(
-        scopes_stderr.contains("mx-xps-cy <- linux"),
+        stdout.contains("all"),
         "{}",
-        render_output(&scopes_output)
+        render_output(&view_output)
+    );
+    assert!(
+        stdout.contains("linux <- all"),
+        "{}",
+        render_output(&view_output)
+    );
+    assert!(
+        stdout.contains("mx-xps-cy <- linux"),
+        "{}",
+        render_output(&view_output)
+    );
+    assert!(
+        stdout.contains("Files"),
+        "{}",
+        render_output(&view_output)
+    );
+    assert!(
+        stdout.contains(".gitconfig"),
+        "{}",
+        render_output(&view_output)
+    );
+}
+
+#[test]
+fn view_scope_shows_checked_in_file_tree() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
     );
 
-    let config_output = machine.run("dotsync config all");
+    seed_remote_scope_file(&machine, "all", ".gitconfig", "[user]\nname = Shared\n");
+    merge_remote_scope_into(&machine, "all", "linux");
+    merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
+    let sync_output = machine.run("dotsync");
     assert!(
-        config_output.status.success(),
+        sync_output.status.success(),
         "{}",
-        render_output(&config_output)
-    );
-    let config_stdout = String::from_utf8_lossy(&config_output.stdout);
-    assert!(
-        config_stdout.contains("[scopes]"),
-        "{}",
-        render_output(&config_output)
-    );
-    assert!(
-        config_stdout.contains("mx-xps-cy = { parents = [\"linux\"] }"),
-        "{}",
-        render_output(&config_output)
+        render_output(&sync_output)
     );
 
-    let tree_output = machine.run("dotsync tree mx-xps-cy");
+    let view_output = machine.run("dotsync view --scope mx-xps-cy");
     assert!(
-        tree_output.status.success(),
+        view_output.status.success(),
         "{}",
-        render_output(&tree_output)
+        render_output(&view_output)
     );
-    let tree_stdout = String::from_utf8_lossy(&tree_output.stdout);
+    let stdout = String::from_utf8_lossy(&view_output.stdout);
     assert!(
-        tree_stdout.contains(".gitconfig"),
+        stdout.contains("mx-xps-cy"),
         "{}",
-        render_output(&tree_output)
+        render_output(&view_output)
     );
     assert!(
-        tree_stdout.contains(".config/dotsync/config.toml"),
+        stdout.contains(".gitconfig"),
         "{}",
-        render_output(&tree_output)
+        render_output(&view_output)
+    );
+    assert!(
+        stdout.contains(".config/dotsync/config.toml"),
+        "{}",
+        render_output(&view_output)
+    );
+}
+
+#[test]
+fn view_file_shows_scopes_and_scoped_file_content() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
     );
 
-    let file_output = machine.run("dotsync file mx-xps-cy .gitconfig");
+    seed_remote_scope_file(&machine, "all", ".gitconfig", "[user]\nname = Shared\n");
+    merge_remote_scope_into(&machine, "all", "linux");
+    merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
+    let sync_output = machine.run("dotsync");
     assert!(
-        file_output.status.success(),
+        sync_output.status.success(),
         "{}",
-        render_output(&file_output)
+        render_output(&sync_output)
+    );
+
+    let file_scopes_output = machine.run("dotsync view --file .gitconfig");
+    assert!(
+        file_scopes_output.status.success(),
+        "{}",
+        render_output(&file_scopes_output)
+    );
+    let file_scopes_stdout = String::from_utf8_lossy(&file_scopes_output.stdout);
+    assert!(
+        file_scopes_stdout.contains(".gitconfig"),
+        "{}",
+        render_output(&file_scopes_output)
+    );
+    assert!(
+        file_scopes_stdout.contains("all"),
+        "{}",
+        render_output(&file_scopes_output)
+    );
+    assert!(
+        file_scopes_stdout.contains("linux"),
+        "{}",
+        render_output(&file_scopes_output)
+    );
+    assert!(
+        file_scopes_stdout.contains("mx-xps-cy"),
+        "{}",
+        render_output(&file_scopes_output)
+    );
+
+    let file_content_output = machine.run("dotsync view --scope mx-xps-cy --file .gitconfig");
+    assert!(
+        file_content_output.status.success(),
+        "{}",
+        render_output(&file_content_output)
     );
     assert_eq!(
-        String::from_utf8_lossy(&file_output.stdout),
+        String::from_utf8_lossy(&file_content_output.stdout),
         "[user]\nname = Shared\n"
     );
 }
