@@ -36,11 +36,8 @@ fn help_examples() {
         })
         .page(&["commit"], |_fixture| {})
         .page(&["continue"], |_fixture| {})
-        .page(&["config"], |_fixture| {})
         .page(&["diff"], |_fixture| {})
-        .page(&["file"], |_fixture| {})
-        .page(&["scopes"], |_fixture| {})
         .page(&["status"], |_fixture| {})
-        .page(&["tree"], |_fixture| {})
+        .page(&["view"], |_fixture| {})
         .run();
 }

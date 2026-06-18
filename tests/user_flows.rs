@@ -561,16 +561,8 @@ fn view_summarizes_checked_in_scopes_and_files() {
         render_output(&view_output)
     );
     let stdout = String::from_utf8_lossy(&view_output.stdout);
-    assert!(
-        stdout.contains("Scopes"),
-        "{}",
-        render_output(&view_output)
-    );
-    assert!(
-        stdout.contains("all"),
-        "{}",
-        render_output(&view_output)
-    );
+    assert!(stdout.contains("Scopes"), "{}", render_output(&view_output));
+    assert!(stdout.contains("all"), "{}", render_output(&view_output));
     assert!(
         stdout.contains("linux <- all"),
         "{}",
@@ -581,11 +573,7 @@ fn view_summarizes_checked_in_scopes_and_files() {
         "{}",
         render_output(&view_output)
     );
-    assert!(
-        stdout.contains("Files"),
-        "{}",
-        render_output(&view_output)
-    );
+    assert!(stdout.contains("Files"), "{}", render_output(&view_output));
     assert!(
         stdout.contains(".gitconfig"),
         "{}",
