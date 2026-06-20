@@ -69,7 +69,7 @@ pub enum DotsyncError {
     NoPausedCascade,
     #[error("repo already exists at {path}")]
     RepoAlreadyExists { path: PathBuf },
-    #[error("not initialized; expected dotsync repo at {path}")]
+    #[error("not initialized")]
     NotInitialized { path: PathBuf },
     #[error("unable to determine machine hostname")]
     MissingHostname,
@@ -110,7 +110,15 @@ impl DotsyncError {
             }
             DotsyncError::NoPausedCascade => basic_error_report("no_paused_cascade", self),
             DotsyncError::RepoAlreadyExists { .. } => basic_error_report("repo_exists", self),
-            DotsyncError::NotInitialized { .. } => basic_error_report("not_initialized", self),
+            DotsyncError::NotInitialized { path } => ErrorReport {
+                code: "not_initialized",
+                message: format!(
+                    "Dotsync could not find its hidden repo at {}. Run `dotsync init <remote-url>` from this home directory, then rerun `dotsync status`.",
+                    path.display()
+                ),
+                drifts: Vec::new(),
+                current_state: error_current_state(self),
+            },
             DotsyncError::MissingHostname => basic_error_report("missing_hostname", self),
             DotsyncError::Io { .. } => basic_error_report("io", self),
             DotsyncError::Jj { .. } => basic_error_report("jj", self),
