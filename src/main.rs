@@ -610,29 +610,34 @@ async fn run_view_file_scopes(
 }
 
 fn render_view_overview_stdout(report: &ScopeListReport, files: &BTreeSet<PathBuf>) -> String {
-    let mut lines = Vec::new();
-    lines.push("Scopes".to_string());
-    lines.extend(report.scopes.iter().map(render_scope_line));
-    lines.push(String::new());
-    lines.push("Files".to_string());
-    lines.extend(files.iter().map(|path| render::display_path(path)));
-    lines.push(String::new());
-    lines.join("\n")
+    render_lines(
+        std::iter::once("Scopes".to_string())
+            .chain(report.scopes.iter().map(render_scope_line))
+            .chain([String::new(), "Files".to_string()])
+            .chain(files.iter().map(|path| render::display_path(path))),
+    )
 }
 
 fn render_view_scope_stdout(report: &TreeReport) -> String {
-    let mut lines = vec![format!("Scope {}", report.scope)];
-    lines.extend(report.paths.iter().map(|path| render::display_path(path)));
-    lines.push(String::new());
-    lines.join("\n")
+    render_lines(
+        std::iter::once(format!("Scope {}", report.scope))
+            .chain(report.paths.iter().map(|path| render::display_path(path))),
+    )
 }
 
 fn render_view_file_scopes_stdout(path: &std::path::Path, scopes: &[String]) -> String {
-    let mut lines = vec![
-        format!("File {}", render::display_path(path)),
-        "Scopes".to_string(),
-    ];
-    lines.extend(scopes.iter().cloned());
+    render_lines(
+        [
+            format!("File {}", render::display_path(path)),
+            "Scopes".to_string(),
+        ]
+        .into_iter()
+        .chain(scopes.iter().cloned()),
+    )
+}
+
+fn render_lines(lines: impl IntoIterator<Item = String>) -> String {
+    let mut lines = lines.into_iter().collect::<Vec<_>>();
     lines.push(String::new());
     lines.join("\n")
 }
