@@ -385,6 +385,24 @@ fn git_push(dir: &Path, branch: &str) {
     assert!(push.status.success(), "{}", render_output(&push));
 }
 
+fn assert_stdout_snapshot(output: &Output, expected: &str) {
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        expected,
+        "{}",
+        render_output(output)
+    );
+}
+
+fn assert_stderr_snapshot(output: &Output, expected: &str) {
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        expected,
+        "{}",
+        render_output(output)
+    );
+}
+
 #[test]
 fn init_creates_no_visible_git_directory() {
     let harness = TestHarness::new();
@@ -442,19 +460,35 @@ fn drift_detected_human_error_stands_alone() {
         render_output(&sync_output)
     );
 
-    let stderr = String::from_utf8_lossy(&sync_output.stderr);
-    assert_standalone_error(
-        &stderr,
-        &[
-            "drift",
-            "repo is the source of truth",
-            "expects managed files in your home directory to already match the repo",
-            "Drifted files are listed below with diffs.",
-            "stopped before overwriting",
-            "--force",
-            ".gitconfig",
-        ],
+    assert_stderr_snapshot(
         &sync_output,
+        r#"dotsync: drift detected
+
+What dotsync does:
+Dotsync keeps its hidden repo as the source of truth for your home-directory config: the repo is the source of truth, and dotsync syncs committed repo state into the live system.
+
+This flow:
+This sync flow compares managed files in your home directory against the repo version for this machine scope before copying anything.
+
+Expected:
+This flow expects managed files in your home directory to already match the repo, unless you intentionally choose to overwrite drift.
+
+Current state found:
+Drifted files are listed below with diffs.
+
+Why dotsync stopped:
+Dotsync stopped before overwriting local drift so you can inspect what would be replaced.
+
+Correct flow:
+- If the repo is correct, rerun with `dotsync --force` to overwrite the drift after reviewing the diffs.
+- If the live file is the change you wanted, run `dotsync status`, then commit the intended path with `dotsync commit <scope> -m "message" -- <path>`.
+- .gitconfig
+--- repo
++++ system
+ [user]
+-name = "Repo"
++name = "Drifted"
+"#,
     );
 }
 
@@ -497,41 +531,17 @@ fn diff_shows_line_oriented_home_drift_without_syncing() {
         machine.read_file(".config/app.conf"),
         "line one\nchanged two\n"
     );
-    let stderr = String::from_utf8_lossy(&diff_output.stderr);
-    assert!(
-        stderr.contains("dotsync: 1 drifted managed file(s)"),
-        "{}",
-        render_output(&diff_output)
-    );
-    assert!(
-        stderr.contains("- .config/app.conf"),
-        "{}",
-        render_output(&diff_output)
-    );
-    assert!(
-        stderr.contains("--- repo"),
-        "{}",
-        render_output(&diff_output)
-    );
-    assert!(
-        stderr.contains("+++ system"),
-        "{}",
-        render_output(&diff_output)
-    );
-    assert!(
-        stderr.contains(" line one"),
-        "{}",
-        render_output(&diff_output)
-    );
-    assert!(
-        stderr.contains("-line two"),
-        "{}",
-        render_output(&diff_output)
-    );
-    assert!(
-        stderr.contains("+changed two"),
-        "{}",
-        render_output(&diff_output)
+    assert_stderr_snapshot(
+        &diff_output,
+        "\
+dotsync: 1 drifted managed file(s) for mx-xps-cy
+- .config/app.conf
+--- repo
++++ system
+ line one
+-line two
++changed two
+",
     );
 }
 
@@ -563,9 +573,18 @@ fn view_summarizes_checked_in_scopes_and_files() {
         "{}",
         render_output(&view_output)
     );
-    assert_eq!(
-        String::from_utf8_lossy(&view_output.stdout),
-        "Scopes\nall\nlinux <- all\nmx-xps-cy <- linux\n\nFiles\n.config/dotsync/config.toml\n.gitconfig\n"
+    assert_stdout_snapshot(
+        &view_output,
+        "\
+Scopes
+all
+linux <- all
+mx-xps-cy <- linux
+
+Files
+.config/dotsync/config.toml
+.gitconfig
+",
     );
 }
 
@@ -597,9 +616,13 @@ fn view_scope_shows_checked_in_file_tree() {
         "{}",
         render_output(&view_output)
     );
-    assert_eq!(
-        String::from_utf8_lossy(&view_output.stdout),
-        "Scope mx-xps-cy\n.config/dotsync/config.toml\n.gitconfig\n"
+    assert_stdout_snapshot(
+        &view_output,
+        "\
+Scope mx-xps-cy
+.config/dotsync/config.toml
+.gitconfig
+",
     );
 }
 
@@ -631,9 +654,15 @@ fn view_file_shows_scopes_and_scoped_file_content() {
         "{}",
         render_output(&file_scopes_output)
     );
-    assert_eq!(
-        String::from_utf8_lossy(&file_scopes_output.stdout),
-        "File .gitconfig\nScopes\nall\nlinux\nmx-xps-cy\n"
+    assert_stdout_snapshot(
+        &file_scopes_output,
+        "\
+File .gitconfig
+Scopes
+all
+linux
+mx-xps-cy
+",
     );
 
     let file_content_output = machine.run("dotsync view --scope mx-xps-cy --file .gitconfig");
@@ -642,10 +671,7 @@ fn view_file_shows_scopes_and_scoped_file_content() {
         "{}",
         render_output(&file_content_output)
     );
-    assert_eq!(
-        String::from_utf8_lossy(&file_content_output.stdout),
-        "[user]\nname = Shared\n"
-    );
+    assert_stdout_snapshot(&file_content_output, "[user]\nname = Shared\n");
 }
 
 #[test]
@@ -762,12 +788,32 @@ fn invalid_state_file_returns_clear_error() {
         "sync should fail when the sync state file is corrupt\n{}",
         render_output(&sync_output)
     );
-    let stderr = String::from_utf8_lossy(&sync_output.stderr);
-    assert!(
-        stderr.contains("sync state") || stderr.contains("state") || stderr.contains("parse"),
-        "sync should report a clear sync state error\n{}",
-        render_output(&sync_output)
+    let expected = format!(
+        "\
+dotsync: invalid sync state
+
+What dotsync does:
+Dotsync keeps the repo as the source of truth and uses a local sync-state file to remember which machine scope was last synced here and which revision that sync used.
+
+This flow:
+This sync flow reads that local state to know which prior managed files may need removal and which machine scope should be treated as authoritative for this home.
+
+Expected:
+It expects that state file, if present, to be valid and readable; it expects that state file, if present, to be valid.
+
+Current state found:
+sync state error at {}: failed to parse sync state: expected ident at line 1 column 2
+
+Why dotsync stopped:
+Dotsync stopped because it cannot safely decide what prior sync state to trust.
+
+Correct flow:
+- fix or delete the bad sync-state file and rerun the command.
+- After that, let dotsync recreate valid sync state from a successful sync.
+",
+        machine.sync_state_path().display()
     );
+    assert_stderr_snapshot(&sync_output, &expected);
 }
 
 #[test]
@@ -792,19 +838,32 @@ fn invalid_sync_state_human_error_stands_alone() {
         render_output(&sync_output)
     );
 
-    let stderr = String::from_utf8_lossy(&sync_output.stderr);
-    assert_standalone_error(
-        &stderr,
-        &[
-            "invalid sync state",
-            "uses a local sync-state file to remember which machine scope was last synced",
-            "expects that state file, if present, to be valid",
-            "failed to parse sync state",
-            "cannot safely decide what prior sync state to trust",
-            "fix or delete the bad sync-state file",
-        ],
-        &sync_output,
+    let expected = format!(
+        "\
+dotsync: invalid sync state
+
+What dotsync does:
+Dotsync keeps the repo as the source of truth and uses a local sync-state file to remember which machine scope was last synced here and which revision that sync used.
+
+This flow:
+This sync flow reads that local state to know which prior managed files may need removal and which machine scope should be treated as authoritative for this home.
+
+Expected:
+It expects that state file, if present, to be valid and readable; it expects that state file, if present, to be valid.
+
+Current state found:
+sync state error at {}: failed to parse sync state: expected ident at line 1 column 2
+
+Why dotsync stopped:
+Dotsync stopped because it cannot safely decide what prior sync state to trust.
+
+Correct flow:
+- fix or delete the bad sync-state file and rerun the command.
+- After that, let dotsync recreate valid sync state from a successful sync.
+",
+        machine.sync_state_path().display()
     );
+    assert_stderr_snapshot(&sync_output, &expected);
 }
 
 #[test]
@@ -926,11 +985,9 @@ fn v03_commit_returns_not_implemented() {
         "scoped commit should return a normal not-implemented error in v0.3 task 1\n{}",
         render_output(&commit_output)
     );
-    let stderr = String::from_utf8_lossy(&commit_output.stderr);
-    assert!(
-        stderr.to_ascii_lowercase().contains("not implemented"),
-        "scoped commit should report not implemented clearly\n{}",
-        render_output(&commit_output)
+    assert_stderr_snapshot(
+        &commit_output,
+        "dotsync: not implemented: scoped commit is not available until home-diff commit flow lands\n"
     );
 }
 
@@ -953,12 +1010,7 @@ fn continue_without_pause_returns_clear_error() {
         "continue without a paused cascade should return a normal command error\n{}",
         render_output(&continue_output)
     );
-    let stderr = String::from_utf8_lossy(&continue_output.stderr);
-    assert!(
-        stderr.to_ascii_lowercase().contains("no paused cascade"),
-        "continue should report that no cascade is paused\n{}",
-        render_output(&continue_output)
-    );
+    assert_stderr_snapshot(&continue_output, "dotsync: no paused cascade to continue\n");
 }
 
 #[test]
@@ -1013,11 +1065,9 @@ fn abort_paused_cascade_restores_pre_pause_state_and_clears_pause() {
 
     let aborted = machine_b.run("dotsync abort");
     assert!(aborted.status.success(), "{}", render_output(&aborted));
-    let stderr = String::from_utf8_lossy(&aborted.stderr);
-    assert!(
-        stderr.contains("aborted cascade"),
-        "{}",
-        render_output(&aborted)
+    assert_stderr_snapshot(
+        &aborted,
+        "dotsync: aborted cascade at linux and synced 2 file(s)\n",
     );
 
     assert_eq!(bookmark_revision(&machine_b, "all"), all_before_pause);
@@ -1033,8 +1083,7 @@ fn abort_paused_cascade_restores_pre_pause_state_and_clears_pause() {
 
     let status = machine_b.run("dotsync status");
     assert!(status.status.success(), "{}", render_output(&status));
-    let stderr = String::from_utf8_lossy(&status.stderr);
-    assert!(stderr.contains("no changes"), "{}", render_output(&status));
+    assert_stderr_snapshot(&status, "dotsync: no changes for goof-b\n");
 
     machine_b.write_file(".config/other.conf", "other = true\n");
     let commit_after_abort =
@@ -1107,8 +1156,7 @@ fn abort_paused_cascade_restores_non_conflicting_selected_paths() {
 
     let status = machine_b.run("dotsync status");
     assert!(status.status.success(), "{}", render_output(&status));
-    let stderr = String::from_utf8_lossy(&status.stderr);
-    assert!(stderr.contains("no changes"), "{}", render_output(&status));
+    assert_stderr_snapshot(&status, "dotsync: no changes for goof-b\n");
 }
 
 #[test]
@@ -1156,16 +1204,9 @@ fn unknown_command_is_not_treated_as_scope_commit() {
         "unknown top-level command should be a usage error\n{}",
         render_output(&output)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.to_ascii_lowercase().contains("unknown command"),
-        "{}",
-        render_output(&output)
-    );
-    assert!(
-        !stderr.contains("requires -m/--message"),
-        "unknown commands must not be parsed as scope commits\n{}",
-        render_output(&output)
+    assert_stderr_snapshot(
+        &output,
+        "dotsync: unknown command `nonesuch`; run `dotsync --help` for supported commands\n",
     );
 }
 
@@ -1485,13 +1526,31 @@ fn concurrent_same_scope_file_edits_require_resolution() {
         "concurrent same-scope edit should require conflict resolution\n{}",
         render_output(&conflict)
     );
-    let stderr = String::from_utf8_lossy(&conflict.stderr);
-    assert!(stderr.contains("conflict"), "{}", render_output(&conflict));
-    assert!(stderr.contains("all"), "{}", render_output(&conflict));
-    assert!(
-        stderr.contains(".config/shared.conf"),
-        "{}",
-        render_output(&conflict)
+    assert_stderr_snapshot(
+        &conflict,
+        r#"dotsync: cascade paused
+
+What dotsync does:
+Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config.
+
+This flow:
+This commit flow was merging the scoped change through the scope DAG and reached a branch where the same file had incompatible edits.
+
+Expected:
+It expects you to resolve the conflicted file in home, then run `dotsync continue` to create the merge commit and resume the cascade.
+
+Current state found:
+paused scope: all
+
+Why dotsync stopped:
+cascade paused at scope `all` with conflicts in .config/shared.conf
+
+Correct flow:
+- edit each conflicted file at its real path in home and keep the desired final contents.
+- run `dotsync continue` from the same machine to finish cascading and syncing.
+- or run `dotsync abort` from the same machine to discard the paused cascade and restore the pre-pause state.
+- do not run another dotsync commit while the cascade is paused.
+"#,
     );
     assert_eq!(
         read_bookmark_file_contents(&machine_b, "all", ".config/shared.conf"),
@@ -1574,17 +1633,32 @@ fn shared_scope_conflict_pauses_and_continue_applies_resolution_to_machine_homes
         "conflicting all-to-linux cascade should pause\n{}",
         render_output(&conflict)
     );
-    let stderr = String::from_utf8_lossy(&conflict.stderr);
-    assert!(
-        stderr.contains("cascade paused"),
-        "{}",
-        render_output(&conflict)
-    );
-    assert!(stderr.contains("linux"), "{}", render_output(&conflict));
-    assert!(
-        stderr.contains(".config/app.conf"),
-        "{}",
-        render_output(&conflict)
+    assert_stderr_snapshot(
+        &conflict,
+        "\
+dotsync: cascade paused
+
+What dotsync does:
+Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config.
+
+This flow:
+This commit flow was merging the scoped change through the scope DAG and reached a branch where the same file had incompatible edits.
+
+Expected:
+It expects you to resolve the conflicted file in home, then run `dotsync continue` to create the merge commit and resume the cascade.
+
+Current state found:
+paused scope: linux
+
+Why dotsync stopped:
+cascade paused at scope `linux` with conflicts in .config/app.conf
+
+Correct flow:
+- edit each conflicted file at its real path in home and keep the desired final contents.
+- run `dotsync continue` from the same machine to finish cascading and syncing.
+- or run `dotsync abort` from the same machine to discard the paused cascade and restore the pre-pause state.
+- do not run another dotsync commit while the cascade is paused.
+"
     );
 
     machine_b.write_file(".config/app.conf", "setting = \"all+linux\"\n");
@@ -1769,11 +1843,32 @@ fn commit_while_cascade_paused_is_blocked_without_mutating_scope() {
         "commit while a cascade is paused should be blocked\n{}",
         render_output(&blocked)
     );
-    let stderr = String::from_utf8_lossy(&blocked.stderr);
-    assert!(
-        stderr.to_ascii_lowercase().contains("paused cascade"),
-        "{}",
-        render_output(&blocked)
+    assert_stderr_snapshot(
+        &blocked,
+        "\
+dotsync: paused cascade in progress
+
+What dotsync does:
+Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config.
+
+This flow:
+This commit flow was about to start a new scoped commit, but a previous cascade is still paused for conflict resolution.
+
+Expected:
+It expects exactly one cascade to be active at a time so commit history, conflict resolution, and home sync state stay aligned.
+
+Current state found:
+paused scope: linux
+
+Why dotsync stopped:
+Dotsync stopped before fetching, committing, or syncing because starting another commit would hide the real paused-cascade task and may mutate unrelated scope state.
+
+Correct flow:
+- edit each conflicted file at its real path in home and keep the desired final contents.
+- run `dotsync continue` to finish the paused cascade.
+- or run `dotsync abort` to discard the paused cascade and restore the pre-pause state.
+- after `dotsync continue` succeeds, rerun the new commit if it is still needed.
+"
     );
     assert_eq!(
         bookmark_revision(&machine_b, "goof-b"),
@@ -1914,11 +2009,30 @@ fn commit_invalid_scope_errors() {
         render_output(&commit_output)
     );
 
-    let stderr = String::from_utf8_lossy(&commit_output.stderr);
-    assert!(
-        stderr.to_ascii_lowercase().contains("invalid scope"),
-        "{}",
-        render_output(&commit_output)
+    assert_stderr_snapshot(
+        &commit_output,
+        "\
+dotsync: invalid scope
+
+What dotsync does:
+Dotsync stores dotfiles in a scope DAG so shared config can live on shared ancestor scopes and machine-specific config can stay isolated on leaf scopes.
+
+This flow:
+This commit flow records your repo change on the scope you name and then cascades it through descendant scopes.
+
+Expected:
+It expects the scope you name to exist in the configured scope DAG.
+
+Current state found:
+scope `nonexistent` does not exist in config
+
+Why dotsync stopped:
+Dotsync stopped because it cannot place this change onto a scope that is not configured.
+
+Correct flow:
+- choose a real configured scope from the DAG.
+- Pick the root-est appropriate ancestor scope that should own the change.
+"
     );
 }
 
@@ -1952,16 +2066,12 @@ fn status_shows_modified_file() {
         render_output(&status_output)
     );
 
-    let stderr = String::from_utf8_lossy(&status_output.stderr);
-    assert!(
-        stderr.contains(".bashrc"),
-        "{}",
-        render_output(&status_output)
-    );
-    assert!(
-        stderr.contains("modified") || stderr.contains("M"),
-        "{}",
-        render_output(&status_output)
+    assert_stderr_snapshot(
+        &status_output,
+        "\
+dotsync: 1 changed managed file(s) for mx-xps-cy
+  M .bashrc
+",
     );
 }
 
@@ -1995,16 +2105,12 @@ fn status_shows_deleted_file() {
         render_output(&status_output)
     );
 
-    let stderr = String::from_utf8_lossy(&status_output.stderr);
-    assert!(
-        stderr.contains(".bashrc"),
-        "{}",
-        render_output(&status_output)
-    );
-    assert!(
-        stderr.contains("deleted") || stderr.contains("D"),
-        "{}",
-        render_output(&status_output)
+    assert_stderr_snapshot(
+        &status_output,
+        "\
+dotsync: 1 changed managed file(s) for mx-xps-cy
+  D .bashrc
+",
     );
 }
 
@@ -2036,15 +2142,7 @@ fn status_clean_shows_no_changes() {
         render_output(&status_output)
     );
 
-    let stderr = String::from_utf8_lossy(&status_output.stderr);
-    let stderr_lower = stderr.to_ascii_lowercase();
-    assert!(
-        stderr.contains('0')
-            || stderr_lower.contains("no changes")
-            || stderr_lower.contains("clean"),
-        "{}",
-        render_output(&status_output)
-    );
+    assert_stderr_snapshot(&status_output, "dotsync: no changes for mx-xps-cy\n");
 }
 
 #[test]
@@ -2131,29 +2229,7 @@ fn status_ignores_unmanaged_files() {
         render_output(&status_output)
     );
 
-    let stderr = String::from_utf8_lossy(&status_output.stderr);
-    assert!(
-        !stderr.contains(".unmanaged-status-test"),
-        "{}",
-        render_output(&status_output)
-    );
-}
-
-fn assert_standalone_error(stderr: &str, expected_fragments: &[&str], output: &Output) {
-    assert!(stderr.starts_with("dotsync:"), "{}", render_output(output));
-    for heading in [
-        "What dotsync does:",
-        "This flow:",
-        "Expected:",
-        "Current state found:",
-        "Why dotsync stopped:",
-        "Correct flow:",
-    ] {
-        assert!(stderr.contains(heading), "{}", render_output(output));
-    }
-    for fragment in expected_fragments {
-        assert!(stderr.contains(fragment), "{}", render_output(output));
-    }
+    assert_stderr_snapshot(&status_output, "dotsync: no changes for mx-xps-cy\n");
 }
 
 fn parse_stdout_json(output: &Output) -> serde_json::Value {
