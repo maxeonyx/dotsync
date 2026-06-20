@@ -18,8 +18,8 @@ pub use crate::commit::{
 pub use crate::config::DotsyncPaths;
 pub use crate::error::{DotsyncError, ErrorReport};
 pub use crate::inspect::{
-    diff_home, list_scope_tree, list_scopes, read_config_at_scope, read_scope_file, DiffReport,
-    FileReport, ScopeInfo, ScopeListReport, TreeReport,
+    diff_home, list_scope_tree, list_scopes, read_scope_file, DiffReport, FileReport, ScopeInfo,
+    ScopeListReport, TreeReport,
 };
 pub use crate::status::{status, ChangeStatus, FileChange, StatusReport};
 pub use crate::sync::{sync, FileDrift, SyncOptions, SyncReport};

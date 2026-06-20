@@ -105,7 +105,7 @@ pub(crate) async fn detect_drifts(
     Ok(drifts)
 }
 
-pub(crate) fn render_diff(repo_bytes: &[u8], system_bytes: &[u8]) -> String {
+fn render_diff(repo_bytes: &[u8], system_bytes: &[u8]) -> String {
     match (
         String::from_utf8(repo_bytes.to_vec()),
         String::from_utf8(system_bytes.to_vec()),

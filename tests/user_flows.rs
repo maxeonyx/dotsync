@@ -229,6 +229,9 @@ fn bookmark_has_file(machine: &MachineEnvironment, scope: &str, relative: &str) 
     )
 }
 
+// Scope-branch fixture helpers: these set up checked-in remote state that a
+// user could have produced earlier with dotsync, then the tests exercise the
+// public CLI against that state.
 fn seed_remote_scope_file(
     machine: &MachineEnvironment,
     scope: &str,
@@ -560,24 +563,9 @@ fn view_summarizes_checked_in_scopes_and_files() {
         "{}",
         render_output(&view_output)
     );
-    let stdout = String::from_utf8_lossy(&view_output.stdout);
-    assert!(stdout.contains("Scopes"), "{}", render_output(&view_output));
-    assert!(stdout.contains("all"), "{}", render_output(&view_output));
-    assert!(
-        stdout.contains("linux <- all"),
-        "{}",
-        render_output(&view_output)
-    );
-    assert!(
-        stdout.contains("mx-xps-cy <- linux"),
-        "{}",
-        render_output(&view_output)
-    );
-    assert!(stdout.contains("Files"), "{}", render_output(&view_output));
-    assert!(
-        stdout.contains(".gitconfig"),
-        "{}",
-        render_output(&view_output)
+    assert_eq!(
+        String::from_utf8_lossy(&view_output.stdout),
+        "Scopes\nall\nlinux <- all\nmx-xps-cy <- linux\n\nFiles\n.config/dotsync/config.toml\n.gitconfig\n"
     );
 }
 
@@ -609,21 +597,9 @@ fn view_scope_shows_checked_in_file_tree() {
         "{}",
         render_output(&view_output)
     );
-    let stdout = String::from_utf8_lossy(&view_output.stdout);
-    assert!(
-        stdout.contains("mx-xps-cy"),
-        "{}",
-        render_output(&view_output)
-    );
-    assert!(
-        stdout.contains(".gitconfig"),
-        "{}",
-        render_output(&view_output)
-    );
-    assert!(
-        stdout.contains(".config/dotsync/config.toml"),
-        "{}",
-        render_output(&view_output)
+    assert_eq!(
+        String::from_utf8_lossy(&view_output.stdout),
+        "Scope mx-xps-cy\n.config/dotsync/config.toml\n.gitconfig\n"
     );
 }
 
@@ -655,26 +631,9 @@ fn view_file_shows_scopes_and_scoped_file_content() {
         "{}",
         render_output(&file_scopes_output)
     );
-    let file_scopes_stdout = String::from_utf8_lossy(&file_scopes_output.stdout);
-    assert!(
-        file_scopes_stdout.contains(".gitconfig"),
-        "{}",
-        render_output(&file_scopes_output)
-    );
-    assert!(
-        file_scopes_stdout.contains("all"),
-        "{}",
-        render_output(&file_scopes_output)
-    );
-    assert!(
-        file_scopes_stdout.contains("linux"),
-        "{}",
-        render_output(&file_scopes_output)
-    );
-    assert!(
-        file_scopes_stdout.contains("mx-xps-cy"),
-        "{}",
-        render_output(&file_scopes_output)
+    assert_eq!(
+        String::from_utf8_lossy(&file_scopes_output.stdout),
+        "File .gitconfig\nScopes\nall\nlinux\nmx-xps-cy\n"
     );
 
     let file_content_output = machine.run("dotsync view --scope mx-xps-cy --file .gitconfig");

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use jj_lib::repo::Repo as _;
 
-use crate::config::{internal_repo_paths, load_config, DotsyncPaths, DOTSYNC_CONFIG_RELATIVE_PATH};
+use crate::config::{internal_repo_paths, load_config, DotsyncPaths};
 use crate::error::{jj_error, DotsyncError};
 use crate::repo::{
     collect_managed_tree_entries, fetch_origin, load_repo_direct, load_scope_commit,
@@ -70,13 +70,6 @@ pub async fn list_scopes(paths: &DotsyncPaths) -> Result<ScopeListReport, Dotsyn
     Ok(ScopeListReport {
         scopes: scopes.into_iter().map(|(_, scope)| scope).collect(),
     })
-}
-
-pub async fn read_config_at_scope(
-    paths: &DotsyncPaths,
-    scope: &str,
-) -> Result<FileReport, DotsyncError> {
-    read_scope_file(paths, scope, Path::new(DOTSYNC_CONFIG_RELATIVE_PATH)).await
 }
 
 pub async fn list_scope_tree(
