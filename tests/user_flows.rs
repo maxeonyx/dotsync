@@ -1601,6 +1601,28 @@ fn status_before_init_matches_full_recovery_message() {
 }
 
 #[test]
+fn status_before_init_json_matches_recovery_message() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let status_output = machine.run("dotsync --output json status");
+    assert_eq!(
+        status_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&status_output)
+    );
+
+    let expected = format!(
+        "{{\"current_state\":\"expected repo path: {}; standard location: ~/.local/share/dotsync/repo\",\"drifts\":[],\"error\":\"not_initialized\",\"message\":\"Dotsync could not find its hidden repo at {}. Run `dotsync init <remote-url>` from this home directory, then rerun `dotsync status`.\",\"status\":\"error\"}}\n",
+        machine.repo_dir.display(),
+        machine.repo_dir.display()
+    );
+    let stdout = String::from_utf8_lossy(&status_output.stdout);
+    assert_eq!(stdout, expected, "{}", render_output(&status_output));
+}
+
+#[test]
 fn init_without_remote_noninteractive_matches_full_recovery_message() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
