@@ -1594,7 +1594,17 @@ fn status_before_init_matches_full_recovery_message() {
 
     let stderr = String::from_utf8_lossy(&status_output.stderr);
     let expected = format!(
-        "dotsync: not initialized\n\nWhat happened:\nDotsync could not find its hidden repo at {}.\n\nWhat to do:\n- Run `dotsync init <remote-url>` from this home directory.\n- Then rerun `dotsync status`.\n\nThe remote URL is the git remote that stores your dotsync repo.\n",
+        "dotsync: not initialized
+
+What happened:
+Dotsync could not find its hidden repo at {}.
+
+What to do:
+- Run `dotsync init <remote-url>` from this home directory.
+- Then rerun `dotsync status`.
+
+The remote URL is the git remote that stores your dotsync repo.
+",
         machine.repo_dir.display()
     );
     assert_eq!(stderr, expected, "{}", render_output(&status_output));
@@ -1613,11 +1623,9 @@ fn status_before_init_json_matches_recovery_message() {
         render_output(&status_output)
     );
 
-    let expected = format!(
-        "{{\"current_state\":\"expected repo path: {}; standard location: ~/.local/share/dotsync/repo\",\"drifts\":[],\"error\":\"not_initialized\",\"message\":\"Dotsync could not find its hidden repo at {}. Run `dotsync init <remote-url>` from this home directory, then rerun `dotsync status`.\",\"status\":\"error\"}}\n",
-        machine.repo_dir.display(),
-        machine.repo_dir.display()
-    );
+    let expected = r#"{"current_state":"expected repo path: {repo}; standard location: ~/.local/share/dotsync/repo","drifts":[],"error":"not_initialized","message":"Dotsync could not find its hidden repo at {repo}. Run `dotsync init <remote-url>` from this home directory, then rerun `dotsync status`.","status":"error"}
+"#
+    .replace("{repo}", &machine.repo_dir.display().to_string());
     let stdout = String::from_utf8_lossy(&status_output.stdout);
     assert_eq!(stdout, expected, "{}", render_output(&status_output));
 }
@@ -1636,7 +1644,16 @@ fn init_without_remote_noninteractive_matches_full_recovery_message() {
     );
 
     let stderr = String::from_utf8_lossy(&init_output.stderr);
-    let expected = "dotsync: init needs the repo remote URL\n\nUsage:\n  dotsync init <remote-url>\n\nThe remote URL is the git remote that stores your dotsync repo.\n\nExample:\n  dotsync init git@github.com:maxeonyx/dotfiles.git\n";
+    let expected = "dotsync: init needs the repo remote URL
+
+Usage:
+  dotsync init <remote-url>
+
+The remote URL is the git remote that stores your dotsync repo.
+
+Example:
+  dotsync init git@github.com:maxeonyx/dotfiles.git
+";
     assert_eq!(stderr, expected, "{}", render_output(&init_output));
 }
 
