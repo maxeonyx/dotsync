@@ -2037,6 +2037,84 @@ Correct flow:
 }
 
 #[test]
+fn status_before_init_matches_full_recovery_message() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let status_output = machine.run("dotsync status");
+    assert_eq!(
+        status_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&status_output)
+    );
+
+    let stderr = String::from_utf8_lossy(&status_output.stderr);
+    let expected = format!(
+        "dotsync: not initialized
+
+What happened:
+Dotsync could not find its hidden repo at {}.
+
+What to do:
+- Run `dotsync init <remote-url>` from this home directory.
+- Then rerun `dotsync status`.
+
+The remote URL is the git remote that stores your dotsync repo.
+",
+        machine.repo_dir.display()
+    );
+    assert_eq!(stderr, expected, "{}", render_output(&status_output));
+}
+
+#[test]
+fn status_before_init_json_matches_recovery_message() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let status_output = machine.run("dotsync --output json status");
+    assert_eq!(
+        status_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&status_output)
+    );
+
+    let expected = r#"{"current_state":"expected repo path: {repo}; standard location: ~/.local/share/dotsync/repo","drifts":[],"error":"not_initialized","message":"Dotsync could not find its hidden repo at {repo}. Run `dotsync init <remote-url>` from this home directory, then rerun `dotsync status`.","status":"error"}
+"#
+    .replace("{repo}", &machine.repo_dir.display().to_string());
+    let stdout = String::from_utf8_lossy(&status_output.stdout);
+    assert_eq!(stdout, expected, "{}", render_output(&status_output));
+}
+
+#[test]
+fn init_without_remote_noninteractive_matches_full_recovery_message() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.run("dotsync init");
+    assert_eq!(
+        init_output.status.code(),
+        Some(2),
+        "{}",
+        render_output(&init_output)
+    );
+
+    let stderr = String::from_utf8_lossy(&init_output.stderr);
+    let expected = "dotsync: init needs the repo remote URL
+
+Usage:
+  dotsync init <remote-url>
+
+The remote URL is the git remote that stores your dotsync repo.
+
+Example:
+  dotsync init git@github.com:maxeonyx/dotfiles.git
+";
+    assert_eq!(stderr, expected, "{}", render_output(&init_output));
+}
+
+#[test]
 fn status_shows_modified_file() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");

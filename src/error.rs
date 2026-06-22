@@ -69,6 +69,8 @@ pub enum DotsyncError {
     NoPausedCascade,
     #[error("repo already exists at {path}")]
     RepoAlreadyExists { path: PathBuf },
+    #[error("not initialized")]
+    NotInitialized { path: PathBuf },
     #[error("unable to determine machine hostname")]
     MissingHostname,
     #[error("jj operation failed: {message}")]
@@ -108,6 +110,15 @@ impl DotsyncError {
             }
             DotsyncError::NoPausedCascade => basic_error_report("no_paused_cascade", self),
             DotsyncError::RepoAlreadyExists { .. } => basic_error_report("repo_exists", self),
+            DotsyncError::NotInitialized { path } => ErrorReport {
+                code: "not_initialized",
+                message: format!(
+                    "Dotsync could not find its hidden repo at {}. Run `dotsync init <remote-url>` from this home directory, then rerun `dotsync status`.",
+                    path.display()
+                ),
+                drifts: Vec::new(),
+                current_state: error_current_state(self),
+            },
             DotsyncError::MissingHostname => basic_error_report("missing_hostname", self),
             DotsyncError::Io { .. } => basic_error_report("io", self),
             DotsyncError::Jj { .. } => basic_error_report("jj", self),
@@ -143,6 +154,10 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
             Some(format!("conflicted scope: {scope}"))
         }
         DotsyncError::PausedCascadeInProgress { scope } => Some(format!("paused scope: {scope}")),
+        DotsyncError::NotInitialized { path } => Some(format!(
+            "expected repo path: {}; standard location: ~/.local/share/dotsync/repo",
+            path.display()
+        )),
         DotsyncError::NotImplemented(_)
         | DotsyncError::NoPausedCascade
         | DotsyncError::Io { .. }

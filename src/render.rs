@@ -134,6 +134,10 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 "After that, let dotsync recreate valid sync state from a successful sync.",
             ],
         ),
+        DotsyncError::NotInitialized { path } => format!(
+            "dotsync: not initialized\n\nWhat happened:\nDotsync could not find its hidden repo at {}.\n\nWhat to do:\n- Run `dotsync init <remote-url>` from this home directory.\n- Then rerun `dotsync status`.\n\nThe remote URL is the git remote that stores your dotsync repo.",
+            path.display()
+        ),
         DotsyncError::NotImplemented(_)
         | DotsyncError::NoPausedCascade
         | DotsyncError::Io { .. }

@@ -9,6 +9,7 @@ mod render;
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::env;
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 
 const TOP_LEVEL_ABOUT: &str = "Agent-first dotfile sync";
@@ -32,7 +33,19 @@ const INIT_ABOUT: &str = "Clone or join a dotsync remote";
 
 const INIT_LONG_ABOUT: &str = "REMOTE_URL is the git remote that stores your dotsync repo.
 
-`dotsync init` clones the repo into ~/.local/share/dotsync/repo, detects this machine, sets up any missing scope branches for its OS and machine, and syncs the resulting machine scope into home.";
+`dotsync init` clones the repo into ~/.local/share/dotsync/repo, detects this machine, sets up any missing scope branches for its OS and machine, and syncs the resulting machine scope into home.
+
+If REMOTE_URL is omitted, dotsync asks for it.";
+
+const INIT_REMOTE_URL_USAGE: &str = "init needs the repo remote URL
+
+Usage:
+  dotsync init <remote-url>
+
+The remote URL is the git remote that stores your dotsync repo.
+
+Example:
+  dotsync init git@github.com:maxeonyx/dotfiles.git";
 
 const CONTINUE_ABOUT: &str = "Continue a paused merge cascade after resolving conflicts";
 const ABORT_ABOUT: &str = "Abort a paused merge cascade and restore the pre-pause state";
@@ -71,7 +84,7 @@ enum Action {
         force: bool,
     },
     Init {
-        remote_url: String,
+        remote_url: InitRemote,
     },
     Commit {
         scope: String,
@@ -100,7 +113,7 @@ enum Command {
     #[command(about = INIT_ABOUT, long_about = INIT_LONG_ABOUT)]
     Init {
         /// Git remote URL or local path for the dotsync repo
-        remote_url: String,
+        remote_url: Option<String>,
     },
     /// Commit selected home changes to a scope, cascade, sync, and push
     Commit {
@@ -140,6 +153,17 @@ enum Command {
     Unknown(Vec<String>),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InitRemote {
+    Provided(String),
+    Prompt,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CliContext {
+    interactive_terminal: bool,
+}
+
 #[derive(Debug, Clone)]
 struct SuccessOutput {
     json: serde_json::Value,
@@ -169,7 +193,7 @@ async fn main() {
 
     let cli = Cli::parse();
     let output_format = cli.output_format;
-    let outcome = match Action::try_from(cli) {
+    let outcome = match Action::try_from_cli(cli, detect_cli_context()) {
         Ok(action) => dispatch(action).await,
         Err(error) => Ok(CliOutput::Usage(error)),
     };
@@ -179,6 +203,12 @@ async fn main() {
         Err(error) => emit_output(&output_format, CliOutput::Error(error)),
     };
     std::process::exit(exit_code);
+}
+
+fn detect_cli_context() -> CliContext {
+    CliContext {
+        interactive_terminal: io::stdin().is_terminal() && io::stderr().is_terminal(),
+    }
 }
 
 fn try_handle_version_request() -> bool {
@@ -217,12 +247,13 @@ fn is_version_json_request(args: &[String]) -> bool {
             .all(|arg| matches!(arg.as_str(), "--version" | "-V" | "--json"))
 }
 
-impl TryFrom<Cli> for Action {
-    type Error = UsageError;
-
-    fn try_from(cli: Cli) -> Result<Self, Self::Error> {
+impl Action {
+    fn try_from_cli(cli: Cli, context: CliContext) -> Result<Self, UsageError> {
         match cli.command {
-            Some(Command::Init { remote_url }) => Ok(Self::Init { remote_url }),
+            Some(Command::Init { remote_url }) => {
+                let remote_url = init_remote_from_args(remote_url, context)?;
+                Ok(Self::Init { remote_url })
+            }
             Some(Command::Continue) => Ok(Self::Continue { force: cli.force }),
             Some(Command::Abort) => Ok(Self::Abort { force: cli.force }),
             Some(Command::Status) => Ok(Self::Status { force: false }),
@@ -262,6 +293,21 @@ impl TryFrom<Cli> for Action {
     }
 }
 
+fn init_remote_from_args(
+    remote_url: Option<String>,
+    context: CliContext,
+) -> Result<InitRemote, UsageError> {
+    if let Some(remote_url) = remote_url {
+        return Ok(InitRemote::Provided(remote_url));
+    }
+
+    if context.interactive_terminal {
+        return Ok(InitRemote::Prompt);
+    }
+
+    Err(usage_error(INIT_REMOTE_URL_USAGE))
+}
+
 async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
     match action {
         Action::Sync { force } => run_sync(force).await,
@@ -286,7 +332,14 @@ fn usage_error(message: &str) -> UsageError {
     }
 }
 
-async fn run_init(remote_url: String) -> Result<CliOutput, DotsyncError> {
+async fn run_init(remote_url: InitRemote) -> Result<CliOutput, DotsyncError> {
+    let remote_url = match remote_url {
+        InitRemote::Provided(remote_url) => remote_url,
+        InitRemote::Prompt => match prompt_init_remote_url() {
+            Ok(remote_url) => remote_url,
+            Err(error) => return Ok(CliOutput::Usage(error)),
+        },
+    };
     let paths = discover_paths()?;
     let report = init(&paths, &remote_url).await?;
     Ok(CliOutput::Success(SuccessOutput {
@@ -306,6 +359,23 @@ async fn run_init(remote_url: String) -> Result<CliOutput, DotsyncError> {
         stdout: None,
         exit_code: 0,
     }))
+}
+
+fn prompt_init_remote_url() -> Result<String, UsageError> {
+    eprint!("dotsync init remote URL: ");
+    io::stderr()
+        .flush()
+        .map_err(|err| usage_error(&format!("init could not write prompt: {err}")))?;
+
+    let mut remote_url = String::new();
+    io::stdin()
+        .read_line(&mut remote_url)
+        .map_err(|err| usage_error(&format!("init could not read remote URL: {err}")))?;
+    let remote_url = remote_url.trim().to_string();
+    if remote_url.is_empty() {
+        return Err(usage_error(INIT_REMOTE_URL_USAGE));
+    }
+    Ok(remote_url)
 }
 
 async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
