@@ -146,11 +146,15 @@ There is one command: `dotsync`.
 
 **`dotsync commit <scope> --all -m "message"`**: Commit every changed managed file for that scope. It does not scan all of home for unrelated new files; new paths are intentionally opted into with explicit path arguments.
 
+**`dotsync diff`**: Show line-oriented diffs for managed home files that differ from the current machine scope. This is read-only and exits 1 when drift is present so scripts and agents can distinguish clean from dirty state.
+
+**`dotsync view`**: Show a read-only overview of checked-in scope and file state. With `--scope <scope>`, show the managed file tree visible on that scope. With `--file <path>`, show the scopes where that file exists. With both `--scope <scope>` and `--file <path>`, print that file as it exists on that scope.
+
 **`dotsync continue`**: Continue a paused cascade after the conflicted home files have been edited to their resolved contents.
 
 **`dotsync abort`**: Abort a paused cascade, restore scope branches to their pre-pause revisions, clear the pause marker, and sync the current machine home back to the restored repo state.
 
-Both forms diff system files against the repo before syncing. If any system file has drifted from what the repo expects, dotsync stops, shows the diff, and warns. `--force` still shows the diffs but proceeds anyway — so you always see what's being overwritten, even if you've chosen not to stop for it.
+Syncing and commit forms diff system files against the repo before syncing. If any system file has drifted from what the repo expects, dotsync stops, shows the diff, and warns. `--force` still shows the diffs but proceeds anyway — so you always see what's being overwritten, even if you've chosen not to stop for it.
 
 ### Why one command?
 

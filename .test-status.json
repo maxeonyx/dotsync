@@ -19,6 +19,7 @@
     "dotsync::user_flows$concurrent_same_scope_file_edits_require_resolution": "passing",
     "dotsync::user_flows$continue_preserves_non_conflicting_parent_changes_from_paused_merge": "passing",
     "dotsync::user_flows$continue_without_pause_returns_clear_error": "passing",
+    "dotsync::user_flows$diff_shows_line_oriented_home_drift_without_syncing": "passing",
     "dotsync::user_flows$drift_detected_human_error_stands_alone": "passing",
     "dotsync::user_flows$drift_detected_json_contract_stays_compatible": "passing",
     "dotsync::user_flows$explicit_commit_command_adds_file_to_scope_and_syncs": "passing",
@@ -59,6 +60,9 @@
     "dotsync::user_flows$v03_commit_returns_not_implemented": "passing",
     "dotsync::user_flows$v03_init_creates_hidden_repo_not_dotfiles": "passing",
     "dotsync::user_flows$v03_plain_sync_ignores_unrelated_home_changes": "passing",
+    "dotsync::user_flows$view_file_shows_scopes_and_scoped_file_content": "passing",
+    "dotsync::user_flows$view_scope_shows_checked_in_file_tree": "passing",
+    "dotsync::user_flows$view_summarizes_checked_in_scopes_and_files": "passing",
     "dotsync::version_json$version_json_flag_prints_machine_readable_version": "passing"
   }
 }

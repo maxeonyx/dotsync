@@ -36,7 +36,9 @@ fn help_examples() {
         })
         .page(&["commit"], |_fixture| {})
         .page(&["continue"], |_fixture| {})
+        .page(&["diff"], |_fixture| {})
         .page(&["abort"], |_fixture| {})
         .page(&["status"], |_fixture| {})
+        .page(&["view"], |_fixture| {})
         .run();
 }

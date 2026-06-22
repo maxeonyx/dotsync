@@ -110,9 +110,33 @@ fn render_diff(repo_bytes: &[u8], system_bytes: &[u8]) -> String {
         String::from_utf8(repo_bytes.to_vec()),
         String::from_utf8(system_bytes.to_vec()),
     ) {
-        (Ok(repo), Ok(system)) => format!("--- repo\n+++ system\n- {repo:?}\n+ {system:?}"),
+        (Ok(repo), Ok(system)) => render_text_diff(&repo, &system),
         _ => "binary content differs".to_string(),
     }
+}
+
+fn render_text_diff(repo: &str, system: &str) -> String {
+    let repo_lines = repo.lines().collect::<Vec<_>>();
+    let system_lines = system.lines().collect::<Vec<_>>();
+    let mut lines = vec!["--- repo".to_string(), "+++ system".to_string()];
+    let max_len = repo_lines.len().max(system_lines.len());
+
+    for index in 0..max_len {
+        match (repo_lines.get(index), system_lines.get(index)) {
+            (Some(repo_line), Some(system_line)) if repo_line == system_line => {
+                lines.push(format!(" {repo_line}"));
+            }
+            (Some(repo_line), Some(system_line)) => {
+                lines.push(format!("-{repo_line}"));
+                lines.push(format!("+{system_line}"));
+            }
+            (Some(repo_line), None) => lines.push(format!("-{repo_line}")),
+            (None, Some(system_line)) => lines.push(format!("+{system_line}")),
+            (None, None) => unreachable!("index is bounded by max line length"),
+        }
+    }
+
+    lines.join("\n")
 }
 
 pub(crate) async fn copy_repo_file_to_home(
