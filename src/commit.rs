@@ -19,13 +19,17 @@ use crate::cascade::{
     build_cascade_plan, execute_cascade_plan, CascadeCommand, CascadeOutcome, CascadeStep,
     ScopeHeads,
 };
-use crate::config::{internal_repo_paths, load_config, DotsyncPaths};
+use crate::config::{
+    internal_repo_paths, load_config, parse_config, repo_config_path, DotsyncPaths,
+    DOTSYNC_CONFIG_RELATIVE_PATH,
+};
 use crate::error::DotsyncError;
 
 use crate::repo::{
     collect_managed_tree_entries, fetch_origin, load_repo_direct, load_scope_commit,
     push_scope_updates, read_tree_entry_bytes,
 };
+use crate::scope_graph::{scope_depth, ScopeGraph};
 use crate::sync::{SyncOptions, SyncReport};
 
 #[derive(Debug, Clone)]
@@ -95,7 +99,7 @@ pub async fn commit_and_sync(
     let pre_fetch_repo = load_repo_direct(paths).await?;
     let repo = fetch_origin(pre_fetch_repo.clone()).await?;
     let config = load_config(paths).await?;
-    let graph = config.graph.clone();
+    let mut graph = config.graph.clone();
 
     if !graph.parents.contains_key(&options.scope) {
         return Err(DotsyncError::InvalidScope {
@@ -260,6 +264,12 @@ pub async fn commit_and_sync(
     );
     scope_heads.update(options.scope.clone(), new_commit);
 
+    if commit_updates_scope_config(&options, &selected_paths) {
+        let updated_config = load_home_config(paths)?;
+        graph = updated_config.graph;
+        create_missing_scope_heads(tx.repo_mut(), &mut scope_heads, &graph).await?;
+    }
+
     let cascade_command = CascadeCommand {
         root_scope: options.scope.clone(),
         description: format!("dotsync: cascade from {}", options.scope),
@@ -340,6 +350,84 @@ pub async fn commit_and_sync(
         cascaded_scopes,
         sync,
     }))
+}
+
+fn commit_updates_scope_config(options: &CommitOptions, selected_paths: &[PathBuf]) -> bool {
+    options.scope == "all"
+        && selected_paths
+            .iter()
+            .any(|path| path == Path::new(DOTSYNC_CONFIG_RELATIVE_PATH))
+}
+
+fn load_home_config(paths: &DotsyncPaths) -> Result<crate::config::DotsyncConfig, DotsyncError> {
+    let home_config_path = paths.home_dir.join(DOTSYNC_CONFIG_RELATIVE_PATH);
+    let contents = fs::read_to_string(&home_config_path).map_err(|source| DotsyncError::Io {
+        path: home_config_path,
+        source,
+    })?;
+    parse_config(&repo_config_path(paths), &contents)
+}
+
+async fn create_missing_scope_heads(
+    mut_repo: &mut jj_lib::repo::MutableRepo,
+    scope_heads: &mut ScopeHeads,
+    graph: &ScopeGraph,
+) -> Result<(), DotsyncError> {
+    let mut scopes = graph.parents.keys().cloned().collect::<Vec<_>>();
+    let mut memo = std::collections::HashMap::new();
+    scopes.sort_by(|a, b| {
+        let depth_a = scope_depth(graph, a, &mut memo).unwrap_or(usize::MAX);
+        let depth_b = scope_depth(graph, b, &mut memo).unwrap_or(usize::MAX);
+        depth_a.cmp(&depth_b).then_with(|| a.cmp(b))
+    });
+
+    for scope in scopes {
+        if scope_heads.contains(&scope) {
+            continue;
+        }
+
+        let parents = graph.parents[&scope]
+            .iter()
+            .map(|parent| scope_heads.require(parent))
+            .collect::<Result<Vec<_>, _>>()?;
+        if parents.is_empty() {
+            return Err(DotsyncError::MissingScopeBookmark { scope });
+        }
+
+        let tree = if parents.len() == 1 {
+            parents[0].tree()
+        } else {
+            merge_commit_trees(mut_repo, &parents)
+                .await
+                .map_err(|err| DotsyncError::Jj {
+                    message: format!("merge parent trees for new scope {scope}: {err}"),
+                })?
+        };
+        if tree.has_conflict() {
+            return Err(DotsyncError::Jj {
+                message: format!("new scope `{scope}` has conflicting parent trees"),
+            });
+        }
+
+        let commit = mut_repo
+            .new_commit(
+                parents.iter().map(|commit| commit.id().clone()).collect(),
+                tree,
+            )
+            .set_description(format!("dotsync: create scope {scope}"))
+            .write()
+            .await
+            .map_err(|err| DotsyncError::Jj {
+                message: format!("write new scope {scope}: {err}"),
+            })?;
+        mut_repo.set_local_bookmark_target(
+            RefNameBuf::from(scope.as_str()).as_ref(),
+            RefTarget::normal(commit.id().clone()),
+        );
+        scope_heads.update(scope, commit);
+    }
+
+    Ok(())
 }
 
 async fn stale_selected_scope_paths(

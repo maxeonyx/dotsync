@@ -146,6 +146,10 @@ There is one command: `dotsync`.
 
 **`dotsync commit <scope> --all -m "message"`**: Commit every changed managed file for that scope. It does not scan all of home for unrelated new files; new paths are intentionally opted into with explicit path arguments.
 
+**`dotsync commit all -m "message" -- .config/dotsync/config.toml`**: Commit an edited scope graph. When the config adds scopes, dotsync creates the new scope branches from their configured parents, cascades descendants using the updated graph, syncs repo -> system, and pushes.
+
+**`dotsync add-scope <scope> --parent <parent> [--child <child>]...`**: Convenience sugar for editing `.config/dotsync/config.toml` and committing that config file to `all`. `--child` reparents an existing child through the new scope, for example inserting `hyprland` between `linux` and a machine scope.
+
 **`dotsync diff`**: Show line-oriented diffs for managed home files that differ from the current machine scope. This is read-only and exits 1 when drift is present so scripts and agents can distinguish clean from dirty state.
 
 **`dotsync view`**: Show a read-only overview of checked-in scope and file state. With `--scope <scope>`, show the managed file tree visible on that scope. With `--file <path>`, show the scopes where that file exists. With both `--scope <scope>` and `--file <path>`, print that file as it exists on that scope.
@@ -169,6 +173,8 @@ dotsync includes an agent skill (`dotfiles`) that triggers whenever any home dir
 3. Read `.config/dotsync/config.toml` from the `all` scope to see available scopes — the config file contains comments explaining what each scope is for and guiding scope selection
 4. Choose the root-est appropriate scope for the change
 5. Run `dotsync commit <scope> -m "description" -- <paths...>` when done
+
+When the scope graph itself needs to change, edit `.config/dotsync/config.toml` at its real home path and commit it with `dotsync commit all -m "description" -- .config/dotsync/config.toml`. `dotsync add-scope` is only sugar for that config edit.
 
 This is the mechanism that makes the system agent-friendly. The tool itself is simple plumbing — the skill is what makes agents use the plumbing correctly. The comments in the config file are load-bearing: they're how agents learn "hyprland stuff goes on `hyprland`, not `linux`."
 

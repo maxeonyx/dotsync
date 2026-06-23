@@ -7,6 +7,7 @@ mod inspect;
 mod machine;
 mod repo;
 mod scope_graph;
+mod scope_lifecycle;
 mod status;
 mod sync;
 
@@ -21,5 +22,6 @@ pub use crate::inspect::{
     diff_home, list_scope_tree, list_scopes, read_scope_file, DiffReport, FileReport, ScopeInfo,
     ScopeListReport, TreeReport,
 };
+pub use crate::scope_lifecycle::{add_scope, AddScopeOptions, AddScopeReport};
 pub use crate::status::{status, ChangeStatus, FileChange, StatusReport};
 pub use crate::sync::{sync, FileDrift, SyncOptions, SyncReport};
