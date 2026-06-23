@@ -18,7 +18,7 @@
     "dotsync::user_flows$commit_while_cascade_paused_is_blocked_without_mutating_scope": "passing",
     "dotsync::user_flows$commit_without_paths_imports_all_diffs": "passing",
     "dotsync::user_flows$concurrent_same_scope_file_edits_require_resolution": "passing",
-    "dotsync::user_flows$config_edit_commit_creates_new_scope_and_cascades_descendants": "pending",
+    "dotsync::user_flows$config_edit_commit_creates_new_scope_and_cascades_descendants": "passing",
     "dotsync::user_flows$continue_preserves_non_conflicting_parent_changes_from_paused_merge": "passing",
     "dotsync::user_flows$continue_without_pause_returns_clear_error": "passing",
     "dotsync::user_flows$diff_shows_line_oriented_home_drift_without_syncing": "passing",

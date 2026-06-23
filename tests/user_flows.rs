@@ -1401,7 +1401,11 @@ fn config_edit_commit_creates_new_scope_and_cascades_descendants() {
     machine.write_file(".config/linux-only.txt", "linux\n");
     let seed_linux =
         machine.run("dotsync commit linux -m 'add linux file' -- .config/linux-only.txt");
-    assert!(seed_linux.status.success(), "{}", render_output(&seed_linux));
+    assert!(
+        seed_linux.status.success(),
+        "{}",
+        render_output(&seed_linux)
+    );
 
     let original_config = machine.read_file(".config/dotsync/config.toml");
     let updated_config = original_config.replace(
@@ -1414,9 +1418,8 @@ fn config_edit_commit_creates_new_scope_and_cascades_descendants() {
     );
     machine.write_file(".config/dotsync/config.toml", &updated_config);
 
-    let commit_config = machine.run(
-        "dotsync commit all -m 'add hyprland scope' -- .config/dotsync/config.toml",
-    );
+    let commit_config =
+        machine.run("dotsync commit all -m 'add hyprland scope' -- .config/dotsync/config.toml");
     assert!(
         commit_config.status.success(),
         "{}",
@@ -1439,7 +1442,10 @@ fn config_edit_commit_creates_new_scope_and_cascades_descendants() {
         read_bookmark_file_contents(&machine, "mx-xps-cy", ".config/dotsync/config.toml"),
         updated_config
     );
-    assert_eq!(machine.read_file(".config/dotsync/config.toml"), updated_config);
+    assert_eq!(
+        machine.read_file(".config/dotsync/config.toml"),
+        updated_config
+    );
 }
 
 #[test]
