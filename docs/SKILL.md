@@ -9,6 +9,7 @@ Use this skill when editing dotfiles on a machine managed by dotsync.
 3. Run `dotsync commit <scope> -m "message" -- <paths>` to commit specific files, or `dotsync commit <scope> -m "message"` to commit all changed managed files.
 4. Choose the root-est appropriate scope for the change (the highest scope that still semantically owns the edit).
 5. To discover available scopes, read `.config/dotsync/config.toml` from the `all` scope — its comments explain what each scope is for.
+6. To change the scope graph, edit `.config/dotsync/config.toml` at its real home path and commit it with `dotsync commit all -m "message" -- .config/dotsync/config.toml`; `dotsync add-scope` is only sugar for this workflow.
 
 ## Choosing a scope
 

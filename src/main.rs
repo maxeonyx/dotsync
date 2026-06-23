@@ -1,9 +1,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
-    abort_paused_cascade, commit_and_sync, continue_after_conflict, diff_home, init,
-    list_scope_tree, list_scopes, read_scope_file, status, sync, ChangeStatus, CommandOutcome,
-    CommitOptions, CommitSelection, DiffReport, DotsyncError, DotsyncPaths, FileDrift,
-    ScopeListReport, SyncOptions, TreeReport,
+    abort_paused_cascade, add_scope, commit_and_sync, continue_after_conflict, diff_home, init,
+    list_scope_tree, list_scopes, read_scope_file, status, sync, AddScopeOptions, ChangeStatus,
+    CommandOutcome, CommitOptions, CommitSelection, DiffReport, DotsyncError, DotsyncPaths,
+    FileDrift, ScopeListReport, SyncOptions, TreeReport,
 };
 mod render;
 use serde_json::json;
@@ -21,6 +21,8 @@ A scope is a branch in the dotsync DAG. Shared config lives on ancestor scopes s
 Basic workflow:
   - plain `dotsync` syncs your current machine scope into home
   - edit files in home, then run `dotsync commit <scope> -m \"message\" <path>...` to record the change on the right scope
+  - edit .config/dotsync/config.toml and commit it to all when changing the scope DAG
+  - run `dotsync add-scope <scope> --parent <parent>` as sugar for that config edit
   - run `dotsync continue` if a cascade pauses for conflicts
   - run `dotsync abort` to discard a paused cascade";
 
@@ -49,6 +51,10 @@ Example:
 
 const CONTINUE_ABOUT: &str = "Continue a paused merge cascade after resolving conflicts";
 const ABORT_ABOUT: &str = "Abort a paused merge cascade and restore the pre-pause state";
+const ADD_SCOPE_ABOUT: &str = "Add a scope by editing and committing the scope config";
+const ADD_SCOPE_LONG_ABOUT: &str = "`dotsync add-scope` is sugar for editing .config/dotsync/config.toml and committing that config file to the all scope.
+
+It updates the scope graph, commits .config/dotsync/config.toml to `all`, creates any new scope branch, cascades descendants, syncs this machine, and pushes.";
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum OutputFormat {
@@ -106,6 +112,12 @@ enum Action {
         scope: Option<String>,
         file: Option<PathBuf>,
     },
+    AddScope {
+        scope: String,
+        parents: Vec<String>,
+        children: Vec<String>,
+        force: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -130,6 +142,23 @@ enum Command {
 
         /// Repo-relative file or directory paths to commit
         paths: Vec<PathBuf>,
+    },
+    #[command(
+        name = "add-scope",
+        about = ADD_SCOPE_ABOUT,
+        long_about = ADD_SCOPE_LONG_ABOUT
+    )]
+    AddScope {
+        /// Scope to add
+        scope: String,
+
+        /// Existing parent scope for the new scope
+        #[arg(long = "parent", required = true)]
+        parents: Vec<String>,
+
+        /// Existing child scope to reparent under the new scope
+        #[arg(long = "child")]
+        children: Vec<String>,
     },
     #[command(about = CONTINUE_ABOUT)]
     Continue,
@@ -259,6 +288,16 @@ impl Action {
             Some(Command::Status) => Ok(Self::Status { force: false }),
             Some(Command::Diff) => Ok(Self::Diff),
             Some(Command::View { scope, file }) => Ok(Self::View { scope, file }),
+            Some(Command::AddScope {
+                scope,
+                parents,
+                children,
+            }) => Ok(Self::AddScope {
+                scope,
+                parents,
+                children,
+                force: cli.force,
+            }),
             Some(Command::Commit {
                 scope,
                 message,
@@ -323,6 +362,12 @@ async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
         Action::Status { force } => run_status(force).await,
         Action::Diff => run_diff().await,
         Action::View { scope, file } => run_view(scope, file).await,
+        Action::AddScope {
+            scope,
+            parents,
+            children,
+            force,
+        } => run_add_scope(scope, parents, children, force).await,
     }
 }
 
@@ -572,6 +617,43 @@ async fn run_commit(
             exit_code: 0,
         })),
     }
+}
+
+async fn run_add_scope(
+    scope: String,
+    parents: Vec<String>,
+    children: Vec<String>,
+    force: bool,
+) -> Result<CliOutput, DotsyncError> {
+    let paths = discover_paths()?;
+    let CommandOutcome::Success(report) = add_scope(
+        &paths,
+        AddScopeOptions {
+            scope,
+            parents,
+            children,
+            force,
+        },
+    )
+    .await?;
+
+    Ok(CliOutput::Success(SuccessOutput {
+        json: json!({
+            "status": "ok",
+            "command": "add-scope",
+            "scope": report.scope,
+            "machine_scope": report.commit.sync.current_scope,
+            "synced_files": report.commit.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>()
+        }),
+        human: format!(
+            "dotsync: added scope {} and synced {} file(s)",
+            report.scope,
+            report.commit.sync.synced_paths.len()
+        ),
+        notes: render::success_notes_for_drifts(&report.commit.sync.drifts),
+        stdout: None,
+        exit_code: 0,
+    }))
 }
 
 fn discover_paths() -> Result<DotsyncPaths, DotsyncError> {

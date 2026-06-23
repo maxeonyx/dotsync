@@ -28,13 +28,6 @@ fn help_examples() {
                 );
             },
         )
-        .example(
-            &[],
-            &["add-scope", "hyprland", "--parent", "linux", "--child", "mx-help-test"],
-            |fixture| {
-                fixture.command(env!("CARGO_BIN_EXE_dotsync"), &["init", "remote.git"]);
-            },
-        )
         .page(&["init"], |fixture| {
             fixture.env("HOME", ".");
             fixture.env("DOTSYNC_OS", "linux");

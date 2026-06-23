@@ -1495,9 +1495,8 @@ fn add_scope_sugar_updates_config_and_commits_scope_lifecycle() {
     );
 
     machine.write_file(".config/hypr/hyprland.conf", "general { gaps = 4 }\n");
-    let commit_hyprland = machine.run(
-        "dotsync commit hyprland -m 'add hyprland config' -- .config/hypr/hyprland.conf",
-    );
+    let commit_hyprland = machine
+        .run("dotsync commit hyprland -m 'add hyprland config' -- .config/hypr/hyprland.conf");
     assert!(
         commit_hyprland.status.success(),
         "{}",
