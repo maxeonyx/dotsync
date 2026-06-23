@@ -28,6 +28,13 @@ fn help_examples() {
                 );
             },
         )
+        .example(
+            &[],
+            &["add-scope", "hyprland", "--parent", "linux", "--child", "mx-help-test"],
+            |fixture| {
+                fixture.command(env!("CARGO_BIN_EXE_dotsync"), &["init", "remote.git"]);
+            },
+        )
         .page(&["init"], |fixture| {
             fixture.env("HOME", ".");
             fixture.env("DOTSYNC_OS", "linux");
@@ -35,6 +42,7 @@ fn help_examples() {
             fixture.command("git", &["init", "--bare", "<url>"]);
         })
         .page(&["commit"], |_fixture| {})
+        .page(&["add-scope"], |_fixture| {})
         .page(&["continue"], |_fixture| {})
         .page(&["diff"], |_fixture| {})
         .page(&["abort"], |_fixture| {})

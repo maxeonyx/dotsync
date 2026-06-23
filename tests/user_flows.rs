@@ -1449,6 +1449,71 @@ fn config_edit_commit_creates_new_scope_and_cascades_descendants() {
 }
 
 #[test]
+fn add_scope_sugar_updates_config_and_commits_scope_lifecycle() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_file(".config/linux-only.txt", "linux\n");
+    let seed_linux =
+        machine.run("dotsync commit linux -m 'add linux file' -- .config/linux-only.txt");
+    assert!(
+        seed_linux.status.success(),
+        "{}",
+        render_output(&seed_linux)
+    );
+
+    let add_scope = machine.run("dotsync add-scope hyprland --parent linux --child mx-xps-cy");
+    assert!(add_scope.status.success(), "{}", render_output(&add_scope));
+
+    let all_config = read_bookmark_file_contents(&machine, "all", ".config/dotsync/config.toml");
+    assert!(
+        all_config.contains("hyprland = { parents = [\"linux\"] }"),
+        "all config should contain the new scope:\n{all_config}"
+    );
+    assert!(
+        all_config.contains("mx-xps-cy = { parents = [\"hyprland\"] }"),
+        "add-scope should insert the new scope above the requested child:\n{all_config}"
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "hyprland", ".config/dotsync/config.toml"),
+        all_config
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "hyprland", ".config/linux-only.txt"),
+        "linux\n"
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "mx-xps-cy", ".config/dotsync/config.toml"),
+        all_config
+    );
+
+    machine.write_file(".config/hypr/hyprland.conf", "general { gaps = 4 }\n");
+    let commit_hyprland = machine.run(
+        "dotsync commit hyprland -m 'add hyprland config' -- .config/hypr/hyprland.conf",
+    );
+    assert!(
+        commit_hyprland.status.success(),
+        "{}",
+        render_output(&commit_hyprland)
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "mx-xps-cy", ".config/hypr/hyprland.conf"),
+        "general { gaps = 4 }\n"
+    );
+    assert_eq!(
+        machine.read_file(".config/hypr/hyprland.conf"),
+        "general { gaps = 4 }\n"
+    );
+}
+
+#[test]
 fn multiple_machines_can_contribute_to_all_without_losing_changes() {
     let harness = TestHarness::new();
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
