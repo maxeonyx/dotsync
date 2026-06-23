@@ -1387,6 +1387,62 @@ fn commit_cascades_through_all_descendants() {
 }
 
 #[test]
+fn config_edit_commit_creates_new_scope_and_cascades_descendants() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_file(".config/linux-only.txt", "linux\n");
+    let seed_linux =
+        machine.run("dotsync commit linux -m 'add linux file' -- .config/linux-only.txt");
+    assert!(seed_linux.status.success(), "{}", render_output(&seed_linux));
+
+    let original_config = machine.read_file(".config/dotsync/config.toml");
+    let updated_config = original_config.replace(
+        "linux = { parents = [\"all\"] }\nmx-xps-cy = { parents = [\"linux\"] }",
+        "linux = { parents = [\"all\"] }\nhyprland = { parents = [\"linux\"] }\nmx-xps-cy = { parents = [\"hyprland\"] }",
+    );
+    assert_ne!(
+        updated_config, original_config,
+        "expected init config shape to match test harness"
+    );
+    machine.write_file(".config/dotsync/config.toml", &updated_config);
+
+    let commit_config = machine.run(
+        "dotsync commit all -m 'add hyprland scope' -- .config/dotsync/config.toml",
+    );
+    assert!(
+        commit_config.status.success(),
+        "{}",
+        render_output(&commit_config)
+    );
+
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "all", ".config/dotsync/config.toml"),
+        updated_config
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "hyprland", ".config/dotsync/config.toml"),
+        updated_config
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "hyprland", ".config/linux-only.txt"),
+        "linux\n"
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "mx-xps-cy", ".config/dotsync/config.toml"),
+        updated_config
+    );
+    assert_eq!(machine.read_file(".config/dotsync/config.toml"), updated_config);
+}
+
+#[test]
 fn multiple_machines_can_contribute_to_all_without_losing_changes() {
     let harness = TestHarness::new();
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
