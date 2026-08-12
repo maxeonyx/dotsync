@@ -126,6 +126,12 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             steps.push(
                 "do not use `~/`, absolute paths, or `..`; dotsync resolves every path against your home directory already, and records it verbatim.".to_string(),
             );
+            if rejected.iter().any(|rejected| rejected.is_scope_graph()) {
+                steps.push(
+                    "commit the scope graph to `all`, which is the only scope dotsync reads it from: `dotsync commit all -m \"message\" -- .config/dotsync/config.toml`."
+                        .to_string(),
+                );
+            }
             if rejected.iter().any(|rejected| rejected.is_dotsync_state()) {
                 steps.push(
                     "commit the config files you edited instead; dotsync's own state is not config and cannot travel on a scope."

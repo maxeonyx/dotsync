@@ -30,6 +30,8 @@ pub enum CommitPathProblem {
         home_path: PathBuf,
     },
     SyncState,
+    /// The scope graph, named for a scope other than `all`.
+    ScopeGraphOutsideAllScope,
     DotsyncRepoRoot {
         repo_root: PathBuf,
     },
@@ -55,6 +57,9 @@ impl RejectedCommitPath {
             CommitPathProblem::SyncState => format!(
                 "`{path}` is this machine's dotsync sync state; it records which machine scope this home uses, so it has to stay machine-local."
             ),
+            CommitPathProblem::ScopeGraphOutsideAllScope => format!(
+                "`{path}` is the scope graph, and dotsync only reads it from `all`; a copy recorded on `{scope}` would configure nothing, and would still overwrite the real one in home on every machine using that scope."
+            ),
             CommitPathProblem::DotsyncRepoRoot { repo_root } => format!(
                 "`{path}` is dotsync's hidden repo itself, at {}, which is where dotsync stores every scope.",
                 repo_root.display()
@@ -74,6 +79,12 @@ impl RejectedCommitPath {
                 | CommitPathProblem::DotsyncRepoRoot { .. }
                 | CommitPathProblem::InsideDotsyncRepo { .. }
         )
+    }
+
+    /// Read by the binary's renderer to point at the one scope that owns the
+    /// scope graph.
+    pub fn is_scope_graph(&self) -> bool {
+        matches!(self.problem, CommitPathProblem::ScopeGraphOutsideAllScope)
     }
 }
 

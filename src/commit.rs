@@ -19,7 +19,9 @@ use crate::cascade::{
     build_cascade_plan, execute_cascade_steps, CascadeCommand, CascadeOutcome, CascadeStep,
     ScopeHeads,
 };
-use crate::config::{internal_repo_paths, load_config, DotsyncPaths};
+use crate::config::{
+    internal_repo_paths, load_config, DotsyncPaths, ALL_SCOPE, DOTSYNC_CONFIG_RELATIVE_PATH,
+};
 use crate::error::{CommitPathProblem, DotsyncError, RejectedCommitPath};
 
 use crate::repo::{
@@ -441,27 +443,69 @@ async fn select_commit_paths(
     target_entries: &BTreeMap<PathBuf, TreeValue>,
     internal_paths: &BTreeSet<PathBuf>,
 ) -> Result<Vec<PathBuf>, DotsyncError> {
-    match selection {
+    let stale_scope_graph = scope_graph_change_outside_all(paths, repo, scope, target_entries)
+        .await?
+        .then(|| PathBuf::from(DOTSYNC_CONFIG_RELATIVE_PATH));
+
+    let selected = match selection {
         CommitSelection::Paths(selection_paths) if !selection_paths.is_empty() => {
-            expand_selection_paths(
+            return expand_selection_paths(
                 paths,
                 scope,
                 selection_paths,
                 target_entries,
                 internal_paths,
-            )
+                stale_scope_graph.as_deref(),
+            );
         }
         CommitSelection::Paths(_) => {
-            detect_changed_managed_paths(paths, repo, target_entries).await
+            detect_changed_managed_paths(paths, repo, target_entries).await?
         }
         CommitSelection::All => {
             // `--all` intentionally means "all currently managed files on the target scope".
             // We compare that tracked set against `~/` so modifications and deletions are
             // committed, but we do not scan all of home looking for unrelated new files.
             // New files must be opted into with explicit paths.
-            Ok(target_entries.keys().cloned().collect())
+            target_entries.keys().cloned().collect()
+        }
+    };
+
+    if let Some(config_path) = stale_scope_graph {
+        if selected.contains(&config_path) {
+            return Err(DotsyncError::UnusableCommitPaths {
+                scope: scope.to_string(),
+                rejected: vec![RejectedCommitPath {
+                    path: config_path,
+                    problem: CommitPathProblem::ScopeGraphOutsideAllScope,
+                }],
+            });
         }
     }
+
+    Ok(selected)
+}
+
+/// Whether this commit would record a change to the scope graph on a scope
+/// that is not `all`. Dotsync reads the graph only from `all`
+/// (`config::load_config`), so such a commit writes a copy that configures
+/// nothing — while still syncing into home on that scope's machines, where it
+/// overwrites the real one. An unchanged copy records nothing and is left
+/// alone, which is what keeps bulk selections working.
+async fn scope_graph_change_outside_all(
+    paths: &DotsyncPaths,
+    repo: &dyn jj_lib::repo::Repo,
+    scope: &str,
+    target_entries: &BTreeMap<PathBuf, TreeValue>,
+) -> Result<bool, DotsyncError> {
+    if scope == ALL_SCOPE {
+        return Ok(false);
+    }
+    let config_path = PathBuf::from(DOTSYNC_CONFIG_RELATIVE_PATH);
+    let repo_bytes = match target_entries.get(&config_path) {
+        Some(value) => Some(read_tree_entry_bytes(repo.store(), &config_path, value).await?),
+        None => None,
+    };
+    Ok(read_home_bytes(paths, &config_path)? != repo_bytes)
 }
 
 async fn detect_changed_managed_paths(
@@ -496,6 +540,7 @@ fn expand_selection_paths(
     selection_paths: &[PathBuf],
     target_entries: &BTreeMap<PathBuf, TreeValue>,
     internal_paths: &BTreeSet<PathBuf>,
+    stale_scope_graph: Option<&Path>,
 ) -> Result<Vec<PathBuf>, DotsyncError> {
     let mut expanded = BTreeSet::new();
     // Relative path of the repo root within home — reject anything under it
@@ -559,6 +604,17 @@ fn expand_selection_paths(
             continue;
         }
         expanded.extend(matched);
+    }
+
+    // A directory selection reaches the scope graph too, so this is checked
+    // against what the selection expanded to rather than what was typed.
+    if let Some(config_path) = stale_scope_graph {
+        if expanded.contains(config_path) {
+            rejected.push(RejectedCommitPath {
+                path: config_path.to_path_buf(),
+                problem: CommitPathProblem::ScopeGraphOutsideAllScope,
+            });
+        }
     }
 
     // Every bad path in one answer: an agent that fixes one and reruns pays a
