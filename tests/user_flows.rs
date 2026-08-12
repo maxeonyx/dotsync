@@ -1412,6 +1412,90 @@ Correct flow:
 }
 
 #[test]
+fn commit_path_that_escapes_home_is_an_error() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    // Dotsync records the path you name verbatim as a repo path, and every
+    // machine on that scope writes it back out under its own home. A path that
+    // climbs out of home therefore writes outside home everywhere.
+    let outside = machine.home_dir.parent().expect("home has a parent");
+    write_file_at(&outside.join("outside.conf"), "PWNED=1\n");
+    write_file_at(&outside.join("deeper.conf"), "PWNED=2\n");
+    let revision_before = bookmark_revision(&machine, "all");
+
+    for command in [
+        "dotsync commit all -m escape -- ../outside.conf",
+        "dotsync commit all -m escape -- ../../machine-a/home/../deeper.conf",
+    ] {
+        let output = machine.run(command);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "`{command}` should be refused\n{}",
+            render_output(&output)
+        );
+        assert_eq!(
+            bookmark_revision(&machine, "all"),
+            revision_before,
+            "`{command}` must not move the scope"
+        );
+    }
+
+    assert!(
+        !bookmark_has_file(&machine, "all", "../outside.conf"),
+        "a path that climbs out of home must never become a repo entry"
+    );
+}
+
+#[test]
+fn commit_reports_every_unusable_path_at_once() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_file(".apprc", "ui_theme = dark\n");
+
+    // Reporting only the first bad path costs the agent one round trip per
+    // mistake, and each round trip is a full fetch-and-commit attempt.
+    let output = machine.run(
+        "dotsync commit all -m mixed -- nonexistent-file '~/.apprc' .local/share/dotsync/repo",
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", render_output(&output));
+
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    for expected in [
+        "`nonexistent-file` matched nothing",
+        "`~/.apprc` matched nothing",
+        "`.local/share/dotsync/repo` is dotsync's hidden repo itself",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "one run should report every unusable path; missing {expected:?}\n{}",
+            render_output(&output)
+        );
+    }
+    assert!(
+        !stderr.contains("is inside dotsync's hidden repo at"),
+        "the repo root is the repo, not something inside it\n{}",
+        render_output(&output)
+    );
+}
+
+#[test]
 fn commit_path_inside_dotsyncs_own_state_is_an_error() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
