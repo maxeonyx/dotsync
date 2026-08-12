@@ -388,7 +388,8 @@ async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
                 "command": "continue",
                 "scope": report.sync.current_scope,
                 "machine_scope": report.sync.current_scope,
-                "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>()
+                "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
+                "unpushed_scopes": report.push.unpushed_scopes(),
             }),
             human: format!(
                 "dotsync: resumed cascade and synced {} file(s)",
