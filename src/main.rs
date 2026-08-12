@@ -353,7 +353,7 @@ async fn run_init(remote_url: InitRemote) -> Result<CliOutput, DotsyncError> {
         }),
         human: format!(
             "dotsync: initialized {} and synced {} file(s)",
-            report.current_scope,
+            report.sync.current_scope,
             report.sync.synced_paths.len()
         ),
         notes: render::success_notes(&report.sync.drifts, Some(&report.push)),

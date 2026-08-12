@@ -23,8 +23,8 @@ use crate::sync::{sync_repo_to_home, SyncOptions, SyncReport};
 
 #[derive(Debug, Clone)]
 pub struct InitReport {
-    pub current_scope: String,
     pub created_scopes: Vec<String>,
+    /// Includes the machine scope this init settled on, as `sync.current_scope`.
     pub sync: SyncReport,
     pub push: PushReport,
 }
@@ -72,7 +72,6 @@ pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, 
     .await?;
 
     Ok(InitReport {
-        current_scope,
         created_scopes,
         sync,
         push,
