@@ -4541,3 +4541,49 @@ fn a_machine_with_no_sync_record_says_so_instead_of_guessing() {
     assert!(forced.status.success(), "{}", render_output(&forced));
     assert_eq!(machine.read_file(".bashrc"), "export DOTSYNC=v2\n");
 }
+
+#[test]
+fn committing_a_path_another_machine_deleted_is_refused() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+    seed_shared_apprc(&machine_a, &machine_b);
+
+    // B removes the file and publishes the removal. A has not synced since.
+    machine_b.delete_file(".apprc");
+    let commit_b = machine_b.run("dotsync commit all -m 'drop apprc' -- .apprc");
+    assert!(commit_b.status.success(), "{}", render_output(&commit_b));
+
+    let status_a = machine_a.run("dotsync status");
+    assert!(status_a.status.success(), "{}", render_output(&status_a));
+
+    let commit_a = machine_a.run("dotsync commit all -m 'keep apprc' -- .apprc");
+    assert_eq!(
+        commit_a.status.code(),
+        Some(1),
+        "naming a file another machine deleted must not quietly record nothing\n{}",
+        render_output(&commit_a)
+    );
+    let stderr = String::from_utf8_lossy(&commit_a.stderr).into_owned();
+    assert!(
+        stderr.contains("deleted on another machine"),
+        "the refusal must say what happened to the file\n{stderr}"
+    );
+    assert!(
+        stderr.contains("run `dotsync` to bring this machine up to date"),
+        "the refusal must point at plain `dotsync`\n{stderr}"
+    );
+
+    // Applying the deletion is one way out.
+    let sync_a = machine_a.run("dotsync");
+    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    assert!(!machine_a.file_exists(".apprc"));
+
+    // Putting it back on purpose is the other, and it says so in the JSON.
+    machine_b.write_file(".apprc", "ui_theme = dark\nfont = mono\n");
+    let restore = machine_b.run("dotsync --output json commit all -m 'put it back' -- .apprc");
+    assert!(restore.status.success(), "{}", render_output(&restore));
+    assert_eq!(
+        remote_branch_file_contents(&machine_b, "all", ".apprc"),
+        "ui_theme = dark\nfont = mono\n"
+    );
+}
