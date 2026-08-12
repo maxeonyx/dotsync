@@ -2566,6 +2566,55 @@ fn plain_sync_pushes_scopes_left_unpushed_by_an_interrupted_commit() {
 }
 
 #[test]
+fn commit_with_nothing_to_commit_still_publishes_unpushed_scopes() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    interrupt_push_after_cascade(
+        &machine,
+        ".config/fish/dev-certs.fish",
+        "set -gx DEV_CERTS 1\n",
+    );
+
+    // Committing a path that already matches the scope adds no history — but
+    // the run still has to publish what the interrupted run left behind.
+    let commit_output = machine
+        .run("dotsync --output json commit all -m 'no change' -- .config/fish/dev-certs.fish");
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
+
+    for scope in ["all", "linux", "mx-xps-cy"] {
+        assert_eq!(
+            remote_branch_revision(&machine, scope),
+            bookmark_revision(&machine, scope),
+            "a commit with nothing to add must still publish the pending `{scope}` bookmark"
+        );
+    }
+    assert_eq!(
+        remote_branch_file_contents(&machine, "all", ".config/fish/dev-certs.fish"),
+        "set -gx DEV_CERTS 1\n"
+    );
+
+    let json = parse_stdout_json(&commit_output);
+    assert_eq!(
+        json["unpushed_scopes"],
+        serde_json::json!([]),
+        "{}",
+        render_output(&commit_output)
+    );
+}
+
+#[test]
 fn commit_pushes_scopes_left_unpushed_by_an_interrupted_commit() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
