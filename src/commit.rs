@@ -75,6 +75,11 @@ struct PausedCascadeStep {
 #[derive(Debug, Clone)]
 pub struct CommitReport {
     pub committed_scope: String,
+    /// Paths this commit put on the scope for the first time. Every machine
+    /// sharing that scope will have them written into its home directory, so a
+    /// run that adds files says which ones rather than reading like a run that
+    /// changed a line.
+    pub newly_tracked: Vec<PathBuf>,
     /// Paths a named directory matched that this commit left alone. Empty for
     /// every other shape of commit: a bare commit selects what changed rather
     /// than filtering a list, and a path named exactly is refused out loud.
@@ -95,6 +100,8 @@ impl CommitReport {
     fn nothing_to_commit(scope: &str, skipped: Vec<RefusedCommitPath>, push: PushReport) -> Self {
         Self {
             committed_scope: scope.to_string(),
+            // A commit that records nothing tracks nothing.
+            newly_tracked: Vec::new(),
             skipped,
             forced_overwrites: Vec::new(),
             sync: SyncReport::default(),
@@ -188,6 +195,7 @@ async fn commit_in_session(
     .await?;
     let Selection {
         paths: selected_paths,
+        newly_tracked,
         skipped,
         forced_paths,
         forced_overwrites,
@@ -421,6 +429,7 @@ async fn commit_in_session(
 
     Ok(CommitReport {
         committed_scope: options.scope,
+        newly_tracked,
         skipped,
         forced_overwrites,
         sync,
@@ -431,6 +440,10 @@ async fn commit_in_session(
 /// What this commit will record, and on whose authority.
 struct Selection {
     paths: Vec<PathBuf>,
+    /// The selected paths the target scope does not have yet. Reported because
+    /// putting a file on a shared scope is the one thing a commit does that
+    /// every machine on that scope then has written into its home directory.
+    newly_tracked: Vec<PathBuf>,
     /// Paths a named directory expanded to that this commit left alone,
     /// because home holds no change of this machine's own at them. Reported,
     /// never silent: a bulk selection that quietly recorded less than it
@@ -484,11 +497,14 @@ async fn select_changes_to_record(
     )
     .await?;
 
-    // Naming a directory says "commit what changed under here", which is what
-    // a bare commit says about the whole machine — so it selects the same way,
-    // and steps around the files the repo moved on without home instead of
-    // refusing the run over them. Naming a path exactly says something
-    // stronger about that one path, and that claim is argued with below.
+    // Naming a directory says "commit what changed under here". A bare commit
+    // says the same thing about every file already on the scope, so both step
+    // around the files the repo moved on without home rather than refusing the
+    // run over them. A directory goes one further and picks up files nothing
+    // tracks yet, which is how new config reaches a scope in bulk and why a
+    // bare commit is not simply the same thing over a wider set. Naming a path
+    // exactly says something stronger again about that one path, and that
+    // claim is argued with below.
     let mut skipped = Vec::new();
     let selected_paths: Vec<PathBuf> = match &selection {
         None => classification
@@ -518,6 +534,12 @@ async fn select_changes_to_record(
     reject_scope_graph_outside_all(session, &options.scope, target_entries, &selected_paths)
         .await?;
 
+    let newly_tracked = selected_paths
+        .iter()
+        .filter(|relative| !target_entries.contains_key(*relative))
+        .cloned()
+        .collect::<Vec<_>>();
+
     if !options.force {
         let refused = selected_paths
             .iter()
@@ -537,6 +559,7 @@ async fn select_changes_to_record(
         }
         return Ok(Selection {
             paths: selected_paths,
+            newly_tracked,
             skipped,
             forced_paths: Vec::new(),
             forced_overwrites: Vec::new(),
@@ -554,6 +577,7 @@ async fn select_changes_to_record(
     Ok(Selection {
         forced_paths: selected_paths.clone(),
         paths: selected_paths,
+        newly_tracked,
         skipped,
         forced_overwrites,
     })

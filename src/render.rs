@@ -365,6 +365,42 @@ pub(crate) fn forced_overwrite_notes(forced_overwrites: &[std::path::PathBuf]) -
     notes
 }
 
+/// What a commit put on the scope for the first time.
+///
+/// Every machine sharing the scope will have these written into its home
+/// directory by its next sync, which is a bigger thing than changing a line —
+/// and a bulk selection can do it without the user having named a single one
+/// of them.
+pub(crate) fn newly_tracked_notes(newly_tracked: &[std::path::PathBuf]) -> Vec<String> {
+    if newly_tracked.is_empty() {
+        return Vec::new();
+    }
+    let mut notes = vec![format!(
+        "dotsync: started tracking {} new file(s) on this scope",
+        newly_tracked.len()
+    )];
+    notes.extend(listed(
+        newly_tracked.iter().map(|path| path.display().to_string()),
+    ));
+    notes
+}
+
+/// At most a handful of lines, then a count. A commit can name hundreds of
+/// files, and a note that scrolls the run's own result off the screen is worse
+/// than a shorter one.
+fn listed(lines: impl ExactSizeIterator<Item = String>) -> Vec<String> {
+    const SHOWN: usize = 5;
+    let total = lines.len();
+    let mut listed = lines
+        .take(SHOWN)
+        .map(|line| format!("- {line}"))
+        .collect::<Vec<_>>();
+    if total > SHOWN {
+        listed.push(format!("- ... and {} more", total - SHOWN));
+    }
+    listed
+}
+
 /// What a named directory matched that the commit left alone.
 ///
 /// A bulk selection that recorded less than it matched has to say so: an agent
@@ -378,11 +414,9 @@ pub(crate) fn skipped_path_notes(skipped: &[RefusedCommitPath]) -> Vec<String> {
         "dotsync: did not record {} file(s) under the paths you named, because this machine has not changed them",
         skipped.len()
     )];
-    notes.extend(
-        skipped
-            .iter()
-            .map(|skipped| format!("- {} ({})", skipped.path.display(), skipped.state.reason())),
-    );
+    notes.extend(listed(skipped.iter().map(|skipped| {
+        format!("{} ({})", skipped.path.display(), skipped.state.reason())
+    })));
     notes.push(
         "dotsync: run `dotsync` to bring them up to date, or name one exactly to be told what happened to it."
             .to_string(),

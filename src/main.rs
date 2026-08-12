@@ -51,7 +51,9 @@ const COMMIT_LONG_ABOUT: &str = "PATHS are home-relative files or directories to
 
 dotsync compares three sides of every path: what it last synced to this machine, what is in home now, and what the scopes hold now. A path whose home content is simply older than the repo has not been changed here, so naming it is refused and pointed at plain `dotsync` instead — committing it would revert whoever published the change that is already there.
 
-Naming a directory means \"commit what changed under here\", the same thing omitting the paths means about the whole machine. So it records what this machine changed under that directory, leaves the rest alone, and lists what it left alone.
+Naming a directory records what this machine changed under it, adds what is new under it, and steps around what another machine changed. Omitting the paths records only changes to files dotsync already tracks — it never adds anything, which is why a new file has to be opted into by naming it or the directory it is in.
+
+A run reports both halves of what that came to: `newly_tracked` for the files it put on the scope for the first time, and `skipped_paths` for the files under a named directory it left alone. Both appear in `--output json` and as notes on stderr, alongside `forced_overwrites`.
 
 `--force` means \"home wins anyway\", and on `commit` it applies only to the paths you name. That is deliberately different from `--force` on plain `dotsync` and on `continue`, which name no paths and so overwrite every drifted file. So `dotsync commit linux -m msg --force -- .bashrc` overwrites `.bashrc` and nothing else, while `dotsync --force` overwrites everything that drifted.
 
@@ -732,6 +734,7 @@ async fn run_commit(
             "machine_scope": report.sync.current_scope,
             "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
             "forced_overwrites": report.forced_overwrites.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
+            "newly_tracked": report.newly_tracked.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
             "skipped_paths": report.skipped.iter().map(|skipped| json!({
                 "path": render::display_path(&skipped.path),
                 "status": skipped.state.code(),
@@ -743,8 +746,9 @@ async fn run_commit(
             report.committed_scope,
             report.sync.synced_paths.len()
         ),
-        notes: render::skipped_path_notes(&report.skipped)
+        notes: render::newly_tracked_notes(&report.newly_tracked)
             .into_iter()
+            .chain(render::skipped_path_notes(&report.skipped))
             .chain(render::forced_overwrite_notes(&report.forced_overwrites))
             .chain(render::success_notes(
                 &report.sync.drifts,

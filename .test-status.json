@@ -6,7 +6,7 @@
     "dotsync::help_text$init_help_explains_optional_remote_prompt_without_mode_labels": "passing",
     "dotsync::help_text$init_help_explains_remote_url_and_setup": "passing",
     "dotsync::help_text$top_level_help_explains_scope_and_basic_workflow": "passing",
-    "dotsync::user_flows$a_commit_says_which_files_it_started_tracking": "pending",
+    "dotsync::user_flows$a_commit_says_which_files_it_started_tracking": "passing",
     "dotsync::user_flows$a_concurrent_merge_leaves_no_drift_behind": "passing",
     "dotsync::user_flows$a_directory_selection_records_what_this_machine_changed_and_says_what_it_skipped": "passing",
     "dotsync::user_flows$a_forced_overwrite_is_reported_even_when_the_run_then_fails": "passing",
