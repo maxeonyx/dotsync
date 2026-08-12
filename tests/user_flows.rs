@@ -84,6 +84,19 @@ impl MachineEnvironment {
         command.output().expect("run dotsync")
     }
 
+    /// Runs dotsync with no `HOME` in the environment, which is how dotsync
+    /// finds both the home directory it manages and its hidden repo.
+    fn run_without_home(&self, command: &str) -> Output {
+        let args = dotsync_args(command);
+        let mut command = Command::new(env!("CARGO_BIN_EXE_dotsync"));
+        command.args(args);
+        command.current_dir(&self.home_dir);
+        command.env_remove("HOME");
+        command.env("DOTSYNC_OS", &self.os);
+        command.env("DOTSYNC_HOSTNAME", &self.hostname);
+        command.output().expect("run dotsync")
+    }
+
     fn delete_file(&self, relative: &str) {
         fs::remove_file(self.home_dir.join(relative)).expect("delete file");
     }
@@ -1076,6 +1089,24 @@ fn commit_with_no_paths_ignores_unmanaged_home_files() {
         "an unmanaged home file must not be swept into the scope"
     );
     assert_eq!(machine.read_file(".gitconfig"), "[user]\nname = \"Max\"\n");
+}
+
+#[test]
+fn missing_home_is_reported_as_an_environment_error() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let status_output = machine.run_without_home("dotsync status");
+    assert_eq!(
+        status_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&status_output)
+    );
+    assert_stderr_snapshot(
+        &status_output,
+        "dotsync: HOME is not set, so dotsync cannot find your home directory. Set HOME to the home directory dotsync should manage, then rerun.\n",
+    );
 }
 
 #[test]
