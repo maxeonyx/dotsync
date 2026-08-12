@@ -4639,3 +4639,31 @@ fn a_forced_overwrite_is_reported_even_when_the_run_then_fails() {
         render_output(&commit_a)
     );
 }
+
+#[test]
+fn a_successful_forced_commit_says_what_it_overwrote() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+    seed_shared_apprc(&machine_a, &machine_b);
+
+    machine_b.write_file(".apprc", "ui_theme = dark\nfont = mono\nsize = 14\n");
+    let commit_b = machine_b.run("dotsync commit all -m 'add size' -- .apprc");
+    assert!(commit_b.status.success(), "{}", render_output(&commit_b));
+
+    let status_a = machine_a.run("dotsync status");
+    assert!(status_a.status.success(), "{}", render_output(&status_a));
+
+    // Succeeding is not a reason to stay quiet. A run that reverted another
+    // machine's published change has to say so on the way past, exactly as it
+    // does when it goes on to fail — the successful one is the commoner case.
+    let commit_a = machine_a.run("dotsync commit all -m 'revert on purpose' --force -- .apprc");
+    assert!(commit_a.status.success(), "{}", render_output(&commit_a));
+    assert_stderr_snapshot(
+        &commit_a,
+        "\
+dotsync: recorded 1 file(s) over an incoming change, because you passed `--force`
+- .apprc
+dotsync: committed all and synced 2 file(s)
+",
+    );
+}
