@@ -26,6 +26,8 @@ pub(crate) fn render_drift_json(drift: &FileDrift) -> serde_json::Value {
     json!({
         "path": display_path(&drift.repo_path),
         "system_path": display_path(&drift.system_path),
+        "state": drift.state.code(),
+        "reason": drift.state.reason(),
         "diff": render_drift_diff(drift),
     })
 }
@@ -323,25 +325,22 @@ fn notes_for_drifts(drifts: &[FileDrift]) -> Vec<String> {
         "dotsync: overwrote {} drifted file(s)",
         drifts.len()
     )];
-    notes.extend(drifts.iter().flat_map(|drift| {
-        [
-            format!("- {}", drift.repo_path.display()),
-            render_drift_diff(drift),
-        ]
-    }));
+    notes.extend(drifts.iter().flat_map(render_drift_human));
     notes
 }
 
 pub(crate) fn render_drifts_human(drifts: &[FileDrift]) -> Vec<String> {
-    drifts
-        .iter()
-        .flat_map(|drift| {
-            [
-                format!("- {}", drift.repo_path.display()),
-                render_drift_diff(drift),
-            ]
-        })
-        .collect()
+    drifts.iter().flat_map(render_drift_human).collect()
+}
+
+/// The path, why it is drift, and the diff. Naming the reason matters when
+/// more than home moved: "deleted here" and "deleted here, and changed in the
+/// repo on another machine" call for different resolutions.
+fn render_drift_human(drift: &FileDrift) -> [String; 2] {
+    [
+        format!("- {} ({})", drift.repo_path.display(), drift.state.reason()),
+        render_drift_diff(drift),
+    ]
 }
 
 pub(crate) fn display_path(path: &Path) -> String {

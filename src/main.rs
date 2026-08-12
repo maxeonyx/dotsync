@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
     abort_paused_cascade, commit_and_sync, continue_after_conflict, diff_home, init,
-    list_scope_tree, list_scopes, read_scope_file, status, sync, ChangeStatus, CommitOptions,
-    CommitSelection, DiffReport, DotsyncError, DotsyncPaths, FileDrift, ScopeListReport,
+    list_scope_tree, list_scopes, read_scope_file, status, sync, CommitOptions, CommitSelection,
+    DiffReport, DotsyncError, DotsyncPaths, FileChange, FileDrift, FileState, ScopeListReport,
     SyncOptions, TreeReport,
 };
 mod render;
@@ -511,12 +511,13 @@ async fn run_status() -> Result<CliOutput, DotsyncError> {
     let files = report
         .changes
         .iter()
-        .map(|change| {
-            json!({
-                "path": render::display_path(&change.path),
-                "status": render_change_status_json(change.status),
-            })
-        })
+        .map(|change| render_change_json(change, true))
+        .chain(
+            report
+                .incoming
+                .iter()
+                .map(|change| render_change_json(change, false)),
+        )
         .collect::<Vec<_>>();
 
     Ok(CliOutput::Success(SuccessOutput {
@@ -524,7 +525,8 @@ async fn run_status() -> Result<CliOutput, DotsyncError> {
             "status": "ok",
             "command": "status",
             "machine_scope": report.machine_scope,
-            "changed_count": files.len(),
+            "changed_count": report.changes.len(),
+            "incoming_count": report.incoming.len(),
             "groups": [{
                 "scope": serde_json::Value::Null,
                 "files": files,
@@ -649,23 +651,28 @@ fn print_drifts(drifts: &[FileDrift]) {
 }
 
 fn render_status_human(report: &dotsync::StatusReport) -> String {
-    if report.changes.is_empty() {
-        return format!("dotsync: no changes for {}", report.machine_scope);
+    let mut lines = Vec::new();
+
+    if !report.changes.is_empty() {
+        lines.push(format!(
+            "dotsync: {} changed managed file(s) for {}",
+            report.changes.len(),
+            report.machine_scope
+        ));
+        lines.extend(report.changes.iter().map(render_change_human));
+    }
+    if !report.incoming.is_empty() {
+        lines.push(format!(
+            "dotsync: {} incoming file(s) for {} — plain `dotsync` applies these",
+            report.incoming.len(),
+            report.machine_scope
+        ));
+        lines.extend(report.incoming.iter().map(render_change_human));
     }
 
-    let mut lines = Vec::with_capacity(report.changes.len() + 1);
-    lines.push(format!(
-        "dotsync: {} changed managed file(s) for {}",
-        report.changes.len(),
-        report.machine_scope
-    ));
-    lines.extend(report.changes.iter().map(|change| {
-        format!(
-            "  {} {}",
-            render_change_status_human(change.status),
-            render::display_path(&change.path)
-        )
-    }));
+    if lines.is_empty() {
+        return format!("dotsync: no changes for {}", report.machine_scope);
+    }
     lines.join("\n")
 }
 
@@ -799,17 +806,40 @@ fn file_success_output(
     })
 }
 
-fn render_change_status_human(status: ChangeStatus) -> &'static str {
-    match status {
-        ChangeStatus::Modified => "M",
-        ChangeStatus::Deleted => "D",
-    }
+/// One status line: a marker an agent can scan for, then the reason in words
+/// so it never has to guess what the marker meant.
+fn render_change_human(change: &FileChange) -> String {
+    format!(
+        "  {} {} ({})",
+        change_marker(change.state),
+        render::display_path(&change.path),
+        change.state.reason()
+    )
 }
 
-fn render_change_status_json(status: ChangeStatus) -> &'static str {
-    match status {
-        ChangeStatus::Modified => "modified",
-        ChangeStatus::Deleted => "deleted",
+fn render_change_json(change: &FileChange, action_required: bool) -> serde_json::Value {
+    json!({
+        "path": render::display_path(&change.path),
+        "status": change.state.code(),
+        "action_required": action_required,
+    })
+}
+
+fn change_marker(state: FileState) -> &'static str {
+    match state {
+        FileState::EditedInHome | FileState::EditedInHomeButRemovedFromRepo => "M",
+        FileState::DeletedInHome | FileState::DeletedInHomeTipAlsoChanged => "D",
+        FileState::DivergedEdit | FileState::IncomingNewCollidesWithUntrackedHome => "C",
+        FileState::IncomingNew => "A",
+        FileState::StaleNotYours => "U",
+        FileState::RemovedFromRepo => "R",
+        // Not reported: `status` only ever renders drift and incoming changes.
+        FileState::UntrackedInHome
+        | FileState::IncomingNewAlreadyMatchesHome
+        | FileState::AlreadyApplied
+        | FileState::InSync
+        | FileState::RemovedEverywhere
+        | FileState::AbsentEverywhere => " ",
     }
 }
 

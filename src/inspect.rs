@@ -1,16 +1,17 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use jj_lib::repo::Repo as _;
 
 use crate::config::{internal_repo_paths, load_config, DotsyncPaths};
+use crate::drift::classify_home_against_scope;
 use crate::error::{jj_error, DotsyncError};
 use crate::repo::{
     collect_managed_tree_entries, fetch_origin, load_repo_direct, load_scope_commit,
     read_tree_entry_bytes,
 };
 use crate::scope_graph::scope_depth;
-use crate::sync::{detect_drifts, load_sync_state, resolve_current_scope, FileDrift};
+use crate::sync::{load_sync_state, resolve_current_scope, FileDrift};
 
 #[derive(Debug, Clone)]
 pub struct ScopeInfo {
@@ -134,10 +135,31 @@ pub async fn diff_home(paths: &DotsyncPaths) -> Result<DiffReport, DotsyncError>
     let repo = fetch_origin(repo).await?;
     let sync_state = load_sync_state(paths, &config)?;
     let machine_scope = resolve_current_scope(&config, sync_state.as_ref(), None)?;
-    let machine_commit = load_scope_commit(repo.as_ref(), &machine_scope)?;
-    let managed_entries =
-        collect_managed_tree_entries(&machine_commit.tree(), &internal_repo_paths(&config))?;
-    let drifts = detect_drifts(paths, repo.as_ref(), &managed_entries).await?;
+    let classification = classify_home_against_scope(
+        paths,
+        repo.as_ref(),
+        &config,
+        sync_state.as_ref(),
+        &machine_scope,
+        &BTreeSet::new(),
+    )
+    .await?;
+
+    // Exactly what the sync gate would stop on, and exactly what `status`
+    // counts as a change. A remote advance this machine has not applied yet is
+    // not drift, so `diff` no longer reports one — nor exits non-zero for it.
+    let drifts = classification
+        .paths
+        .iter()
+        .filter(|(_, path)| path.state.is_drift())
+        .map(|(relative, path)| FileDrift {
+            repo_path: relative.clone(),
+            system_path: paths.home_dir.join(relative),
+            state: path.state,
+            repo_bytes: path.tip_bytes.clone(),
+            home_bytes: path.home_bytes.clone(),
+        })
+        .collect();
 
     Ok(DiffReport {
         machine_scope,

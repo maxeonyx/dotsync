@@ -585,7 +585,7 @@ Dotsync stopped before overwriting local drift so you can inspect what would be 
 Correct flow:
 - If the repo is correct, rerun with `dotsync --force` to overwrite the drift after reviewing the diffs.
 - If the live file is the change you wanted, run `dotsync status`, then commit the intended path with `dotsync commit <scope> -m "message" -- <path>`.
-- .gitconfig
+- .gitconfig (edited here since the last sync)
 --- repo
 +++ system
 @@ -1,2 +1,2 @@
@@ -639,7 +639,7 @@ fn diff_shows_line_oriented_home_drift_without_syncing() {
         &diff_output,
         "\
 dotsync: 1 drifted managed file(s) for mx-xps-cy
-- .config/app.conf
+- .config/app.conf (edited here since the last sync)
 --- repo
 +++ system
 @@ -1,2 +1,2 @@
@@ -1000,13 +1000,16 @@ fn sync_uses_state_machine_scope_even_if_checkout_changes() {
         "machine config\n"
     );
 
+    // Deleting a managed file from home is deletion drift, so this restore has
+    // to say it means to discard it. What the test is pinning is which machine
+    // scope the sync used, not whether the deletion blocked.
     machine.delete_file(".config/machine-only.txt");
     machine.write_sync_state_raw(&format!(
         "{{\n  \"machine_scope\": \"mx-xps-cy\",\n  \"last_synced_revision\": \"{}\"\n}}\n",
         bookmark_revision(&machine, "mx-xps-cy")
     ));
 
-    let sync_output = machine.run("dotsync");
+    let sync_output = machine.run("dotsync --force");
     assert!(
         sync_output.status.success(),
         "{}",
@@ -2811,7 +2814,7 @@ fn status_shows_modified_file() {
         &status_output,
         "\
 dotsync: 1 changed managed file(s) for mx-xps-cy
-  M .bashrc
+  M .bashrc (edited here since the last sync)
 ",
     );
 }
@@ -2986,7 +2989,7 @@ fn status_shows_deleted_file() {
         &status_output,
         "\
 dotsync: 1 changed managed file(s) for mx-xps-cy
-  D .bashrc
+  D .bashrc (deleted here since the last sync)
 ",
     );
 }
@@ -3985,7 +3988,7 @@ fn a_remote_advance_is_reported_as_incoming_by_status_diff_and_sync() {
         &status_a,
         "\
 dotsync: 1 incoming file(s) for goof-a — plain `dotsync` applies these
-  U .apprc
+  U .apprc (changed on another machine, and not edited here)
 ",
     );
 
