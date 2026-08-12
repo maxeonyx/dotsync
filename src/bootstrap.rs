@@ -30,7 +30,17 @@ pub struct InitReport {
     pub push: PushReport,
 }
 
-pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<Run<InitReport>, DotsyncError> {
+/// Unlike every other command, `init` cannot carry on against a last-fetched
+/// state, because there isn't one yet — so its run never reports an unreachable
+/// remote as an aside. It reports it as the error it is.
+pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Run<Result<InitReport, DotsyncError>> {
+    Run {
+        report: init_repo(paths, remote_url).await,
+        unreachable_remote: None,
+    }
+}
+
+async fn init_repo(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, DotsyncError> {
     if paths.repo_root.exists() {
         return Err(DotsyncError::RepoAlreadyExists {
             path: paths.repo_root.clone(),
@@ -55,7 +65,7 @@ pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<Run<InitRepo
 async fn create_repo_and_join(
     paths: &DotsyncPaths,
     remote_url: &str,
-) -> Result<Run<InitReport>, DotsyncError> {
+) -> Result<InitReport, DotsyncError> {
     if let Some(parent) = paths.repo_root.parent() {
         std::fs::create_dir_all(parent).map_err(|source| DotsyncError::Io {
             path: parent.to_path_buf(),
@@ -83,13 +93,13 @@ async fn create_repo_and_join(
     // out of, which is what a session is: everything before it works on the
     // repo handle directly.
     let remote_empty = repo.view().all_remote_bookmarks().next().is_none();
-    let current_scope = if remote_empty {
+    let (current_scope, repo) = if remote_empty {
         bootstrap_empty_remote(repo, &identity).await?
     } else {
         join_existing_remote(paths, repo, &identity).await?
     };
 
-    let mut session = Session::open(paths).await?;
+    let mut session = Session::from_repo(paths, repo).await?;
     let push = push_scope_updates(&mut session).await?;
     let sync = sync_repo_to_home(
         &session,
@@ -99,13 +109,13 @@ async fn create_repo_and_join(
     )
     .await?;
 
-    Ok(session.finish(InitReport { sync, push }))
+    Ok(InitReport { sync, push })
 }
 
 pub(crate) async fn bootstrap_empty_remote(
     repo: std::sync::Arc<jj_lib::repo::ReadonlyRepo>,
     identity: &MachineIdentity,
-) -> Result<String, DotsyncError> {
+) -> Result<(String, std::sync::Arc<jj_lib::repo::ReadonlyRepo>), DotsyncError> {
     let graph = ScopeGraph::new(HashMap::from([
         ("all".to_string(), vec![]),
         (identity.os_scope.clone(), vec!["all".to_string()]),
@@ -156,18 +166,19 @@ pub(crate) async fn bootstrap_empty_remote(
         RefNameBuf::from(identity.machine_scope.as_str()).as_ref(),
         RefTarget::normal(machine_commit.id().clone()),
     );
-    tx.commit("dotsync: initialize scopes")
+    let repo = tx
+        .commit("dotsync: initialize scopes")
         .await
         .map_err(|err| jj_error(format!("commit init scopes: {err}")))?;
 
-    Ok(identity.machine_scope.clone())
+    Ok((identity.machine_scope.clone(), repo))
 }
 
 pub(crate) async fn join_existing_remote(
     paths: &DotsyncPaths,
     repo: std::sync::Arc<jj_lib::repo::ReadonlyRepo>,
     identity: &MachineIdentity,
-) -> Result<String, DotsyncError> {
+) -> Result<(String, std::sync::Arc<jj_lib::repo::ReadonlyRepo>), DotsyncError> {
     let config = load_config(paths, repo.as_ref()).await?;
     let graph = config.graph.clone();
 
@@ -186,7 +197,7 @@ pub(crate) async fn join_existing_remote(
     }
 
     if scopes_to_create == 0 {
-        return Ok(identity.machine_scope.clone());
+        return Ok((identity.machine_scope.clone(), repo));
     }
 
     let updated_graph = ScopeGraph::new(parents)?;
@@ -277,10 +288,10 @@ pub(crate) async fn join_existing_remote(
         scope_heads.update(identity.machine_scope.clone(), commit);
     }
 
-    let _repo = tx
+    let repo = tx
         .commit("dotsync: initialize machine scope")
         .await
         .map_err(|err| jj_error(format!("commit join scope changes: {err}")))?;
 
-    Ok(identity.machine_scope.clone())
+    Ok((identity.machine_scope.clone(), repo))
 }

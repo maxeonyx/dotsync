@@ -12,7 +12,7 @@ use crate::drift::{classify_home_against_scope, ClassifiedPath, FileState, Recor
 use crate::error::DotsyncError;
 use crate::machine::detect_machine;
 use crate::repo::{pending_push_scopes, push_scope_updates, PushReport};
-use crate::session::{Run, Session};
+use crate::session::{in_session, Run, Session};
 
 /// Which drifted home files a run may overwrite.
 ///
@@ -101,21 +101,24 @@ pub(crate) struct SyncState {
 pub async fn sync(
     paths: &DotsyncPaths,
     force: ForceScope,
-) -> Result<Run<SyncCommandReport>, DotsyncError> {
-    let mut session = Session::open(paths).await?;
-    session.fetch().await?;
-    // Publish before touching home: scope commits left behind by an
-    // interrupted run must reach the remote even if the home sync stops. The
-    // exception is a paused cascade, whose scopes are only half cascaded.
-    let push = match crate::commit::paused_cascade_scope(session.paths())? {
-        Some(paused_scope) => PushReport::WithheldPausedCascade {
-            scopes: pending_push_scopes(&session),
-            paused_scope,
-        },
-        None => push_scope_updates(&mut session).await?,
-    };
-    let sync = sync_repo_to_home(&session, force, &RecordedFromHome::default(), None).await?;
-    Ok(session.finish(SyncCommandReport { sync, push }))
+) -> Run<Result<SyncCommandReport, DotsyncError>> {
+    in_session(paths, async |session| {
+        session.fetch().await?;
+        // Publish before touching home: scope commits left behind by an
+        // interrupted run must reach the remote even if the home sync stops.
+        // The exception is a paused cascade, whose scopes are only half
+        // cascaded.
+        let push = match crate::commit::paused_cascade_scope(session.paths())? {
+            Some(paused_scope) => PushReport::WithheldPausedCascade {
+                scopes: pending_push_scopes(session),
+                paused_scope,
+            },
+            None => push_scope_updates(session).await?,
+        };
+        let sync = sync_repo_to_home(session, force, &RecordedFromHome::default(), None).await?;
+        Ok(SyncCommandReport { sync, push })
+    })
+    .await
 }
 
 pub(crate) fn resolve_current_scope(

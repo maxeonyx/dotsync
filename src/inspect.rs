@@ -8,7 +8,7 @@ use crate::drift::{classify_home_against_scope, RecordedFromHome};
 use crate::error::{jj_error, DotsyncError};
 use crate::repo::{collect_managed_tree_entries, load_scope_commit, read_tree_entry_bytes};
 use crate::scope_graph::scope_depth;
-use crate::session::{Run, Session};
+use crate::session::{in_session, Run, Session};
 use crate::sync::{load_sync_state, resolve_current_scope, FileDrift};
 
 #[derive(Debug, Clone)]
@@ -52,48 +52,49 @@ pub async fn view(
     paths: &DotsyncPaths,
     scope: Option<&str>,
     file: Option<&Path>,
-) -> Result<Run<ViewReport>, DotsyncError> {
-    let mut session = Session::open(paths).await?;
-    session.fetch().await?;
+) -> Run<Result<ViewReport, DotsyncError>> {
+    in_session(paths, async |session| {
+        session.fetch().await?;
 
-    let report = match (scope, file) {
-        (Some(scope), Some(file)) => ViewReport::FileContents {
-            scope: scope.to_string(),
-            file: file.to_path_buf(),
-            contents: scope_file_contents(&session, scope, file).await?,
-        },
-        (Some(scope), None) => ViewReport::Scope {
-            scope: scope.to_string(),
-            files: scope_files(&session, scope)?,
-        },
-        (None, Some(file)) => {
-            let mut scopes = Vec::new();
-            for scope in scope_list(&session)? {
-                if scope_files(&session, &scope.name)?
-                    .iter()
-                    .any(|path| path == file)
-                {
-                    scopes.push(scope.name);
+        Ok(match (scope, file) {
+            (Some(scope), Some(file)) => ViewReport::FileContents {
+                scope: scope.to_string(),
+                file: file.to_path_buf(),
+                contents: scope_file_contents(session, scope, file).await?,
+            },
+            (Some(scope), None) => ViewReport::Scope {
+                scope: scope.to_string(),
+                files: scope_files(session, scope)?,
+            },
+            (None, Some(file)) => {
+                let mut scopes = Vec::new();
+                for scope in scope_list(session)? {
+                    if scope_files(session, &scope.name)?
+                        .iter()
+                        .any(|path| path == file)
+                    {
+                        scopes.push(scope.name);
+                    }
+                }
+                ViewReport::FileScopes {
+                    file: file.to_path_buf(),
+                    scopes,
                 }
             }
-            ViewReport::FileScopes {
-                file: file.to_path_buf(),
-                scopes,
+            (None, None) => {
+                let scopes = scope_list(session)?;
+                let mut files = BTreeSet::new();
+                for scope in &scopes {
+                    files.extend(scope_files(session, &scope.name)?);
+                }
+                ViewReport::Overview {
+                    scopes,
+                    files: files.into_iter().collect(),
+                }
             }
-        }
-        (None, None) => {
-            let scopes = scope_list(&session)?;
-            let mut files = BTreeSet::new();
-            for scope in &scopes {
-                files.extend(scope_files(&session, &scope.name)?);
-            }
-            ViewReport::Overview {
-                scopes,
-                files: files.into_iter().collect(),
-            }
-        }
-    };
-    Ok(session.finish(report))
+        })
+    })
+    .await
 }
 
 /// The scope graph, root scopes first and alphabetical within a depth, which
@@ -162,38 +163,40 @@ async fn scope_file_contents(
     read_tree_entry_bytes(session.repo().store(), relative, &value).await
 }
 
-pub async fn diff_home(paths: &DotsyncPaths) -> Result<Run<DiffReport>, DotsyncError> {
-    let mut session = Session::open(paths).await?;
-    session.fetch().await?;
-    let sync_state = load_sync_state(session.paths(), session.config())?;
-    let machine_scope = resolve_current_scope(session.config(), sync_state.as_ref(), None)?;
-    let classification = classify_home_against_scope(
-        &session,
-        sync_state.as_ref(),
-        &machine_scope,
-        &BTreeSet::new(),
-        &RecordedFromHome::default(),
-    )
-    .await?;
+pub async fn diff_home(paths: &DotsyncPaths) -> Run<Result<DiffReport, DotsyncError>> {
+    in_session(paths, async |session| {
+        session.fetch().await?;
+        let sync_state = load_sync_state(session.paths(), session.config())?;
+        let machine_scope = resolve_current_scope(session.config(), sync_state.as_ref(), None)?;
+        let classification = classify_home_against_scope(
+            session,
+            sync_state.as_ref(),
+            &machine_scope,
+            &BTreeSet::new(),
+            &RecordedFromHome::default(),
+        )
+        .await?;
 
-    // Exactly what the sync gate would stop on, and exactly what `status`
-    // counts as a change. A remote advance this machine has not applied yet is
-    // not drift, so `diff` no longer reports one — nor exits non-zero for it.
-    let drifts = classification
-        .paths
-        .iter()
-        .filter(|(_, path)| path.state.is_drift())
-        .map(|(relative, path)| FileDrift {
-            repo_path: relative.clone(),
-            system_path: session.paths().home_dir.join(relative),
-            state: path.state,
-            repo_bytes: path.tip_bytes.clone(),
-            home_bytes: path.home_bytes.clone(),
+        // Exactly what the sync gate would stop on, and exactly what `status`
+        // counts as a change. A remote advance this machine has not applied yet is
+        // not drift, so `diff` no longer reports one — nor exits non-zero for it.
+        let drifts = classification
+            .paths
+            .iter()
+            .filter(|(_, path)| path.state.is_drift())
+            .map(|(relative, path)| FileDrift {
+                repo_path: relative.clone(),
+                system_path: session.paths().home_dir.join(relative),
+                state: path.state,
+                repo_bytes: path.tip_bytes.clone(),
+                home_bytes: path.home_bytes.clone(),
+            })
+            .collect();
+
+        Ok(DiffReport {
+            machine_scope,
+            drifts,
         })
-        .collect();
-
-    Ok(session.finish(DiffReport {
-        machine_scope,
-        drifts,
-    }))
+    })
+    .await
 }

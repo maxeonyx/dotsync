@@ -25,7 +25,16 @@ pub(crate) struct Session {
 
 impl Session {
     pub(crate) async fn open(paths: &DotsyncPaths) -> Result<Self, DotsyncError> {
-        let repo = load_repo_direct(paths).await?;
+        Self::from_repo(paths, load_repo_direct(paths).await?).await
+    }
+
+    /// A session over a repo the caller already has. `init` has one: it just
+    /// created the scopes, and re-opening from disk to read back what it wrote
+    /// is exactly the pattern the session exists to remove.
+    pub(crate) async fn from_repo(
+        paths: &DotsyncPaths,
+        repo: Arc<ReadonlyRepo>,
+    ) -> Result<Self, DotsyncError> {
         let config = load_config(paths, repo.as_ref()).await?;
         Ok(Self {
             paths: paths.clone(),
@@ -82,25 +91,52 @@ impl Session {
         Ok(())
     }
 
-    /// Hands a report back together with what the run it came from could not
-    /// do.
-    pub(crate) fn finish<T>(&self, report: T) -> Run<T> {
+    /// Hands an outcome back together with what the run it came from could
+    /// not do — whichever way that outcome went.
+    fn finish<T>(&self, report: T) -> Run<T> {
         Run {
             report,
             unreachable_remote: self.unreachable_remote.clone(),
         }
     }
-
-    pub(crate) fn unreachable_remote(&self) -> Option<UnreachableRemote> {
-        self.unreachable_remote.clone()
-    }
 }
 
-/// What a command reports, plus what the run it happened in could not do.
+/// Runs one command inside one session, and reports what the run could not do
+/// alongside however it ended.
+///
+/// The wrapping is what makes that last part true. `command` returns a
+/// `Result` and is free to use `?` everywhere inside, but the `?` cannot
+/// escape past here — so a command physically cannot carry the run's remote
+/// state on its success path and drop it on its failure path, which is what
+/// happened when each command wrapped its own successful report.
+pub(crate) async fn in_session<T, E>(
+    paths: &DotsyncPaths,
+    command: impl AsyncFnOnce(&mut Session) -> Result<T, E>,
+) -> Run<Result<T, E>>
+where
+    E: From<DotsyncError>,
+{
+    let mut session = match Session::open(paths).await {
+        Ok(session) => session,
+        // There is no session, so there is nothing to say about the remote:
+        // this run never got as far as looking at it.
+        Err(error) => {
+            return Run {
+                report: Err(error.into()),
+                unreachable_remote: None,
+            }
+        }
+    };
+    let report = command(&mut session).await;
+    session.finish(report)
+}
+
+/// What a command produced, plus what the run it happened in could not do.
 ///
 /// The remote being out of reach is a fact about the run rather than about
-/// anything the run found, so it rides alongside the report instead of being
-/// threaded into all eight of them.
+/// anything the run found — and just as true of a run that stopped as of one
+/// that finished, which is why the report inside is the whole outcome rather
+/// than only the happy half of it.
 #[derive(Debug, Clone)]
 pub struct Run<T> {
     pub report: T,

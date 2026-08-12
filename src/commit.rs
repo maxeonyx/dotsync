@@ -28,7 +28,7 @@ use crate::repo::{
     PushReport,
 };
 use crate::scope_graph::ScopeGraph;
-use crate::session::{Run, Session, UnreachableRemote};
+use crate::session::{in_session, Run, Session};
 use crate::sync::{ForceScope, SyncReport};
 
 #[derive(Debug, Clone)]
@@ -112,10 +112,6 @@ impl CommitReport {
 #[derive(Debug)]
 pub struct CommitFailure {
     pub forced_overwrites: Vec<PathBuf>,
-    /// Carried for the same reason as on a successful run: a commit built on
-    /// the last-fetched state has to say so, and stopping later does not make
-    /// that less true.
-    pub unreachable_remote: Option<UnreachableRemote>,
     pub error: DotsyncError,
 }
 
@@ -124,7 +120,6 @@ impl From<DotsyncError> for CommitFailure {
     fn from(error: DotsyncError) -> Self {
         Self {
             forced_overwrites: Vec::new(),
-            unreachable_remote: None,
             error,
         }
     }
@@ -145,16 +140,27 @@ pub struct AbortReport {
 pub async fn commit_and_sync(
     paths: &DotsyncPaths,
     options: CommitOptions,
-) -> Result<Run<CommitReport>, CommitFailure> {
+) -> Run<Result<CommitReport, CommitFailure>> {
+    in_session(paths, async |session| {
+        commit_in_session(session, options).await
+    })
+    .await
+}
+
+async fn commit_in_session(
+    session: &mut Session,
+    options: CommitOptions,
+) -> Result<CommitReport, CommitFailure> {
+    let paths = session.paths().clone();
+    let paths = &paths;
     reject_commit_if_cascade_paused(paths)?;
 
-    let mut session = Session::open(paths).await?;
     session.fetch().await?;
     // Publish what earlier runs left behind before looking at this commit at
     // all: this commit may turn out to add nothing, and a machine with an
     // interrupted push behind it must still heal. Anything this run goes on to
     // create is published by the push after the cascade.
-    let pending_push = push_scope_updates(&mut session).await?;
+    let pending_push = push_scope_updates(session).await?;
     let graph = session.config().graph.clone();
 
     if !graph.parents.contains_key(&options.scope) {
@@ -172,7 +178,7 @@ pub async fn commit_and_sync(
         load_scope_entries(session.repo().as_ref(), &options.scope, &internal_paths)?;
 
     let selection = select_changes_to_record(
-        &session,
+        session,
         sync_state.as_ref(),
         &machine_scope,
         &options,
@@ -188,11 +194,11 @@ pub async fn commit_and_sync(
     } = selection;
 
     if selected_paths.is_empty() {
-        return Ok(session.finish(CommitReport::nothing_to_commit(
+        return Ok(CommitReport::nothing_to_commit(
             &options.scope,
             skipped,
             pending_push,
-        )));
+        ));
     }
 
     let last_synced_commit = sync_state.as_ref().and_then(|state| {
@@ -311,11 +317,11 @@ pub async fn commit_and_sync(
     }
 
     if new_tree.tree_ids() == base_commit.tree().tree_ids() {
-        return Ok(session.finish(CommitReport::nothing_to_commit(
+        return Ok(CommitReport::nothing_to_commit(
             &options.scope,
             skipped,
             pending_push,
-        )));
+        ));
     }
 
     let new_commit = tx
@@ -393,12 +399,11 @@ pub async fn commit_and_sync(
 
     // Push as soon as the history exists: the home sync below can legitimately
     // stop on drift, and a stop must never strand committed scope history.
-    let push = push_scope_updates(&mut session).await;
+    let push = push_scope_updates(session).await;
     // From here the forced history exists and is published, so every exit has
     // to carry what it overwrote.
     let stopped = |error: DotsyncError| CommitFailure {
         forced_overwrites: forced_overwrites.clone(),
-        unreachable_remote: session.unreachable_remote(),
         error,
     };
     let push = push.map_err(stopped)?;
@@ -406,7 +411,7 @@ pub async fn commit_and_sync(
     // repo, so for this sync those bytes are the last-synced side: home is
     // behind whatever the cascade merged them into, not drifted from it.
     let sync = crate::sync::sync_repo_to_home(
-        &session,
+        session,
         ForceScope::from_paths(&forced_paths),
         &recorded_from_home,
         Some(&machine_scope),
@@ -414,13 +419,13 @@ pub async fn commit_and_sync(
     .await
     .map_err(stopped)?;
 
-    Ok(session.finish(CommitReport {
+    Ok(CommitReport {
         committed_scope: options.scope,
         skipped,
         forced_overwrites,
         sync,
         push,
-    }))
+    })
 }
 
 /// What this commit will record, and on whose authority.
@@ -981,7 +986,19 @@ fn unresolved_conflicted_files(
 pub async fn continue_after_conflict(
     paths: &DotsyncPaths,
     force: ForceScope,
-) -> Result<Run<ContinueReport>, DotsyncError> {
+) -> Run<Result<ContinueReport, DotsyncError>> {
+    in_session(paths, async |session| {
+        continue_in_session(session, force).await
+    })
+    .await
+}
+
+async fn continue_in_session(
+    session: &mut Session,
+    force: ForceScope,
+) -> Result<ContinueReport, DotsyncError> {
+    let paths = session.paths().clone();
+    let paths = &paths;
     let state = load_paused_cascade_state(paths)?;
     // A cascade pauses because at least one file conflicted, so an empty
     // record means the pause was written before this check existed rather than
@@ -1000,7 +1017,6 @@ pub async fn continue_after_conflict(
             paths: unresolved,
         });
     }
-    let mut session = Session::open(paths).await?;
     let graph = session.config().graph.clone();
     let repo = session.repo().clone();
     let mut tx = repo.start_transaction();
@@ -1124,18 +1140,24 @@ pub async fn continue_after_conflict(
         )
         .await?;
     remove_paused_cascade_state(paths)?;
-    let push = push_scope_updates(&mut session).await?;
+    let push = push_scope_updates(session).await?;
     let sync = crate::sync::sync_repo_to_home(
-        &session,
+        session,
         force,
         &recorded_from_home,
         Some(&state.machine_scope),
     )
     .await?;
-    Ok(session.finish(ContinueReport { sync, push }))
+    Ok(ContinueReport { sync, push })
 }
 
-pub async fn abort_paused_cascade(paths: &DotsyncPaths) -> Result<Run<AbortReport>, DotsyncError> {
+pub async fn abort_paused_cascade(paths: &DotsyncPaths) -> Run<Result<AbortReport, DotsyncError>> {
+    in_session(paths, async |session| abort_in_session(session).await).await
+}
+
+async fn abort_in_session(session: &mut Session) -> Result<AbortReport, DotsyncError> {
+    let paths = session.paths().clone();
+    let paths = &paths;
     let state = load_paused_cascade_state(paths)?;
     if state.original_scope_commit_ids.is_empty() {
         return Err(DotsyncError::Jj {
@@ -1143,7 +1165,6 @@ pub async fn abort_paused_cascade(paths: &DotsyncPaths) -> Result<Run<AbortRepor
         });
     }
 
-    let mut session = Session::open(paths).await?;
     let repo = session.repo().clone();
     let mut tx = repo.start_transaction();
     for (scope, commit_id) in &state.original_scope_commit_ids {
@@ -1171,17 +1192,17 @@ pub async fn abort_paused_cascade(paths: &DotsyncPaths) -> Result<Run<AbortRepor
     // what DESIGN.md's "reverts all the config files" says and what the old
     // selective restore quietly did not do.
     let sync = crate::sync::sync_repo_to_home(
-        &session,
+        session,
         ForceScope::Everything,
         &RecordedFromHome::default(),
         Some(&state.machine_scope),
     )
     .await?;
 
-    Ok(session.finish(AbortReport {
+    Ok(AbortReport {
         aborted_scope: state.paused_scope,
         sync,
-    }))
+    })
 }
 
 fn paused_cascade_state_path(paths: &DotsyncPaths) -> PathBuf {
