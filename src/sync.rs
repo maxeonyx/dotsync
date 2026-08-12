@@ -15,9 +15,42 @@ use crate::repo::{
     fetch_origin, load_repo_direct, pending_push_scopes, push_scope_updates, PushReport,
 };
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SyncOptions {
-    pub force: bool,
+/// Which drifted home files a run may overwrite.
+///
+/// `--force` answers one question — "overwrite the drift?" — but the commands
+/// that ask it do not all have the same thing to scope the answer to. Plain
+/// `dotsync` and `continue` name no paths, so their `--force` is necessarily
+/// blanket. `commit` names paths, so its `--force` rides that same list and
+/// reaches nothing else. `init` and `abort` never really ask: `init` has
+/// nothing of yours to overwrite and `abort` exists to discard home edits, so
+/// both always overwrite and both refuse the flag.
+#[derive(Debug, Clone, Default)]
+pub enum ForceScope {
+    /// Any drift stops the run.
+    #[default]
+    Nothing,
+    /// Every drifted file.
+    Everything,
+    /// Only these paths; drift anywhere else still stops the run.
+    Paths(BTreeSet<PathBuf>),
+}
+
+impl ForceScope {
+    pub fn from_paths(paths: &[PathBuf]) -> Self {
+        if paths.is_empty() {
+            Self::Nothing
+        } else {
+            Self::Paths(paths.iter().cloned().collect())
+        }
+    }
+
+    fn allows(&self, relative: &Path) -> bool {
+        match self {
+            Self::Nothing => false,
+            Self::Everything => true,
+            Self::Paths(paths) => paths.contains(relative),
+        }
+    }
 }
 
 /// One managed path whose home content is not what the repo says it should be.
@@ -68,7 +101,7 @@ pub(crate) struct SyncState {
 
 pub async fn sync(
     paths: &DotsyncPaths,
-    options: SyncOptions,
+    force: ForceScope,
 ) -> Result<SyncCommandReport, DotsyncError> {
     let repo = load_repo_direct(paths).await?;
     let _repo = fetch_origin(repo).await?;
@@ -82,7 +115,7 @@ pub async fn sync(
         },
         None => push_scope_updates(paths).await?,
     };
-    let sync = sync_repo_to_home(paths, options, None).await?;
+    let sync = sync_repo_to_home(paths, force, None).await?;
     Ok(SyncCommandReport { sync, push })
 }
 
@@ -128,7 +161,7 @@ fn write_home_file(
 
 pub(crate) async fn sync_repo_to_home(
     paths: &DotsyncPaths,
-    options: SyncOptions,
+    force: ForceScope,
     machine_scope_hint: Option<&str>,
 ) -> Result<SyncReport, DotsyncError> {
     let config = load_config(paths).await?;
@@ -155,12 +188,16 @@ pub(crate) async fn sync_repo_to_home(
         .filter(|(_, path)| path.state.is_drift())
         .map(|(relative, path)| file_drift(paths, relative, path))
         .collect::<Vec<_>>();
-    if !drifts.is_empty() && !options.force {
+    let (overwritten, blocking): (Vec<FileDrift>, Vec<FileDrift>) = drifts
+        .into_iter()
+        .partition(|drift| force.allows(&drift.repo_path));
+    if !blocking.is_empty() {
         return Err(DotsyncError::DriftDetected {
-            count: drifts.len(),
-            drifts,
+            count: blocking.len(),
+            drifts: blocking,
         });
     }
+    let drifts = overwritten;
 
     // The tip is the source of truth for every managed path: if it holds the
     // file, home gets those bytes; if it once held the file and no longer does,

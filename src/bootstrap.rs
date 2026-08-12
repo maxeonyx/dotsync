@@ -19,7 +19,7 @@ use crate::repo::{
     PushReport,
 };
 use crate::scope_graph::ScopeGraph;
-use crate::sync::{sync_repo_to_home, SyncOptions, SyncReport};
+use crate::sync::{sync_repo_to_home, ForceScope, SyncReport};
 
 #[derive(Debug, Clone)]
 pub struct InitReport {
@@ -62,7 +62,7 @@ pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, 
     };
 
     let push = push_scope_updates(paths).await?;
-    let sync = sync_repo_to_home(paths, SyncOptions { force: true }, Some(&current_scope)).await?;
+    let sync = sync_repo_to_home(paths, ForceScope::Everything, Some(&current_scope)).await?;
 
     Ok(InitReport { sync, push })
 }

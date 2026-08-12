@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+use crate::drift::FileState;
 use crate::sync::FileDrift;
 
 #[derive(Debug, Clone)]
@@ -19,6 +20,34 @@ pub struct ErrorReport {
 pub struct RejectedCommitPath {
     pub path: PathBuf,
     pub problem: CommitPathProblem,
+}
+
+/// One path a commit named that names a real file dotsync could record, but
+/// whose content is not this machine's to record. Structured so that one run
+/// reports every such path, and so the explanation can name what actually
+/// happened to the file.
+#[derive(Debug, Clone)]
+pub struct RefusedCommitPath {
+    pub path: PathBuf,
+    pub state: FileState,
+}
+
+impl RefusedCommitPath {
+    pub(crate) fn explain(&self) -> String {
+        let path = self.path.display();
+        match self.state {
+            FileState::StaleNotYours => format!(
+                "`{path}` has not been edited here: home holds exactly what dotsync last synced, and the repo has changed it since. That change came from another machine, and committing home's copy would revert it."
+            ),
+            FileState::IncomingNew => format!(
+                "`{path}` is not in home: the repo has just added it and this machine has not synced it yet. Committing it would delete it from the scope."
+            ),
+            FileState::IncomingNewCollidesWithUntrackedHome => format!(
+                "`{path}` has never been synced here, and the repo has just added a different file at the same path. Committing home's copy would discard the one that arrived."
+            ),
+            other => format!("`{path}` is {}.", other.reason()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +133,11 @@ pub enum DotsyncError {
     UnusableCommitPaths {
         scope: String,
         rejected: Vec<RejectedCommitPath>,
+    },
+    #[error("cannot commit {} of the paths you named, because this machine did not change them", refused.len())]
+    StaleCommitPaths {
+        scope: String,
+        refused: Vec<RefusedCommitPath>,
     },
     #[error("{} conflicted file(s) are unchanged since the cascade paused at scope `{scope}`", paths.len())]
     UnresolvedConflict { scope: String, paths: Vec<PathBuf> },
@@ -213,6 +247,9 @@ impl DotsyncError {
             DotsyncError::UnusableCommitPaths { .. } => {
                 basic_error_report("unusable_commit_paths", self)
             }
+            DotsyncError::StaleCommitPaths { .. } => {
+                basic_error_report("stale_commit_paths", self)
+            }
             DotsyncError::UnresolvedConflict { .. } => {
                 basic_error_report("unresolved_conflict", self)
             }
@@ -250,6 +287,13 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
             rejected
                 .iter()
                 .map(|rejected| rejected.explain(scope))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        DotsyncError::StaleCommitPaths { refused, .. } => Some(
+            refused
+                .iter()
+                .map(RefusedCommitPath::explain)
                 .collect::<Vec<_>>()
                 .join("\n"),
         ),

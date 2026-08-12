@@ -1,9 +1,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
     abort_paused_cascade, commit_and_sync, continue_after_conflict, diff_home, init,
-    list_scope_tree, list_scopes, read_scope_file, status, sync, CommitOptions, CommitSelection,
-    DiffReport, DotsyncError, DotsyncPaths, FileChange, FileDrift, FileState, ScopeListReport,
-    SyncOptions, TreeReport,
+    list_scope_tree, list_scopes, read_scope_file, status, sync, CommitOptions, DiffReport,
+    DotsyncError, DotsyncPaths, FileChange, FileDrift, FileState, ForceScope, ScopeListReport,
+    TreeReport,
 };
 mod render;
 use serde_json::json;
@@ -47,6 +47,16 @@ The remote URL is the git remote that stores your dotsync repo.
 Example:
   dotsync init git@github.com:maxeonyx/dotfiles.git";
 
+const COMMIT_ABOUT: &str = "Commit selected home changes to a scope, cascade, sync, and push";
+
+const COMMIT_LONG_ABOUT: &str = "PATHS are home-relative files or directories to record on SCOPE. Omit them to record every managed file this machine has changed, which is exactly the set `dotsync status` lists as changes.
+
+dotsync compares three sides of every path: what it last synced to this machine, what is in home now, and what the scopes hold now. A path whose home content is simply older than the repo has not been changed here, so `commit` refuses it and points at plain `dotsync` instead — committing it would revert whoever published the change that is already there.
+
+`--force` means \"home wins anyway\", and on `commit` it applies only to the paths you name. That is deliberately different from `--force` on plain `dotsync` and on `continue`, which name no paths and so overwrite every drifted file. So `dotsync commit linux -m msg --force -- .bashrc` overwrites `.bashrc` and nothing else, while `dotsync --force` overwrites everything that drifted.
+
+Forced paths are listed in the run's `--output json` under `forced_overwrites`.";
+
 const CONTINUE_ABOUT: &str = "Continue a paused merge cascade after resolving conflicts";
 const ABORT_ABOUT: &str = "Abort a paused merge cascade and restore the pre-pause state";
 
@@ -73,7 +83,8 @@ struct Cli {
     #[arg(long = "output", value_enum, default_value = "human", global = true)]
     output_format: OutputFormat,
 
-    /// Proceed even when drift is detected (sync, commit, continue, abort)
+    /// Overwrite drifted home files: every one on plain `dotsync` and
+    /// `continue`, only the paths you name on `commit`
     #[arg(long, global = true)]
     force: bool,
 }
@@ -90,7 +101,7 @@ enum Action {
         scope: String,
         message: String,
         force: bool,
-        selection: CommitSelection,
+        paths: Vec<PathBuf>,
     },
     Continue {
         force: bool,
@@ -111,7 +122,7 @@ enum Command {
         /// Git remote URL or local path for the dotsync repo
         remote_url: Option<String>,
     },
-    /// Commit selected home changes to a scope, cascade, sync, and push
+    #[command(about = COMMIT_ABOUT, long_about = COMMIT_LONG_ABOUT)]
     Commit {
         /// Scope to commit changes to
         scope: String,
@@ -120,11 +131,8 @@ enum Command {
         #[arg(short = 'm', long = "message")]
         message: String,
 
-        /// Commit every managed file that differs from the repo
-        #[arg(long)]
-        all: bool,
-
-        /// Repo-relative file or directory paths to commit
+        /// Home-relative file or directory paths to commit; omit to commit
+        /// every managed file this machine has changed
         paths: Vec<PathBuf>,
     },
     #[command(about = CONTINUE_ABOUT)]
@@ -303,26 +311,13 @@ impl Action {
             Some(Command::Commit {
                 scope,
                 message,
-                all,
                 paths,
-            }) => {
-                let selection = match (all, paths.is_empty()) {
-                    (true, false) => {
-                        return Err(usage_error(
-                            "commit mode accepts explicit paths or --all, not both",
-                        ));
-                    }
-                    (true, true) => CommitSelection::All,
-                    (false, _) => CommitSelection::Paths(paths),
-                };
-
-                Ok(Self::Commit {
-                    scope,
-                    message,
-                    force: cli.force,
-                    selection,
-                })
-            }
+            }) => Ok(Self::Commit {
+                scope,
+                message,
+                force: cli.force,
+                paths,
+            }),
             Some(Command::Unknown(args)) => {
                 // `--force` is checked per command below, and an unknown
                 // command has no behavior to force.
@@ -358,8 +353,8 @@ async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
             scope,
             message,
             force,
-            selection,
-        } => run_commit(scope, message, force, selection).await,
+            paths,
+        } => run_commit(scope, message, force, paths).await,
         Action::Init { remote_url } => run_init(remote_url).await,
         Action::Continue { force } => run_continue(force).await,
         Action::Abort => run_abort().await,
@@ -386,6 +381,15 @@ fn reject_force_before(force: bool, command: &str) -> Result<(), UsageError> {
     Err(usage_error(&format!(
         "`--force` has no meaning for `{command}`; it only decides whether to overwrite drifted files in your home directory, which is a choice made by plain `dotsync`, `commit`, and `continue`"
     )))
+}
+
+/// `--force` on the commands that name no paths for it to scope to.
+fn blanket_force(force: bool) -> ForceScope {
+    if force {
+        ForceScope::Everything
+    } else {
+        ForceScope::Nothing
+    }
 }
 
 fn usage_error(message: &str) -> UsageError {
@@ -443,7 +447,7 @@ fn prompt_init_remote_url() -> Result<String, UsageError> {
 
 async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let report = continue_after_conflict(&paths, SyncOptions { force }).await?;
+    let report = continue_after_conflict(&paths, blanket_force(force)).await?;
     Ok(CliOutput::Success(SuccessOutput {
         json: json!({
             "status": "ok",
@@ -488,7 +492,7 @@ async fn run_abort() -> Result<CliOutput, DotsyncError> {
 
 async fn run_sync(force: bool) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let report = sync(&paths, SyncOptions { force }).await?;
+    let report = sync(&paths, blanket_force(force)).await?;
     Ok(CliOutput::Success(SuccessOutput {
         json: json!({
             "status": "ok",
@@ -605,7 +609,7 @@ async fn run_commit(
     scope: String,
     message: String,
     force: bool,
-    selection: CommitSelection,
+    commit_paths: Vec<PathBuf>,
 ) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     let report = commit_and_sync(
@@ -614,7 +618,7 @@ async fn run_commit(
             scope,
             message,
             force,
-            selection,
+            paths: commit_paths,
         },
     )
     .await?;
@@ -625,6 +629,7 @@ async fn run_commit(
             "scope": report.committed_scope,
             "machine_scope": report.sync.current_scope,
             "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
+            "forced_overwrites": report.forced_overwrites.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
             "unpushed_scopes": report.push.unpushed_scopes(),
         }),
         human: format!(

@@ -122,6 +122,18 @@ impl FileState {
         )
     }
 
+    /// Home holds no change of this machine's own at this path, so recording
+    /// home's bytes here would overwrite someone else's change rather than
+    /// contribute one. `commit` refuses these unless the same command forces
+    /// the path, which is what makes "a machine that is merely behind reverts
+    /// another machine's work" unrepresentable rather than merely unlikely.
+    pub fn blocks_commit(self) -> bool {
+        matches!(
+            self,
+            Self::StaleNotYours | Self::IncomingNew | Self::IncomingNewCollidesWithUntrackedHome
+        )
+    }
+
     /// What happened, naming every side that moved. The remedy depends on
     /// which ones did, so a message that mentions only home leaves the reader
     /// to guess at the rest.
@@ -302,6 +314,17 @@ pub(crate) struct HomeClassification {
     pub(crate) tip: jj_lib::commit::Commit,
     pub(crate) tip_entries: BTreeMap<PathBuf, TreeValue>,
     pub(crate) paths: BTreeMap<PathBuf, ClassifiedPath>,
+}
+
+impl HomeClassification {
+    /// A path outside the classified set is a path nothing knows about, which
+    /// is a real answer rather than a missing one.
+    pub(crate) fn state(&self, relative: &Path) -> FileState {
+        self.paths
+            .get(relative)
+            .map(|path| path.state)
+            .unwrap_or(FileState::AbsentEverywhere)
+    }
 }
 
 /// Classifies home against one scope's current head. This is the single drift

@@ -211,6 +211,28 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 &steps.iter().map(String::as_str).collect::<Vec<_>>(),
             )
         }
+        DotsyncError::StaleCommitPaths { scope, refused } => render_structured_error(
+            if refused.len() == 1 {
+                "cannot commit a file this machine has not changed"
+            } else {
+                "cannot commit files this machine has not changed"
+            },
+            "Dotsync records the home files you name onto a scope branch and cascades them to every machine sharing it. Plain `dotsync` goes the other way, writing what the scopes hold back into home.",
+            "This commit flow reads each path you named across three sides: what dotsync last synced to this machine, what is in home now, and what the scopes hold now.",
+            "It expects the paths you name to hold a change you made in home since the last sync.",
+            error_report
+                .current_state
+                .as_deref()
+                .unwrap_or(&error_report.message),
+            "Recording these would put older bytes back on the scope and cascade them, silently reverting whoever published the change that is already there.",
+            &[
+                "run `dotsync` to bring this machine up to date; the incoming change is written into home.",
+                "then edit the file in home if you still want a change of your own, and commit it.",
+                &format!(
+                    "if you really do mean to overwrite the incoming change with what is in home, rerun with `--force`: `dotsync commit {scope} -m \"message\" --force -- <paths...>`. On `commit`, `--force` applies only to the paths you name."
+                ),
+            ],
+        ),
         DotsyncError::InvalidScope { .. } => render_structured_error(
             "invalid scope",
             "Dotsync stores dotfiles in a scope DAG so shared config can live on shared ancestor scopes and machine-specific config can stay isolated on leaf scopes.",
