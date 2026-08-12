@@ -838,7 +838,9 @@ fn change_marker(state: FileState) -> &'static str {
     match state {
         FileState::EditedInHome | FileState::EditedInHomeButRemovedFromRepo => "M",
         FileState::DeletedInHome | FileState::DeletedInHomeTipAlsoChanged => "D",
-        FileState::DivergedEdit | FileState::IncomingNewCollidesWithUntrackedHome => "C",
+        FileState::DivergedEdit
+        | FileState::IncomingNewCollidesWithUntrackedHome
+        | FileState::NoSyncRecord => "C",
         FileState::IncomingNew => "A",
         FileState::StaleNotYours => "U",
         FileState::RemovedFromRepo => "R",

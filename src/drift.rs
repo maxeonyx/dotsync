@@ -53,6 +53,12 @@ pub enum FileState {
     /// version would destroy home content nothing has a record of.
     IncomingNewCollidesWithUntrackedHome,
 
+    /// Home and the scope disagree, and there is no sync state to say which
+    /// side moved. Drift, for the same reason as the collision above — but a
+    /// different reason to report, because the missing record is the actual
+    /// problem and the file may well be one dotsync itself wrote.
+    NoSyncRecord,
+
     /// Was synced here and then deleted from home. Deletion drift — blocks
     /// like an edit, and is recorded to a scope like any other change.
     DeletedInHome,
@@ -109,6 +115,7 @@ impl FileState {
                 | Self::DeletedInHomeTipAlsoChanged
                 | Self::DivergedEdit
                 | Self::IncomingNewCollidesWithUntrackedHome
+                | Self::NoSyncRecord
         )
     }
 
@@ -130,7 +137,10 @@ impl FileState {
     pub fn blocks_commit(self) -> bool {
         matches!(
             self,
-            Self::StaleNotYours | Self::IncomingNew | Self::IncomingNewCollidesWithUntrackedHome
+            Self::StaleNotYours
+                | Self::IncomingNew
+                | Self::IncomingNewCollidesWithUntrackedHome
+                | Self::NoSyncRecord
         )
     }
 
@@ -150,6 +160,9 @@ impl FileState {
             Self::DivergedEdit => "edited here, and changed in the repo on another machine",
             Self::IncomingNewCollidesWithUntrackedHome => {
                 "never synced here, and the repo has just added a different file at this path"
+            }
+            Self::NoSyncRecord => {
+                "this machine has no sync record, so dotsync cannot tell an edit of yours here from a change that arrived from another machine"
             }
             Self::IncomingNew => "added on another machine",
             Self::StaleNotYours => "changed on another machine, and not edited here",
@@ -171,6 +184,7 @@ impl FileState {
             Self::DeletedInHomeTipAlsoChanged => "deleted_changed_in_repo",
             Self::DivergedEdit => "conflicted",
             Self::IncomingNewCollidesWithUntrackedHome => "untracked_collision",
+            Self::NoSyncRecord => "no_sync_record",
             Self::IncomingNew => "incoming_add",
             Self::StaleNotYours => "incoming_update",
             Self::RemovedFromRepo => "incoming_delete",
@@ -295,7 +309,13 @@ pub(crate) async fn classify_paths(
     recorded_from_home: &RecordedFromHome,
     domain: &BTreeSet<PathBuf>,
 ) -> Result<BTreeMap<PathBuf, ClassifiedPath>, DotsyncError> {
+    // An empty last-synced side means one of two very different things, and
+    // the difference is invisible to `classify`: either dotsync has genuinely
+    // never synced these paths, or its record of doing so is gone. The
+    // classification is the same — it can only see two sides either way — but
+    // what it should say about it is not.
     let no_record = BTreeMap::new();
+    let sync_record_lost = last_synced_entries.is_none();
     let last_synced_entries = last_synced_entries.unwrap_or(&no_record);
 
     let mut classified = BTreeMap::new();
@@ -306,11 +326,14 @@ pub(crate) async fn classify_paths(
         };
         let tip_bytes = read_entry_bytes(repo, relative, tip_entries.get(relative)).await?;
         let home_bytes = read_home_bytes(paths, relative)?;
-        let state = classify(
+        let mut state = classify(
             last_synced_bytes.as_deref(),
             home_bytes.as_deref(),
             tip_bytes.as_deref(),
         );
+        if sync_record_lost && state == FileState::IncomingNewCollidesWithUntrackedHome {
+            state = FileState::NoSyncRecord;
+        }
         classified.insert(
             relative.clone(),
             ClassifiedPath {
