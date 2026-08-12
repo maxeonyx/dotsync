@@ -96,9 +96,9 @@ pub async fn read_scope_file(
     let repo = load_repo_direct(paths).await?;
     let repo = fetch_origin(repo).await?;
     let commit = load_scope_commit(repo.as_ref(), scope)?;
-    let relative_str = relative.to_str().ok_or(DotsyncError::NotImplemented(
-        "non-utf8 repo paths are not supported yet",
-    ))?;
+    let relative_str = relative.to_str().ok_or_else(|| DotsyncError::NonUtf8Path {
+        path: relative.to_path_buf(),
+    })?;
     let repo_path = jj_lib::repo_path::RepoPath::from_internal_string(relative_str)
         .map_err(|err| jj_error(format!("invalid repo path {}: {err}", relative.display())))?;
     let value = commit

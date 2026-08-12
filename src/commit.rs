@@ -582,9 +582,9 @@ async fn apply_home_path_to_tree(
     relative: &Path,
     builder: &mut MergedTreeBuilder,
 ) -> Result<(), DotsyncError> {
-    let relative_str = relative.to_str().ok_or(DotsyncError::NotImplemented(
-        "non-utf8 repo paths are not supported yet",
-    ))?;
+    let relative_str = relative.to_str().ok_or_else(|| DotsyncError::NonUtf8Path {
+        path: relative.to_path_buf(),
+    })?;
     let repo_path =
         RepoPathBuf::from_internal_string(relative_str).map_err(|err| DotsyncError::Jj {
             message: format!("invalid repo path {}: {err}", relative.display()),

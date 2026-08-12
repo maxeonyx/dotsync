@@ -14,8 +14,16 @@ pub struct ErrorReport {
 
 #[derive(Debug, Error)]
 pub enum DotsyncError {
-    #[error("not implemented: {0}")]
-    NotImplemented(&'static str),
+    #[error(
+        "HOME is not set, so dotsync cannot find your home directory. Set HOME to the home directory dotsync should manage, then rerun."
+    )]
+    HomeNotSet,
+    #[error(
+        "path {path:?} is not valid UTF-8; dotsync can only manage files whose paths are valid UTF-8"
+    )]
+    NonUtf8Path { path: PathBuf },
+    #[error("{path} is a git submodule; dotsync manages regular files and symlinks only")]
+    GitSubmodule { path: PathBuf },
     #[error("failed to read {path}: {source}")]
     Io {
         path: PathBuf,
@@ -112,7 +120,9 @@ impl DotsyncError {
             DotsyncError::MissingHostname => basic_error_report("missing_hostname", self),
             DotsyncError::Io { .. } => basic_error_report("io", self),
             DotsyncError::Jj { .. } => basic_error_report("jj", self),
-            DotsyncError::NotImplemented(_) => basic_error_report("not_implemented", self),
+            DotsyncError::HomeNotSet => basic_error_report("home_not_set", self),
+            DotsyncError::NonUtf8Path { .. } => basic_error_report("non_utf8_path", self),
+            DotsyncError::GitSubmodule { .. } => basic_error_report("git_submodule", self),
         }
     }
 }
@@ -145,7 +155,9 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
             "expected repo path: {}; standard location: ~/.local/share/dotsync/repo",
             path.display()
         )),
-        DotsyncError::NotImplemented(_)
+        DotsyncError::HomeNotSet
+        | DotsyncError::NonUtf8Path { .. }
+        | DotsyncError::GitSubmodule { .. }
         | DotsyncError::NoPausedCascade
         | DotsyncError::Io { .. }
         | DotsyncError::ConfigParse { .. }

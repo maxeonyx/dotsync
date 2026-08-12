@@ -577,7 +577,7 @@ async fn run_commit(
 fn discover_paths() -> Result<DotsyncPaths, DotsyncError> {
     let home_dir = env::var_os("HOME")
         .map(PathBuf::from)
-        .ok_or(DotsyncError::NotImplemented("HOME is not set"))?;
+        .ok_or(DotsyncError::HomeNotSet)?;
     Ok(DotsyncPaths {
         repo_root: home_dir.join(".local/share/dotsync/repo"),
         home_dir,

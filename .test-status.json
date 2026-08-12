@@ -37,7 +37,7 @@
     "dotsync::user_flows$interrupted_push_reports_that_scope_updates_were_not_pushed": "passing",
     "dotsync::user_flows$invalid_state_file_returns_clear_error": "passing",
     "dotsync::user_flows$invalid_sync_state_human_error_stands_alone": "passing",
-    "dotsync::user_flows$missing_home_is_reported_as_an_environment_error": "pending",
+    "dotsync::user_flows$missing_home_is_reported_as_an_environment_error": "passing",
     "dotsync::user_flows$missing_state_file_disables_deletion": "passing",
     "dotsync::user_flows$multiple_machines_can_contribute_to_all_without_losing_changes": "passing",
     "dotsync::user_flows$paused_cascade_withholds_publishing_until_it_is_resolved": "passing",
