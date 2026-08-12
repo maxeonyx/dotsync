@@ -1412,6 +1412,78 @@ Correct flow:
 }
 
 #[test]
+fn commit_path_inside_dotsyncs_own_state_is_an_error() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    let sync_state = machine.sync_state_relative_path();
+    let sync_state = sync_state.to_str().expect("sync state path is UTF-8");
+    assert!(
+        machine.file_exists(sync_state),
+        "init should have written the sync state file"
+    );
+    let revision_before = bookmark_revision(&machine, "all");
+
+    // Both of these are dotsync's own bookkeeping sitting in home: the
+    // machine-local sync state, and the hidden repo itself. Naming either used
+    // to be filtered out of the selection without a word, so the commit
+    // reported success having recorded nothing.
+    for command in [
+        format!("dotsync commit all -m state -- {sync_state}"),
+        "dotsync commit all -m repo -- .local/share/dotsync/repo".to_string(),
+    ] {
+        let output = machine.run(&command);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "`{command}` should fail rather than report a successful empty commit\n{}",
+            render_output(&output)
+        );
+        assert_eq!(
+            bookmark_revision(&machine, "all"),
+            revision_before,
+            "`{command}` must not move the scope"
+        );
+    }
+
+    let state_output = machine.run(&format!("dotsync commit all -m state -- {sync_state}"));
+    assert_stderr_snapshot(
+        &state_output,
+        &format!(
+            "\
+dotsync: that path is dotsync's own state, not your config
+
+What dotsync does:
+Dotsync keeps its own state in your home directory: a hidden repo holding every scope, and a machine-local sync-state file recording which machine scope this home last synced and at which revision.
+
+This flow:
+This commit flow records the home files you name onto a scope branch, and every file on a scope branch is synced into home on every machine that shares that scope.
+
+Expected:
+It expects the paths you name to be config files you edit, not the state dotsync maintains to do its own job.
+
+Current state found:
+`{sync_state}` is this machine's dotsync sync state; it records which machine scope this home uses, so it has to stay machine-local.
+
+Why dotsync stopped:
+Recording dotsync's own state on a scope would sync it onto every machine sharing that scope, overwriting the state each of those machines needs in order to be itself.
+
+Correct flow:
+- commit the config files you edited instead; run `dotsync status` to see which managed files changed.
+- to change which scopes exist, edit `.config/dotsync/config.toml` in home and commit that path to `all`.
+"
+        ),
+    );
+}
+
+#[test]
 fn commit_explicit_path_adds_file_to_scope_and_syncs() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
