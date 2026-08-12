@@ -2722,7 +2722,7 @@ dotsync: 1 changed managed file(s) for mx-xps-cy
 }
 
 #[test]
-fn force_is_rejected_on_commands_that_never_write_home() {
+fn force_is_refused_with_one_message_wherever_it_is_meaningless() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
@@ -2734,14 +2734,19 @@ fn force_is_rejected_on_commands_that_never_write_home() {
     );
 
     // `--force` reaches exactly one decision: whether to overwrite drifted
-    // home files. `status`, `diff` and `view` never write home, so accepting
-    // the flag there taught an agent that retrying with `--force` might change
-    // the answer. It never could.
+    // home files. On the commands that never write home it means nothing, and
+    // it has to say so in whichever position the agent wrote it - `--output`
+    // works after the subcommand, so that is the position agents will reach
+    // for.
     for command in [
         "dotsync status --force",
+        "dotsync --force status",
         "dotsync diff --force",
+        "dotsync --force diff",
         "dotsync view --force",
+        "dotsync --force view",
         "dotsync init --force",
+        "dotsync --force init",
     ] {
         let output = machine.run(command);
         assert_eq!(
@@ -2750,19 +2755,17 @@ fn force_is_rejected_on_commands_that_never_write_home() {
             "`{command}` should be a usage error\n{}",
             render_output(&output)
         );
+        let name = command
+            .split_whitespace()
+            .find(|word| !matches!(*word, "dotsync" | "--force"))
+            .expect("command name");
+        assert_stderr_snapshot(
+            &output,
+            &format!(
+                "dotsync: `--force` has no meaning for `{name}`; it only affects commands that write files into your home directory: plain `dotsync`, `commit`, `continue`, and `abort`\n"
+            ),
+        );
     }
-
-    let before_subcommand = machine.run("dotsync --force status");
-    assert_eq!(
-        before_subcommand.status.code(),
-        Some(2),
-        "{}",
-        render_output(&before_subcommand)
-    );
-    assert_stderr_snapshot(
-        &before_subcommand,
-        "dotsync: `--force` has no meaning for `status`; it only affects commands that write files into your home directory: plain `dotsync`, `commit`, `continue`, and `abort`\n",
-    );
 
     // The commands that do write home keep it, in both positions.
     machine.write_file(".apprc", "ui_theme = dark\n");
@@ -2771,6 +2774,13 @@ fn force_is_rejected_on_commands_that_never_write_home() {
         commit_output.status.success(),
         "{}",
         render_output(&commit_output)
+    );
+    machine.write_file(".apprc", "ui_theme = light\n");
+    let commit_before = machine.run("dotsync --force commit all -m 'light theme' -- .apprc");
+    assert!(
+        commit_before.status.success(),
+        "{}",
+        render_output(&commit_before)
     );
     let sync_output = machine.run("dotsync --force");
     assert!(
