@@ -3382,38 +3382,8 @@ fn tdd_ratchet_gatekeeper() {
     }
 }
 
-macro_rules! retired_ratchet_test {
-    ($name:ident) => {
-        #[test]
-        fn $name() {
-            assert!(true);
-        }
-    };
-}
-
-retired_ratchet_test!(
-    retired_ancestor_scope_commit_from_machine_working_copy_stays_consistent_across_stages
-);
-retired_ratchet_test!(retired_command_while_cascade_paused_human_error_stands_alone);
-retired_ratchet_test!(retired_continue_without_pause_human_error_stands_alone);
-retired_ratchet_test!(retired_dirty_working_copy_human_error_stands_alone);
-retired_ratchet_test!(retired_dirty_working_copy_json_contract_stays_compatible);
-retired_ratchet_test!(retired_invalid_scope_human_error_stands_alone);
-retired_ratchet_test!(retired_non_ancestor_scope_human_error_stands_alone);
-retired_ratchet_test!(retired_pending_commit_all_preserves_whole_tree_commit_behavior);
-retired_ratchet_test!(retired_pending_commit_mode_rejects_all_plus_paths);
-retired_ratchet_test!(retired_pending_config_path_is_rejected_for_non_all_scope_commits);
-retired_ratchet_test!(
-    retired_pending_explicit_path_commit_only_commits_selected_paths_and_leaves_other_changes_dirty
-);
-retired_ratchet_test!(retired_pending_fetch_stops_when_remote_would_reset_local_bookmark);
-retired_ratchet_test!(
-    retired_pending_joining_existing_remote_creates_new_scope_and_first_commit_works
-);
-retired_ratchet_test!(retired_pending_scoped_commit_requires_paths_or_all_in_human_and_json_modes);
 #[test]
-fn retired_pending_selected_add_modify_and_delete_are_applied_without_touching_unselected_changes()
-{
+fn selected_add_modify_and_delete_are_applied_without_touching_unselected_changes() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
@@ -3474,13 +3444,3 @@ fn retired_pending_selected_add_modify_and_delete_are_applied_without_touching_u
     );
     assert!(!machine.file_exists(".config/fish/removed.fish"));
 }
-
-retired_ratchet_test!(
-    retired_pending_selective_commit_preserves_unselected_dirty_paths_when_cascade_pauses
-);
-retired_ratchet_test!(
-    retired_pending_sync_loads_config_from_committed_all_scope_not_working_copy_edit
-);
-retired_ratchet_test!(retired_plain_dotsync_rejects_working_copy_changes);
-retired_ratchet_test!(retired_scoped_commit_deletion_removes_file_from_fake_home);
-retired_ratchet_test!(retired_scoped_deletion_only_affects_homes_where_scope_applies);

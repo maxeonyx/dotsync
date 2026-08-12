@@ -47,26 +47,7 @@
     "dotsync::user_flows$output_format_is_accepted_after_the_subcommand": "passing",
     "dotsync::user_flows$paused_cascade_withholds_publishing_until_it_is_resolved": "passing",
     "dotsync::user_flows$plain_sync_pushes_scopes_left_unpushed_by_an_interrupted_commit": "passing",
-    "dotsync::user_flows$retired_ancestor_scope_commit_from_machine_working_copy_stays_consistent_across_stages": "passing",
-    "dotsync::user_flows$retired_command_while_cascade_paused_human_error_stands_alone": "passing",
-    "dotsync::user_flows$retired_continue_without_pause_human_error_stands_alone": "passing",
-    "dotsync::user_flows$retired_dirty_working_copy_human_error_stands_alone": "passing",
-    "dotsync::user_flows$retired_dirty_working_copy_json_contract_stays_compatible": "passing",
-    "dotsync::user_flows$retired_invalid_scope_human_error_stands_alone": "passing",
-    "dotsync::user_flows$retired_non_ancestor_scope_human_error_stands_alone": "passing",
-    "dotsync::user_flows$retired_pending_commit_all_preserves_whole_tree_commit_behavior": "passing",
-    "dotsync::user_flows$retired_pending_commit_mode_rejects_all_plus_paths": "passing",
-    "dotsync::user_flows$retired_pending_config_path_is_rejected_for_non_all_scope_commits": "passing",
-    "dotsync::user_flows$retired_pending_explicit_path_commit_only_commits_selected_paths_and_leaves_other_changes_dirty": "passing",
-    "dotsync::user_flows$retired_pending_fetch_stops_when_remote_would_reset_local_bookmark": "passing",
-    "dotsync::user_flows$retired_pending_joining_existing_remote_creates_new_scope_and_first_commit_works": "passing",
-    "dotsync::user_flows$retired_pending_scoped_commit_requires_paths_or_all_in_human_and_json_modes": "passing",
-    "dotsync::user_flows$retired_pending_selected_add_modify_and_delete_are_applied_without_touching_unselected_changes": "passing",
-    "dotsync::user_flows$retired_pending_selective_commit_preserves_unselected_dirty_paths_when_cascade_pauses": "passing",
-    "dotsync::user_flows$retired_pending_sync_loads_config_from_committed_all_scope_not_working_copy_edit": "passing",
-    "dotsync::user_flows$retired_plain_dotsync_rejects_working_copy_changes": "passing",
-    "dotsync::user_flows$retired_scoped_commit_deletion_removes_file_from_fake_home": "passing",
-    "dotsync::user_flows$retired_scoped_deletion_only_affects_homes_where_scope_applies": "passing",
+    "dotsync::user_flows$selected_add_modify_and_delete_are_applied_without_touching_unselected_changes": "passing",
     "dotsync::user_flows$shared_scope_conflict_pauses_and_continue_applies_resolution_to_machine_homes": "passing",
     "dotsync::user_flows$status_before_init_json_matches_recovery_message": "passing",
     "dotsync::user_flows$status_before_init_matches_full_recovery_message": "passing",
@@ -86,5 +67,8 @@
     "dotsync::user_flows$view_summarizes_checked_in_scopes_and_files": "passing",
     "dotsync::user_flows$view_works_while_local_scopes_are_ahead_of_remote": "passing",
     "dotsync::version_json$version_json_flag_prints_machine_readable_version": "passing"
+  },
+  "renames": {
+    "dotsync::user_flows$selected_add_modify_and_delete_are_applied_without_touching_unselected_changes": "dotsync::user_flows$retired_pending_selected_add_modify_and_delete_are_applied_without_touching_unselected_changes"
   }
 }
