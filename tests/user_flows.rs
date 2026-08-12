@@ -5000,3 +5000,79 @@ fn an_init_that_could_not_reach_the_remote_can_simply_be_retried() {
         "the retried init must have set this machine up properly"
     );
 }
+
+/// Naming a directory says "commit what changed under here", which is what a
+/// bare `dotsync commit <scope>` says about the whole machine — so it filters
+/// like one. Naming a path exactly is a claim about that path, and a claim is
+/// what deserves an argument.
+#[test]
+fn a_directory_selection_records_what_this_machine_changed_and_says_what_it_skipped() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    machine_a.write_file(".config/fish/config.fish", "set -g theme dark\n");
+    machine_a.write_file(".config/fish/aliases.fish", "alias ll 'ls -l'\n");
+    let seed = machine_a.run("dotsync commit all -m 'seed fish config' -- .config/fish/");
+    assert!(seed.status.success(), "{}", render_output(&seed));
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+
+    // B publishes a change to one file under that directory. A has not synced
+    // it, and has an edit of its own to a different file under there, plus a
+    // brand new file it wants to add.
+    machine_b.write_file(".config/fish/aliases.fish", "alias ll 'ls -lah'\n");
+    let commit_b = machine_b.run("dotsync commit all -m 'better ll' -- .config/fish/aliases.fish");
+    assert!(commit_b.status.success(), "{}", render_output(&commit_b));
+
+    machine_a.write_file(".config/fish/config.fish", "set -g theme light\n");
+    machine_a.write_file(
+        ".config/fish/functions.fish",
+        "function gs; git status; end\n",
+    );
+
+    // Named exactly, B's file is still refused: that is a claim that home's
+    // copy should win, and it would revert what B published.
+    let named_exactly =
+        machine_a.run("dotsync commit all -m 'take mine' -- .config/fish/aliases.fish");
+    assert_eq!(
+        named_exactly.status.code(),
+        Some(1),
+        "naming a path another machine changed must still be refused\n{}",
+        render_output(&named_exactly)
+    );
+
+    let directory_commit =
+        machine_a.run("dotsync commit all -m 'light theme and functions' -- .config/fish/");
+    assert_eq!(
+        directory_commit.status.code(),
+        Some(0),
+        "a directory selection must commit what changed under it rather than refuse\n{}",
+        render_output(&directory_commit)
+    );
+    let stderr = String::from_utf8_lossy(&directory_commit.stderr).into_owned();
+    assert!(
+        stderr.contains(".config/fish/aliases.fish"),
+        "the run must say which file under the directory it left alone\n{stderr}"
+    );
+
+    assert_eq!(
+        remote_branch_file_contents(&machine_a, "all", ".config/fish/config.fish"),
+        "set -g theme light\n",
+        "the edit this machine made must be recorded"
+    );
+    assert_eq!(
+        remote_branch_file_contents(&machine_a, "all", ".config/fish/functions.fish"),
+        "function gs; git status; end\n",
+        "a new file under a named directory must still be added"
+    );
+    assert_eq!(
+        remote_branch_file_contents(&machine_a, "all", ".config/fish/aliases.fish"),
+        "alias ll 'ls -lah'\n",
+        "the other machine's published change must survive the directory commit"
+    );
+    assert_eq!(
+        machine_a.read_file(".config/fish/aliases.fish"),
+        "alias ll 'ls -lah'\n",
+        "and the sync that follows must bring this machine up to it"
+    );
+}
