@@ -17,22 +17,29 @@ pub struct ScopeInfo {
     pub parents: Vec<String>,
 }
 
+/// What `dotsync view` was asked for, and what it found.
+///
+/// One report rather than four entry points, because the four shapes are one
+/// question — what is checked in — asked with different arguments. They are
+/// also one run, which is what stops the overview from fetching once per
+/// scope: it holds a session, and a session fetches once.
 #[derive(Debug, Clone)]
-pub struct ScopeListReport {
-    pub scopes: Vec<ScopeInfo>,
-}
-
-#[derive(Debug, Clone)]
-pub struct TreeReport {
-    pub scope: String,
-    pub paths: Vec<PathBuf>,
-}
-
-#[derive(Debug, Clone)]
-pub struct FileReport {
-    pub scope: String,
-    pub path: PathBuf,
-    pub contents: Vec<u8>,
+pub enum ViewReport {
+    /// Every scope, and every file any of them holds.
+    Overview {
+        scopes: Vec<ScopeInfo>,
+        files: Vec<PathBuf>,
+    },
+    /// Every file one scope holds.
+    Scope { scope: String, files: Vec<PathBuf> },
+    /// Every scope that holds one file.
+    FileScopes { file: PathBuf, scopes: Vec<String> },
+    /// One file's contents on one scope.
+    FileContents {
+        scope: String,
+        file: PathBuf,
+        contents: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -41,18 +48,64 @@ pub struct DiffReport {
     pub drifts: Vec<FileDrift>,
 }
 
-pub async fn list_scopes(paths: &DotsyncPaths) -> Result<ScopeListReport, DotsyncError> {
+pub async fn view(
+    paths: &DotsyncPaths,
+    scope: Option<&str>,
+    file: Option<&Path>,
+) -> Result<ViewReport, DotsyncError> {
     let mut session = Session::open(paths).await?;
     session.fetch().await?;
-    let config = session.config();
+
+    match (scope, file) {
+        (Some(scope), Some(file)) => Ok(ViewReport::FileContents {
+            scope: scope.to_string(),
+            file: file.to_path_buf(),
+            contents: scope_file_contents(&session, scope, file).await?,
+        }),
+        (Some(scope), None) => Ok(ViewReport::Scope {
+            scope: scope.to_string(),
+            files: scope_files(&session, scope)?,
+        }),
+        (None, Some(file)) => {
+            let mut scopes = Vec::new();
+            for scope in scope_list(&session)? {
+                if scope_files(&session, &scope.name)?
+                    .iter()
+                    .any(|path| path == file)
+                {
+                    scopes.push(scope.name);
+                }
+            }
+            Ok(ViewReport::FileScopes {
+                file: file.to_path_buf(),
+                scopes,
+            })
+        }
+        (None, None) => {
+            let scopes = scope_list(&session)?;
+            let mut files = BTreeSet::new();
+            for scope in &scopes {
+                files.extend(scope_files(&session, &scope.name)?);
+            }
+            Ok(ViewReport::Overview {
+                scopes,
+                files: files.into_iter().collect(),
+            })
+        }
+    }
+}
+
+/// The scope graph, root scopes first and alphabetical within a depth, which
+/// is the order the DAG reads in.
+fn scope_list(session: &Session) -> Result<Vec<ScopeInfo>, DotsyncError> {
+    let graph = &session.config().graph;
     let mut memo = HashMap::new();
-    let mut scopes = config
-        .graph
+    let mut scopes = graph
         .parents
         .iter()
         .map(|(name, parents)| {
             Ok((
-                scope_depth(&config.graph, name, &mut memo)?,
+                scope_depth(graph, name, &mut memo)?,
                 ScopeInfo {
                     name: name.clone(),
                     parents: parents.clone(),
@@ -66,34 +119,21 @@ pub async fn list_scopes(paths: &DotsyncPaths) -> Result<ScopeListReport, Dotsyn
             .then_with(|| left.name.cmp(&right.name))
     });
 
-    Ok(ScopeListReport {
-        scopes: scopes.into_iter().map(|(_, scope)| scope).collect(),
-    })
+    Ok(scopes.into_iter().map(|(_, scope)| scope).collect())
 }
 
-pub async fn list_scope_tree(
-    paths: &DotsyncPaths,
-    scope: &str,
-) -> Result<TreeReport, DotsyncError> {
-    let mut session = Session::open(paths).await?;
-    session.fetch().await?;
+fn scope_files(session: &Session, scope: &str) -> Result<Vec<PathBuf>, DotsyncError> {
     let commit = load_scope_commit(session.repo().as_ref(), scope)?;
     let entries =
         collect_managed_tree_entries(&commit.tree(), &internal_repo_paths(session.config()))?;
-
-    Ok(TreeReport {
-        scope: scope.to_string(),
-        paths: entries.into_keys().collect(),
-    })
+    Ok(entries.into_keys().collect())
 }
 
-pub async fn read_scope_file(
-    paths: &DotsyncPaths,
+async fn scope_file_contents(
+    session: &Session,
     scope: &str,
     relative: &Path,
-) -> Result<FileReport, DotsyncError> {
-    let mut session = Session::open(paths).await?;
-    session.fetch().await?;
+) -> Result<Vec<u8>, DotsyncError> {
     let commit = load_scope_commit(session.repo().as_ref(), scope)?;
     let relative_str = relative.to_str().ok_or_else(|| DotsyncError::NonUtf8Path {
         path: relative.to_path_buf(),
@@ -118,13 +158,7 @@ pub async fn read_scope_file(
                 relative.display()
             ))
         })?;
-    let contents = read_tree_entry_bytes(session.repo().store(), relative, &value).await?;
-
-    Ok(FileReport {
-        scope: scope.to_string(),
-        path: relative.to_path_buf(),
-        contents,
-    })
+    read_tree_entry_bytes(session.repo().store(), relative, &value).await
 }
 
 pub async fn diff_home(paths: &DotsyncPaths) -> Result<DiffReport, DotsyncError> {

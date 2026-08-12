@@ -1,13 +1,11 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
-    abort_paused_cascade, commit_and_sync, continue_after_conflict, diff_home, init,
-    list_scope_tree, list_scopes, read_scope_file, status, sync, CommitOptions, DiffReport,
-    DotsyncError, DotsyncPaths, FileChange, FileDrift, FileState, ForceScope, ScopeListReport,
-    TreeReport,
+    abort_paused_cascade, commit_and_sync, continue_after_conflict, diff_home, init, status, sync,
+    view, CommitOptions, DiffReport, DotsyncError, DotsyncPaths, FileChange, FileDrift, FileState,
+    ForceScope, ViewReport,
 };
 mod render;
 use serde_json::json;
-use std::collections::BTreeSet;
 use std::env;
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
@@ -592,34 +590,65 @@ async fn run_diff() -> Result<CliOutput, DotsyncError> {
 
 async fn run_view(scope: Option<String>, file: Option<PathBuf>) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    match (scope, file) {
-        (Some(scope), Some(file)) => {
-            let report = read_scope_file(&paths, &scope, &file).await?;
-            Ok(file_success_output(
-                "view",
-                &report.scope,
-                &report.path,
-                report.contents,
-            ))
-        }
-        (Some(scope), None) => {
-            let report = list_scope_tree(&paths, &scope).await?;
-            Ok(CliOutput::Success(SuccessOutput {
-                json: json!({
-                    "status": "ok",
-                    "command": "view",
-                    "scope": report.scope,
-                    "files": report.paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
-                }),
-                human: String::new(),
-                notes: Vec::new(),
-                stdout: Some(render_view_scope_stdout(&report)),
-                exit_code: 0,
-            }))
-        }
-        (None, Some(file)) => run_view_file_scopes(&paths, file).await,
-        (None, None) => run_view_overview(&paths).await,
-    }
+    let report = view(&paths, scope.as_deref(), file.as_deref()).await?;
+    Ok(CliOutput::Success(match report {
+        ViewReport::FileContents {
+            scope,
+            file,
+            contents,
+        } => SuccessOutput {
+            json: json!({
+                "status": "ok",
+                "command": "view",
+                "scope": scope,
+                "path": render::display_path(&file),
+                "contents": String::from_utf8_lossy(&contents),
+            }),
+            human: String::new(),
+            notes: Vec::new(),
+            stdout: Some(String::from_utf8_lossy(&contents).into_owned()),
+            exit_code: 0,
+        },
+        ViewReport::Scope { scope, files } => SuccessOutput {
+            json: json!({
+                "status": "ok",
+                "command": "view",
+                "scope": scope,
+                "files": files.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
+            }),
+            human: String::new(),
+            notes: Vec::new(),
+            stdout: Some(render_view_scope_stdout(&scope, &files)),
+            exit_code: 0,
+        },
+        ViewReport::FileScopes { file, scopes } => SuccessOutput {
+            json: json!({
+                "status": "ok",
+                "command": "view",
+                "file": render::display_path(&file),
+                "scopes": scopes,
+            }),
+            human: String::new(),
+            notes: Vec::new(),
+            stdout: Some(render_view_file_scopes_stdout(&file, &scopes)),
+            exit_code: 0,
+        },
+        ViewReport::Overview { scopes, files } => SuccessOutput {
+            json: json!({
+                "status": "ok",
+                "command": "view",
+                "scopes": scopes.iter().map(|scope| json!({
+                    "name": scope.name,
+                    "parents": scope.parents,
+                })).collect::<Vec<_>>(),
+                "files": files.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
+            }),
+            human: String::new(),
+            notes: Vec::new(),
+            stdout: Some(render_view_overview_stdout(&scopes, &files)),
+            exit_code: 0,
+        },
+    }))
 }
 
 async fn run_commit(
@@ -732,72 +761,19 @@ fn render_diff_human(report: &DiffReport) -> String {
     lines.join("\n")
 }
 
-async fn run_view_overview(paths: &DotsyncPaths) -> Result<CliOutput, DotsyncError> {
-    let scopes = list_scopes(paths).await?;
-    let mut files = BTreeSet::new();
-    for scope in &scopes.scopes {
-        for path in list_scope_tree(paths, &scope.name).await?.paths {
-            files.insert(path);
-        }
-    }
-
-    Ok(CliOutput::Success(SuccessOutput {
-        json: json!({
-            "status": "ok",
-            "command": "view",
-            "scopes": scopes.scopes.iter().map(|scope| json!({
-                "name": scope.name,
-                "parents": scope.parents,
-            })).collect::<Vec<_>>(),
-            "files": files.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
-        }),
-        human: String::new(),
-        notes: Vec::new(),
-        stdout: Some(render_view_overview_stdout(&scopes, &files)),
-        exit_code: 0,
-    }))
-}
-
-async fn run_view_file_scopes(
-    paths: &DotsyncPaths,
-    file: PathBuf,
-) -> Result<CliOutput, DotsyncError> {
-    let scopes = list_scopes(paths).await?;
-    let mut matching_scopes = Vec::new();
-    for scope in &scopes.scopes {
-        let tree = list_scope_tree(paths, &scope.name).await?;
-        if tree.paths.iter().any(|path| path == &file) {
-            matching_scopes.push(scope.name.clone());
-        }
-    }
-
-    Ok(CliOutput::Success(SuccessOutput {
-        json: json!({
-            "status": "ok",
-            "command": "view",
-            "file": render::display_path(&file),
-            "scopes": matching_scopes,
-        }),
-        human: String::new(),
-        notes: Vec::new(),
-        stdout: Some(render_view_file_scopes_stdout(&file, &matching_scopes)),
-        exit_code: 0,
-    }))
-}
-
-fn render_view_overview_stdout(report: &ScopeListReport, files: &BTreeSet<PathBuf>) -> String {
+fn render_view_overview_stdout(scopes: &[dotsync::ScopeInfo], files: &[PathBuf]) -> String {
     render_lines(
         std::iter::once("Scopes".to_string())
-            .chain(report.scopes.iter().map(render_scope_line))
+            .chain(scopes.iter().map(render_scope_line))
             .chain([String::new(), "Files".to_string()])
             .chain(files.iter().map(|path| render::display_path(path))),
     )
 }
 
-fn render_view_scope_stdout(report: &TreeReport) -> String {
+fn render_view_scope_stdout(scope: &str, files: &[PathBuf]) -> String {
     render_lines(
-        std::iter::once(format!("Scope {}", report.scope))
-            .chain(report.paths.iter().map(|path| render::display_path(path))),
+        std::iter::once(format!("Scope {scope}"))
+            .chain(files.iter().map(|path| render::display_path(path))),
     )
 }
 
@@ -824,27 +800,6 @@ fn render_scope_line(scope: &dotsync::ScopeInfo) -> String {
     } else {
         format!("{} <- {}", scope.name, scope.parents.join(", "))
     }
-}
-
-fn file_success_output(
-    command: &str,
-    scope: &str,
-    path: &std::path::Path,
-    contents: Vec<u8>,
-) -> CliOutput {
-    CliOutput::Success(SuccessOutput {
-        json: json!({
-            "status": "ok",
-            "command": command,
-            "scope": scope,
-            "path": render::display_path(path),
-            "contents": String::from_utf8_lossy(&contents),
-        }),
-        human: String::new(),
-        notes: Vec::new(),
-        stdout: Some(String::from_utf8_lossy(&contents).into_owned()),
-        exit_code: 0,
-    })
 }
 
 /// One status line: a marker an agent can scan for, then the reason in words
