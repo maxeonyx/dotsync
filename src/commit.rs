@@ -160,6 +160,8 @@ async fn commit_in_session(
     session: &mut Session,
     options: CommitOptions,
 ) -> Result<CommitReport, CommitFailure> {
+    // Two `PathBuf`s, cloned so that reading where home is does not hold a
+    // borrow of the session across the places that advance it.
     let paths = session.paths().clone();
     let paths = &paths;
     reject_commit_if_cascade_paused(paths)?;
@@ -1044,6 +1046,8 @@ async fn continue_in_session(
     session: &mut Session,
     force: ForceScope,
 ) -> Result<ContinueReport, DotsyncError> {
+    // Two `PathBuf`s, cloned so that reading where home is does not hold a
+    // borrow of the session across the places that advance it.
     let paths = session.paths().clone();
     let paths = &paths;
     let state = load_paused_cascade_state(paths)?;
@@ -1203,6 +1207,8 @@ pub async fn abort_paused_cascade(paths: &DotsyncPaths) -> Run<Result<AbortRepor
 }
 
 async fn abort_in_session(session: &mut Session) -> Result<AbortReport, DotsyncError> {
+    // Two `PathBuf`s, cloned so that reading where home is does not hold a
+    // borrow of the session across the places that advance it.
     let paths = session.paths().clone();
     let paths = &paths;
     let state = load_paused_cascade_state(paths)?;
