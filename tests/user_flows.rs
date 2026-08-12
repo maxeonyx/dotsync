@@ -4488,3 +4488,56 @@ fn a_concurrent_merge_leaves_no_drift_behind() {
     let status_b = machine_b.run("dotsync status");
     assert_stderr_snapshot(&status_b, "dotsync: no changes for goof-b\n");
 }
+
+#[test]
+fn a_machine_with_no_sync_record_says_so_instead_of_guessing() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=v1\n");
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    // Home holds exactly what dotsync wrote there. Losing the state file does
+    // not change that — it only means dotsync can no longer prove it.
+    machine.delete_sync_state();
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=v2\n");
+
+    let sync_output = machine.run("dotsync");
+    assert_eq!(
+        sync_output.status.code(),
+        Some(1),
+        "without a record dotsync cannot tell an edit here from an incoming change, so it must stop\n{}",
+        render_output(&sync_output)
+    );
+
+    let stderr = String::from_utf8_lossy(&sync_output.stderr).into_owned();
+    assert!(
+        !stderr.contains("never synced here"),
+        "the file was synced here; the diagnosis must not claim otherwise\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("just added"),
+        "the repo changed this file rather than adding it\n{stderr}"
+    );
+    assert!(
+        stderr.contains("no sync record"),
+        "the diagnosis must name the actual problem: the record is gone\n{stderr}"
+    );
+
+    // Both ways out still work.
+    let forced = machine.run("dotsync --force");
+    assert!(forced.status.success(), "{}", render_output(&forced));
+    assert_eq!(machine.read_file(".bashrc"), "export DOTSYNC=v2\n");
+}
