@@ -241,10 +241,13 @@ pub(crate) fn managed_domain(
 /// Classifies every path in `domain`.
 ///
 /// `last_synced_entries` is `None` when there is no usable sync state — the
-/// file is missing, or it names a revision this repo does not have. Dotsync
-/// then has no record of what it put in home, so the last-synced side is taken
-/// to be the tip: nothing looks deleted, nothing looks stale, and the machine
-/// converges without dotsync removing files it cannot prove it wrote.
+/// file is missing, or it names a revision this repo does not have, and on a
+/// brand new machine there has never been one. Dotsync then has no record of
+/// putting anything in home, so the last-synced side is empty: it will not
+/// remove a file it cannot show it wrote, and it will not read a file missing
+/// from home as a deletion someone made here. Real home content that
+/// disagrees with the scope is still drift, because that judgement needs no
+/// history — it is visible in the two sides that are there.
 pub(crate) async fn classify_paths(
     paths: &DotsyncPaths,
     repo: &dyn jj_lib::repo::Repo,
@@ -252,7 +255,8 @@ pub(crate) async fn classify_paths(
     tip_entries: &BTreeMap<PathBuf, TreeValue>,
     domain: &BTreeSet<PathBuf>,
 ) -> Result<BTreeMap<PathBuf, ClassifiedPath>, DotsyncError> {
-    let last_synced_entries = last_synced_entries.unwrap_or(tip_entries);
+    let no_record = BTreeMap::new();
+    let last_synced_entries = last_synced_entries.unwrap_or(&no_record);
 
     let mut classified = BTreeMap::new();
     for relative in domain {
