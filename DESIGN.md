@@ -1,5 +1,7 @@
 # dotsync — Design Story
 
+**This document describes the target design, not the shipped state.** Things described here in the present tense may not be built yet — conflicts-as-commits and the convergence pass are the current examples. `PLAN.md` tracks what exists, what is in progress, and in what order the rest lands; when the two disagree about what dotsync does today, `PLAN.md` is right.
+
 ## The problem
 
 You have config files scattered across `~/` on multiple machines. Some config is universal (`.gitconfig`), some is OS-specific (hyprland on linux), some is machine-specific (wallpaper paths). You want a single repo that is the source of truth for all of it, and you want AI agents — your primary method of editing config — to be able to maintain it naturally.
@@ -120,6 +122,17 @@ dotsync tracks a minimal machine-local sync state file recording which machine s
 
 2. **Drift attribution** — comparing home state against the last-synced revision rather than repo HEAD distinguishes "repo advanced elsewhere" from "home drifted locally." A plain sync can then accept legitimate remote updates without treating them as local drift, while still stopping before overwriting files that changed in home since the last sync.
 
+The three-way comparison (last-synced tree, home, new tip) classifies every file situation without special cases:
+
+| In last-synced tree? | In home? | Meaning | Behavior |
+|---|---|---|---|
+| no | no (in new tip) | file added on another machine | not drift — sync writes it |
+| yes | no | was synced here, then deleted locally | **deletion drift** — blocks like an edit |
+| yes | yes, differs | edited locally | edit drift — blocks |
+| yes (absent in new tip) | yes | deleted from repo elsewhere | sync removes it from home |
+
+Deleting a managed file from home is drift like any other: it shows in `status` and `diff`, blocks sync (overridable with `--force`), and is recorded to a scope with `dotsync commit <scope> -- <path>` like any other change. Files added on other machines flow in frictionlessly because they were never in this machine's last-synced tree.
+
 The sync state file path is configured in `config.toml` under `[sync] state_path` and lives in the home directory (not the repo). It is never synced as a managed dotfile.
 
 An earlier design rejected state tracking as unnecessary complexity. That was wrong — deletion semantics require it. The cost is one small JSON file per machine; the benefit is correct file removal and a path toward smarter drift handling.
@@ -134,13 +147,63 @@ With jj, dotsync creates a commit directly on the target scope's branch and merg
 
 jj is also git-compatible — the repo is a valid git repo, pushable to GitHub, cloneable with git. jj is just a better local interface for the graph manipulation dotsync needs.
 
-One risk: jj is newer and less well-known than git. AI agents may not have strong intuitions for jj commands and concepts. The dotsync agent skill will need to explain jj basics, or dotsync itself should abstract away jj so agents only interact with `dotsync` commands and never run `jj` directly.
+One risk: jj is newer and less well-known than git. AI agents may not have strong intuitions for jj commands and concepts. dotsync therefore abstracts jj away entirely: agents only interact with `dotsync` commands and never run `jj` directly.
+
+**Requirement: dotsync must never depend on the jj CLI binary at runtime.** jj is linked in as a library (jj-lib); user machines do not have and must not need jj installed. The library link is functional, not just packaging: dotsync needs operations the CLI doesn't expose, like computing a merge in memory to report would-be conflicts without creating commits or moving bookmarks. Known caveat: jj-lib's supported fetch/push mechanism shells out to a `git` subprocess, so a `git` binary on PATH is currently a runtime dependency for network operations. That's acceptable for now and recorded here so nobody assumes full self-containment.
+
+## The convergence model
+
+Scope branches are normal repo history, and multiple machines write to them concurrently. That makes bookmark divergence a **routine event, not an edge case**. Walk through the common case: machine A commits to `all`, and the cascade creates a merge commit on every descendant scope — the entire DAG — then pushes. Machine B, which hasn't fetched yet, commits to `linux`; its cascade moves `linux` and everything below it. When B next talks to the remote, half a dozen scope bookmarks have diverged — local and remote each have commits the other lacks — from two innocent, non-overlapping edits. Any design that treats divergence as an error fails on the second machine, every time.
+
+So dotsync's core operation is a **convergence pass**: for each scope in topological order, the new head is the merge of {local head, remote head, updated parent-scope heads}, skipping commits where nothing changed. This one operation subsumes what would otherwise be three separate mechanisms:
+
+- local behind remote → the merge is trivially the remote head (fast-forward)
+- local ahead of remote → the merge is trivially the local head (unpushed work; push it when pushing)
+- diverged → a real merge commit, pausing on file conflicts exactly like any cascade merge
+- parent scope advanced → the ordinary cascade merge
+
+Every state a machine can be in — mid-crash, post-failed-push, freshly offline-edited — is just an input to the next convergence pass. There is no separate "recovery."
+
+**Pull first, always.** Every mutating command opens with fetch + convergence, so remote changes are integrated *before* new work builds on top of them — never discovered mid-flow after edits and merges are already in progress. Commit is then: converge, add the new commit, converge again (to cascade it), push.
+
+**Push is a loop, not a step.** A rejected push isn't an error; it means another machine pushed first. Fetch, converge, push again. Push happens immediately after history is created — before the home sync — so a sync-side stop (like drift) never strands committed history unpushed.
+
+**Read-only commands never mutate.** `status`, `diff`, and `view` don't move bookmarks, create commits, or touch home. They fetch (when online) and *report* what convergence would do — including "pulling would conflict on these files in scope X" — computed as in-memory merges via jj-lib. Only `dotsync` (sync), `commit`, and `continue` actually converge.
+
+**Offline is just deferred convergence.** If fetch fails due to network, dotsync skips it and proceeds against last-known remote state. Local history builds up ahead of the remote — which is a normal convergence input, handled the next time the machine is online. There is no offline mode and no queue.
+
+## Conflict resolution in home
+
+There is deliberately no visible working copy — a working copy next to the live config would mean three copies of everything. But the live config directory **is the working copy for all intents and purposes**, and it gets the full working-copy treatment. The user can never move it backward or sideways to another version or scope (inspection is done via `dotsync view`); it only ever goes forward. And when a merge conflicts, the conflict is materialized where the user works.
+
+### Conflicts are commits, not a paused mode
+
+jj's defining feature is that conflicts are first-class objects inside commits: a merge commit can be created with a conflicted tree, and descendants inherit the conflict through their own merges until it is resolved. dotsync leans on this fully. **The cascade never pauses structurally** — every convergence pass completes in one atomic transaction, writing every merge commit, conflicted or not. "Paused" is not a stored mode; it is a derived observation: *one or more local scope heads have conflicted trees.* The conflicted heads act as the queue of pending resolution work.
+
+An earlier design stored pause intent in a machine-local state file (merge parent ids, remaining cascade steps, pre-pause heads) and refused to create conflicted history. That was a holdover from the working-copy era and created a class of dead ends: the file was written outside the repo transaction (crash = half-cascaded bookmarks with no record), it was invisible (no command displayed it), and it was the only copy of the intent. With conflicts in history, every piece of that state is derivable: the conflicted scope and files from the head trees, the merge parents and description from the conflicted commit itself, and nothing else is needed because there are no "remaining steps" — the cascade already completed around the conflict.
+
+**Principle: keep exactly the minimum required state.** The only machine-local state is the sync state file — machine scope and last-synced revision — because those are per-machine facts that shared history cannot contain. Anything derivable from the repo must be derived, never cached in a side file. Derived state is automatically correct after a crash; stored state is a fresh opportunity to be wrong.
+
+### The resolution surface
+
+- **Conflicts materialize into home via ordinary sync.** A conflict anywhere in this machine's scope ancestry propagates down into the machine scope's tree, so syncing writes standard conflict markers (`<<<<<<<` / `|||||||` / `=======` / `>>>>>>>`, base included, sides labeled with scope names rather than commit ids) into the affected home files — using jj's own conflict-materialization code. Agents have deep priors on this exact format. While markers are materialized, drift detection treats them as the expected home content.
+- **`dotsync show conflict` renders the conflict state at any time**: DAG position, the rootmost conflicted scope, which scopes' changes are colliding, the conflicted files, and the instructions. Because it renders derived state rather than a stored record, it is automatically correct after any crash, on any machine. `status` points here whenever conflicts exist.
+- **`continue` verifies the markers are gone**, applies the resolution at the rootmost conflicted scope, and propagates it: descendant merges that inherited the same conflict resolve automatically through jj's descendant rewriting. `commit` refuses while any local scope head is conflicted, pointing at the resolution flow.
+- **Conflicts outside this machine's ancestry** (e.g. a cascade from `all` conflicting only in the `windows` subtree while this machine is linux) don't appear in home naturally. `show conflict` still reports them, and the affected home path serves as a temporary resolution buffer — with the mode-switch stated loudly: "this file temporarily contains the conflicted merge for scope `windows`; it is not your machine's config; after `continue` or `abort` it will be restored to your machine's version."
+- **Conflicted heads are not pushed.** They stay local-ahead — a normal convergence state — until resolved; everything non-conflicted still pushes. This keeps the shared remote free of conflict encodings (which plain git tooling renders poorly) at the cost that only the machine holding the conflict can resolve it.
+- **`abort` goes back to the last fully cascaded machine scope tip.** It abandons the unpushed conflicted commits, returns the affected scope bookmarks to their last non-conflicted positions, and reverts **all** the config files — a full sync of home to the machine scope's last fully cascaded tip, not a selective restore. Conflict markers and the home edit that caused the aborted commit are both gone from home afterward; that's the point of abort. Pushed history is never touched — conflicted heads are never pushed, so everything abandoned is local-only. Clean remote integration discarded along the way costs nothing: the next convergence pass re-derives it.
+
+## Failure model: no dead ends
+
+Every state dotsync can produce — including states produced by crashing at the worst possible moment, a failed push, or another machine racing — must be a state that dotsync commands alone can diagnose and recover from. If a run is interrupted anywhere, the remedy is "run dotsync again" (or `continue`/`abort` for a paused cascade). Never repo surgery.
+
+This is mostly a corollary of the convergence model: interrupted work leaves local-ahead or diverged bookmarks, and those are ordinary convergence inputs. The remaining obligations are ordering and atomicity: persist pause intent in the same effective step as the history it describes, push as soon as history exists, and keep read-only commands working on any state (they report weirdness; they don't refuse to run because of it).
 
 ## Commands
 
 There is one command: `dotsync`.
 
-**`dotsync`** (no arguments): Sync repo -> system. It does not import home edits; use `dotsync status` and `dotsync commit <scope> -m "message" -- <paths...>` when home changes should be recorded.
+**`dotsync`** (no arguments): Pull and converge scope branches (merging remote changes and cascading, pausing on conflicts), sync repo -> system, push. It does not import home edits; use `dotsync status` and `dotsync commit <scope> -m "message" -- <paths...>` when home changes should be recorded.
 
 **`dotsync commit <scope> -m "message" <path>...`**: Commit the selected home-relative file/directory paths to the named scope branch, merge cascade through all descendant scopes, sync repo -> system, push to remote.
 
@@ -150,7 +213,9 @@ There is one command: `dotsync`.
 
 **`dotsync view`**: Show a read-only overview of checked-in scope and file state. With `--scope <scope>`, show the managed file tree visible on that scope. With `--file <path>`, show the scopes where that file exists. With both `--scope <scope>` and `--file <path>`, print that file as it exists on that scope.
 
-**`dotsync continue`**: Continue a paused cascade after the conflicted home files have been edited to their resolved contents.
+**`dotsync show conflict`**: Re-render the current paused cascade: DAG position, paused scope, colliding scopes, conflicted files, and resolution instructions. Works at any time while a pause exists, for agents that lost the original output.
+
+**`dotsync continue`**: Continue a paused cascade after the conflict markers in the affected home files have been edited away to the resolved contents. Refuses if markers remain.
 
 **`dotsync abort`**: Abort a paused cascade, restore scope branches to their pre-pause revisions, clear the pause marker, and sync the current machine home back to the restored repo state.
 
@@ -177,4 +242,4 @@ This is the mechanism that makes the system agent-friendly. The tool itself is s
 - **Not a package manager.** Package lists can be tracked as files in the repo, but dotsync doesn't install anything.
 - **Not a secret manager.** Don't put secrets in the repo. The repo is private but treat it as public.
 - **Not a system config manager.** Files outside `~/` are out of scope. System-level config (like `/etc/systemd/logind.conf`) is tracked in notes but managed manually.
-- **Not a bootstrapper.** Setting up a fresh machine (installing jj, cloning the repo, running dotsync the first time) is a manual process. dotsync is for steady-state maintenance.
+- **Not a bootstrapper.** Setting up a fresh machine (installing dotsync and git, running `dotsync init` the first time) is a manual process. dotsync is for steady-state maintenance.

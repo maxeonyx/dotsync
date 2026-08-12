@@ -37,10 +37,10 @@ pub enum DotsyncError {
     #[error("scope `{scope}` does not exist in config")]
     InvalidScope { scope: String },
     #[error(
-        "fetch would overwrite local bookmark `{bookmark}` by moving it from {local_target} to {remote_target}"
+        "scope `{scope}` has diverged: this machine and the remote each have commits the other does not"
     )]
-    FetchWouldOverwriteLocalBookmark {
-        bookmark: String,
+    ScopeDiverged {
+        scope: String,
         local_target: String,
         remote_target: String,
     },
@@ -90,9 +90,7 @@ impl DotsyncError {
                 ),
             },
             DotsyncError::InvalidScope { .. } => basic_error_report("invalid_scope", self),
-            DotsyncError::FetchWouldOverwriteLocalBookmark { .. } => {
-                basic_error_report("fetch_would_overwrite_local_bookmark", self)
-            }
+            DotsyncError::ScopeDiverged { .. } => basic_error_report("scope_diverged", self),
             DotsyncError::NoCurrentScope => basic_error_report("no_current_scope", self),
             DotsyncError::MissingScopeBookmark { .. } => {
                 basic_error_report("missing_scope_bookmark", self)
@@ -142,12 +140,12 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
         DotsyncError::SyncState { path, .. } => {
             Some(format!("sync state path: {}", path.display()))
         }
-        DotsyncError::FetchWouldOverwriteLocalBookmark {
-            bookmark,
+        DotsyncError::ScopeDiverged {
+            scope,
             local_target,
             remote_target,
         } => Some(format!(
-            "bookmark: {bookmark}; local target: {local_target}; remote target: {remote_target}"
+            "scope: {scope}; local target: {local_target}; remote target: {remote_target}"
         )),
         DotsyncError::CascadePaused { scope, .. } => Some(format!("paused scope: {scope}")),
         DotsyncError::ConcurrentScopeConflict { scope, .. } => {

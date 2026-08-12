@@ -13,7 +13,7 @@ use crate::error::DotsyncError;
 use crate::machine::detect_machine;
 use crate::repo::{
     collect_managed_tree_entries, fetch_origin, load_repo_direct, load_scope_commit,
-    read_tree_entry_bytes,
+    pending_push_scopes, push_scope_updates, read_tree_entry_bytes, PushReport,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -35,6 +35,14 @@ pub struct SyncReport {
     pub drifts: Vec<FileDrift>,
 }
 
+/// The `dotsync` (sync) command: what reached home, and what reached the
+/// remote.
+#[derive(Debug, Clone)]
+pub struct SyncCommandReport {
+    pub sync: SyncReport,
+    pub push: PushReport,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SyncStatePayload {
     machine_scope: String,
@@ -47,10 +55,24 @@ pub(crate) struct SyncState {
     pub(crate) last_synced_revision: CommitId,
 }
 
-pub async fn sync(paths: &DotsyncPaths, options: SyncOptions) -> Result<SyncReport, DotsyncError> {
+pub async fn sync(
+    paths: &DotsyncPaths,
+    options: SyncOptions,
+) -> Result<SyncCommandReport, DotsyncError> {
     let repo = load_repo_direct(paths).await?;
     let _repo = fetch_origin(repo).await?;
-    sync_repo_to_home(paths, options, &[], None).await
+    // Publish before touching home: scope commits left behind by an
+    // interrupted run must reach the remote even if the home sync stops. The
+    // exception is a paused cascade, whose scopes are only half cascaded.
+    let push = match crate::commit::paused_cascade_scope(paths)? {
+        Some(paused_scope) => PushReport::WithheldPausedCascade {
+            scopes: pending_push_scopes(paths).await?,
+            paused_scope,
+        },
+        None => push_scope_updates(paths).await?,
+    };
+    let sync = sync_repo_to_home(paths, options, &[], None).await?;
+    Ok(SyncCommandReport { sync, push })
 }
 
 pub(crate) fn resolve_current_scope(

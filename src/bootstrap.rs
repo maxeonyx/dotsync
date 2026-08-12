@@ -16,15 +16,17 @@ use crate::error::{jj_error, DotsyncError};
 use crate::machine::{detect_machine, MachineIdentity};
 use crate::repo::{
     add_origin_remote, default_settings, fetch_origin, load_repo_direct, push_scope_updates,
+    PushReport,
 };
 use crate::scope_graph::ScopeGraph;
 use crate::sync::{sync_repo_to_home, SyncOptions, SyncReport};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct InitReport {
-    pub current_scope: String,
     pub created_scopes: Vec<String>,
+    /// Includes the machine scope this init settled on, as `sync.current_scope`.
     pub sync: SyncReport,
+    pub push: PushReport,
 }
 
 pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, DotsyncError> {
@@ -60,6 +62,7 @@ pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, 
         join_existing_remote(paths, repo, &identity).await?
     };
 
+    let push = push_scope_updates(paths).await?;
     let sync = sync_repo_to_home(
         paths,
         SyncOptions { force: true },
@@ -67,12 +70,11 @@ pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, 
         Some(&current_scope),
     )
     .await?;
-    push_scope_updates(paths).await?;
 
     Ok(InitReport {
-        current_scope,
         created_scopes,
         sync,
+        push,
     })
 }
 

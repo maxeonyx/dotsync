@@ -21,5 +21,6 @@ pub use crate::inspect::{
     diff_home, list_scope_tree, list_scopes, read_scope_file, DiffReport, FileReport, ScopeInfo,
     ScopeListReport, TreeReport,
 };
+pub use crate::repo::PushReport;
 pub use crate::status::{status, ChangeStatus, FileChange, StatusReport};
-pub use crate::sync::{sync, FileDrift, SyncOptions, SyncReport};
+pub use crate::sync::{sync, FileDrift, SyncCommandReport, SyncOptions, SyncReport};

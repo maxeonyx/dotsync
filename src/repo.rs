@@ -101,6 +101,27 @@ pub(crate) async fn fetch_origin(
         .map_err(|err| jj_error(format!("commit fetch operation: {err}")))
 }
 
+/// Reconciles every local scope bookmark against the remote bookmark it
+/// tracks. DESIGN.md "The convergence model" describes four cases; this loop
+/// decides six things per scope, because two of them are about the local
+/// bookmark existing at all, and divergence is detected in two different
+/// places:
+///
+/// - no local bookmark: a scope another machine published — create it
+/// - conflicted local bookmark: jj's import already tried to reconcile this
+///   scope and could not, which *is* divergence — error (never reset it, or
+///   the local commits are orphaned and the home files that came with them are
+///   deleted by the following sync)
+/// - local == remote: nothing to do
+/// - local behind remote: fast-forward the local bookmark
+/// - local ahead of remote: unpushed local work — keep it, the caller publishes
+///   it when it pushes
+/// - neither is an ancestor of the other: divergence that the import did not
+///   turn into a conflicted bookmark — for example when the remote bookmark is
+///   not tracked, so the import left the local one alone — error
+///
+/// Erroring leaves the whole fetch transaction uncommitted, so a diverged
+/// repo is unchanged by the attempt and reports the same thing next run.
 pub(crate) fn sync_local_bookmarks_from_remote(
     mut_repo: &mut MutableRepo,
     remote_name: &jj_lib::ref_name::RemoteName,
@@ -116,51 +137,98 @@ pub(crate) fn sync_local_bookmarks_from_remote(
         })
         .collect();
 
-    for (name, remote_id) in &updates {
-        let Some(local_id) = mut_repo
-            .view()
-            .get_local_bookmark(name.as_ref())
-            .as_normal()
-        else {
+    for (name, remote_id) in updates {
+        let local_target = mut_repo.view().get_local_bookmark(name.as_ref()).clone();
+        if local_target.is_absent() {
+            // A scope this machine does not have yet, published by another
+            // machine.
+            mut_repo.set_local_bookmark_target(name.as_ref(), RefTarget::normal(remote_id));
             continue;
+        }
+        let Some(local_id) = local_target.as_normal().cloned() else {
+            // A conflicted bookmark is jj's own record that the fetched remote
+            // position could not be reconciled with the local one. Its sides
+            // are the local and the remote head; report only the local one.
+            return Err(DotsyncError::ScopeDiverged {
+                scope: name.as_str().to_string(),
+                local_target: local_target
+                    .added_ids()
+                    .filter(|id| **id != remote_id)
+                    .map(|id| id.hex())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                remote_target: remote_id.hex(),
+            });
         };
         if local_id == remote_id {
             continue;
         }
-        let local_is_ancestor =
-            mut_repo
-                .index()
-                .is_ancestor(local_id, remote_id)
-                .map_err(|err| {
-                    jj_error(format!(
-                        "check bookmark ancestry for {}: {err}",
-                        name.as_str()
-                    ))
-                })?;
-        if !local_is_ancestor {
-            return Err(DotsyncError::FetchWouldOverwriteLocalBookmark {
-                bookmark: name.as_str().to_string(),
-                local_target: local_id.hex(),
-                remote_target: remote_id.hex(),
-            });
-        }
-    }
 
-    for (name, id) in updates {
-        mut_repo.set_local_bookmark_target(name.as_ref(), RefTarget::normal(id));
+        let ancestry = |from: &CommitId, to: &CommitId| {
+            mut_repo.index().is_ancestor(from, to).map_err(|err| {
+                jj_error(format!(
+                    "check bookmark ancestry for {}: {err}",
+                    name.as_str()
+                ))
+            })
+        };
+        if ancestry(&local_id, &remote_id)? {
+            mut_repo.set_local_bookmark_target(name.as_ref(), RefTarget::normal(remote_id));
+            continue;
+        }
+        if ancestry(&remote_id, &local_id)? {
+            continue;
+        }
+
+        return Err(DotsyncError::ScopeDiverged {
+            scope: name.as_str().to_string(),
+            local_target: local_id.hex(),
+            remote_target: remote_id.hex(),
+        });
     }
 
     Ok(())
 }
 
-pub(crate) async fn push_scope_updates(paths: &DotsyncPaths) -> Result<(), DotsyncError> {
-    let repo = load_repo_direct(paths).await?;
-    let settings = default_settings()?;
-    let subprocess_options = GitSubprocessOptions::from_settings(&settings)
-        .map_err(|err| jj_error(format!("load git subprocess settings: {err}")))?;
+/// What a run did about publishing local scope commits. Any scope named by
+/// this report is committed on this machine and absent from the remote.
+///
+/// A refused push is not a dead end — the scope stays local-ahead, which is an
+/// ordinary state — but the run must say so, or the user is left believing a
+/// change reached the remote when it did not. There is deliberately no
+/// `Default`: a command that pushes has to say what happened.
+#[derive(Debug, Clone)]
+pub enum PushReport {
+    /// Nothing is waiting to be published: the push succeeded, or there was
+    /// nothing to push.
+    UpToDate,
+    /// The remote refused these scopes.
+    Refused {
+        scopes: Vec<String>,
+        rejection_reason: Option<String>,
+    },
+    /// Dotsync did not offer these scopes to the remote, because publishing a
+    /// half-cascaded scope would put history on the remote that `dotsync abort`
+    /// could no longer take back.
+    WithheldPausedCascade {
+        scopes: Vec<String>,
+        paused_scope: String,
+    },
+}
 
-    let updates: Vec<(RefNameBuf, BookmarkPushUpdate)> = repo
-        .view()
+impl PushReport {
+    pub fn unpushed_scopes(&self) -> &[String] {
+        match self {
+            PushReport::UpToDate => &[],
+            PushReport::Refused { scopes, .. } => scopes,
+            PushReport::WithheldPausedCascade { scopes, .. } => scopes,
+        }
+    }
+}
+
+/// Scopes whose local bookmark is not where the remote has it.
+fn pending_bookmark_updates(repo: &ReadonlyRepo) -> Vec<(RefNameBuf, BookmarkPushUpdate)> {
+    repo.view()
         .local_remote_bookmarks("origin".as_ref())
         .filter_map(|(name, targets)| {
             let local = targets.local_target.as_normal()?.clone();
@@ -176,14 +244,36 @@ pub(crate) async fn push_scope_updates(paths: &DotsyncPaths) -> Result<(), Dotsy
                 },
             ))
         })
-        .collect();
+        .collect()
+}
+
+/// The scopes a push would offer the remote right now.
+pub(crate) async fn pending_push_scopes(paths: &DotsyncPaths) -> Result<Vec<String>, DotsyncError> {
+    let repo = load_repo_direct(paths).await?;
+    Ok(pending_bookmark_updates(&repo)
+        .into_iter()
+        .map(|(name, _)| name.as_str().to_string())
+        .collect())
+}
+
+pub(crate) async fn push_scope_updates(paths: &DotsyncPaths) -> Result<PushReport, DotsyncError> {
+    let repo = load_repo_direct(paths).await?;
+    let settings = default_settings()?;
+    let subprocess_options = GitSubprocessOptions::from_settings(&settings)
+        .map_err(|err| jj_error(format!("load git subprocess settings: {err}")))?;
+
+    let updates = pending_bookmark_updates(&repo);
 
     if updates.is_empty() {
-        return Ok(());
+        return Ok(PushReport::UpToDate);
     }
 
+    let attempted: Vec<String> = updates
+        .iter()
+        .map(|(name, _)| name.as_str().to_string())
+        .collect();
     let mut tx = repo.start_transaction();
-    git::push_branches(
+    let stats = git::push_branches(
         tx.repo_mut(),
         subprocess_options,
         "origin".as_ref(),
@@ -197,7 +287,27 @@ pub(crate) async fn push_scope_updates(paths: &DotsyncPaths) -> Result<(), Dotsy
     tx.commit("dotsync: push scope updates")
         .await
         .map_err(|err| jj_error(format!("commit push operation: {err}")))?;
-    Ok(())
+
+    let pushed: Vec<&str> = stats
+        .pushed
+        .iter()
+        .map(|reference| reference.as_str().trim_start_matches("refs/heads/"))
+        .collect();
+    let refused: Vec<String> = attempted
+        .into_iter()
+        .filter(|scope| !pushed.contains(&scope.as_str()))
+        .collect();
+    if refused.is_empty() {
+        return Ok(PushReport::UpToDate);
+    }
+    Ok(PushReport::Refused {
+        scopes: refused,
+        rejection_reason: stats
+            .rejected
+            .iter()
+            .chain(stats.remote_rejected.iter())
+            .find_map(|(_, reason)| reason.clone()),
+    })
 }
 
 pub(crate) fn load_scope_commit(

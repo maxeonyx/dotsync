@@ -4,7 +4,9 @@ This file guides AI agents working on the dotsync codebase itself. This tool is 
 
 ## Start Here
 
+- If you were started inside this submodule, read the workspace `../../AGENTS.md` too — it defines the development process (loops, standards/concerns, reviewer/implementer separation) and post-push obligations (submodule pointer update, CI reconciliation) that apply to all tools including this one.
 - Read `DESIGN.md` before changing command behavior, scope semantics, sync rules, or any product requirement.
+- Read `PLAN.md` for current priorities, the ordered work plan, and standing constraints (notably: never hand-mutate the hidden repo or dotfiles history).
 - Read `README.md` when updating public-facing positioning, quick-start content, or outbound links.
 - Read `docs/SKILL.md` only when editing the end-user dotfiles workflow skill that agents load while changing config files.
 
@@ -34,6 +36,8 @@ Core flows implemented: `dotsync init`, sync, commit with cascade, conflict paus
 This project uses strict TDD via [tdd-ratchet](https://tdd-ratchet.maxeonyx.com). Run `cargo ratchet` instead of `cargo test`. New tests must fail first (committed as `pending`), then pass in a separate commit. See `.test-status.json` for current test states.
 
 ## CI and Release
+
+PRs in this repo can be merged without approval (Max, 2026-08-12).
 
 Single `ci.yml` workflow: main-version-bump guard, format, lint, check, test, build matrix (x86_64 linux-musl + windows), GitHub Release (version from Cargo.toml, fails if that release already exists), Pages deploy (docs + binaries combined at dotsync.maxeonyx.com).
 

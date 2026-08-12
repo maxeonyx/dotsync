@@ -24,7 +24,7 @@ use crate::error::DotsyncError;
 
 use crate::repo::{
     collect_managed_tree_entries, fetch_origin, load_repo_direct, load_scope_commit,
-    push_scope_updates, read_tree_entry_bytes,
+    push_scope_updates, read_tree_entry_bytes, PushReport,
 };
 use crate::sync::{SyncOptions, SyncReport};
 
@@ -62,17 +62,32 @@ struct PausedCascadeStep {
     parent_scopes: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CommitReport {
     pub committed_scope: String,
     pub cascaded_scopes: Vec<String>,
     pub sync: SyncReport,
+    pub push: PushReport,
 }
 
-#[derive(Debug, Clone, Default)]
+impl CommitReport {
+    /// A commit that found nothing to add. It creates no history of its own,
+    /// but it still reports what it published on behalf of earlier runs.
+    fn nothing_to_commit(push: PushReport) -> Self {
+        Self {
+            committed_scope: String::new(),
+            cascaded_scopes: Vec::new(),
+            sync: SyncReport::default(),
+            push,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ContinueReport {
     pub cascaded_scopes: Vec<String>,
     pub sync: SyncReport,
+    pub push: PushReport,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -93,7 +108,15 @@ pub async fn commit_and_sync(
     reject_commit_if_cascade_paused(paths)?;
 
     let pre_fetch_repo = load_repo_direct(paths).await?;
-    let repo = fetch_origin(pre_fetch_repo.clone()).await?;
+    let _fetched_repo = fetch_origin(pre_fetch_repo.clone()).await?;
+    // Publish what earlier runs left behind before looking at this commit at
+    // all: this commit may turn out to add nothing, and a machine with an
+    // interrupted push behind it must still heal. Anything this run goes on to
+    // create is published by the push after the cascade.
+    let pending_push = push_scope_updates(paths).await?;
+    // The push may have written an operation of its own, so build this commit
+    // on the repo state it left behind rather than on the fetched snapshot.
+    let repo = load_repo_direct(paths).await?;
     let config = load_config(paths).await?;
     let graph = config.graph.clone();
 
@@ -139,7 +162,9 @@ pub async fn commit_and_sync(
                 "scoped commit is not available until home-diff commit flow lands",
             ));
         }
-        return Ok(CommandOutcome::Success(CommitReport::default()));
+        return Ok(CommandOutcome::Success(CommitReport::nothing_to_commit(
+            pending_push,
+        )));
     }
 
     let mut tx = repo.start_transaction();
@@ -159,7 +184,9 @@ pub async fn commit_and_sync(
         })?;
 
         if new_tree.tree_ids() == base_tree.tree_ids() {
-            return Ok(CommandOutcome::Success(CommitReport::default()));
+            return Ok(CommandOutcome::Success(CommitReport::nothing_to_commit(
+                pending_push,
+            )));
         }
 
         tx.repo_mut()
@@ -324,6 +351,9 @@ pub async fn commit_and_sync(
             message: format!("commit scoped change for {}: {err}", options.scope),
         })?;
 
+    // Push as soon as the history exists: the home sync below can legitimately
+    // stop on drift, and a stop must never strand committed scope history.
+    let push = push_scope_updates(paths).await?;
     let sync = crate::sync::sync_repo_to_home(
         paths,
         SyncOptions {
@@ -333,12 +363,12 @@ pub async fn commit_and_sync(
         Some(&machine_scope),
     )
     .await?;
-    push_scope_updates(paths).await?;
 
     Ok(CommandOutcome::Success(CommitReport {
         committed_scope: options.scope,
         cascaded_scopes,
         sync,
+        push,
     }))
 }
 
@@ -874,6 +904,7 @@ pub async fn continue_after_conflict(
             message: format!("commit continued cascade: {err}"),
         })?;
     remove_paused_cascade_state(paths)?;
+    let push = push_scope_updates(paths).await?;
     let sync = crate::sync::sync_repo_to_home(
         paths,
         options,
@@ -881,10 +912,10 @@ pub async fn continue_after_conflict(
         Some(&state.machine_scope),
     )
     .await?;
-    push_scope_updates(paths).await?;
     Ok(CommandOutcome::Success(ContinueReport {
         cascaded_scopes,
         sync,
+        push,
     }))
 }
 
@@ -966,6 +997,17 @@ fn remove_paused_cascade_state(paths: &DotsyncPaths) -> Result<(), DotsyncError>
         Ok(()) => Ok(()),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(source) => Err(DotsyncError::Io { path, source }),
+    }
+}
+
+/// The scope a paused cascade stopped at, if one is paused. Reads the same
+/// state file `continue` and `abort` read, and disappears with it when
+/// conflicts become commits.
+pub(crate) fn paused_cascade_scope(paths: &DotsyncPaths) -> Result<Option<String>, DotsyncError> {
+    match load_paused_cascade_state(paths) {
+        Ok(state) => Ok(Some(state.paused_scope)),
+        Err(DotsyncError::NoPausedCascade) => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
