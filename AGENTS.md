@@ -37,6 +37,8 @@ This project uses strict TDD via [tdd-ratchet](https://tdd-ratchet.maxeonyx.com)
 
 ## CI and Release
 
+PRs in this repo can be merged without approval (Max, 2026-08-12).
+
 Single `ci.yml` workflow: main-version-bump guard, format, lint, check, test, build matrix (x86_64 linux-musl + windows), GitHub Release (version from Cargo.toml, fails if that release already exists), Pages deploy (docs + binaries combined at dotsync.maxeonyx.com).
 
 Every push to `main` must bump the crate version in both `Cargo.toml` and `Cargo.lock` so CI publishes that push as a new release. The repo-local guard lives in `scripts/check_main_version_bump.py`; CI runs it on `main`, and the repo-local `pre-push` hook in `.githooks/pre-push` runs that version check plus `cargo clippy -- -D warnings` and `cargo ratchet` for `main` pushes if the clone has hooks wired up.
