@@ -4587,3 +4587,55 @@ fn committing_a_path_another_machine_deleted_is_refused() {
         "ui_theme = dark\nfont = mono\n"
     );
 }
+
+#[test]
+fn a_forced_overwrite_is_reported_even_when_the_run_then_fails() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+    seed_shared_apprc(&machine_a, &machine_b);
+
+    machine_a.write_file(".config/other.conf", "other = base\n");
+    let seed_other = machine_a.run("dotsync commit all -m 'add other' -- .config/other.conf");
+    assert!(
+        seed_other.status.success(),
+        "{}",
+        render_output(&seed_other)
+    );
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+
+    machine_b.write_file(".apprc", "ui_theme = dark\nfont = mono\nsize = 14\n");
+    let commit_b = machine_b.run("dotsync commit all -m 'add size' -- .apprc");
+    assert!(commit_b.status.success(), "{}", render_output(&commit_b));
+
+    // A forces the revert of `.apprc`, and separately has drift on a file the
+    // commit does not name — so the commit's own home sync stops after the
+    // forced history has already been written and pushed.
+    let status_a = machine_a.run("dotsync status");
+    assert!(status_a.status.success(), "{}", render_output(&status_a));
+    machine_a.write_file(".config/other.conf", "other = drifted\n");
+
+    let commit_a =
+        machine_a.run("dotsync --output json commit all -m 'revert apprc' --force -- .apprc");
+    assert_eq!(
+        commit_a.status.code(),
+        Some(1),
+        "unrelated drift still stops the home sync\n{}",
+        render_output(&commit_a)
+    );
+    assert_eq!(
+        remote_branch_file_contents(&machine_a, "all", ".apprc"),
+        "ui_theme = dark\nfont = mono\n",
+        "the forced overwrite really did happen before the run stopped"
+    );
+
+    let json = parse_stdout_json(&commit_a);
+    assert_eq!(
+        json["forced_overwrites"]
+            .as_array()
+            .expect("forced_overwrites should be an array on the error path too"),
+        &vec![serde_json::Value::from(".apprc")],
+        "a run that overwrote someone else's change must say so whether or not it then finished\n{}",
+        render_output(&commit_a)
+    );
+}
