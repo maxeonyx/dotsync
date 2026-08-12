@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use jj_lib::backend::CommitId;
 use jj_lib::backend::{CopyId, TreeValue};
@@ -20,7 +20,7 @@ use crate::cascade::{
     ScopeHeads,
 };
 use crate::config::{internal_repo_paths, load_config, DotsyncPaths};
-use crate::error::DotsyncError;
+use crate::error::{CommitPathProblem, DotsyncError, RejectedCommitPath};
 
 use crate::repo::{
     collect_managed_tree_entries, fetch_origin, load_repo_direct, load_scope_commit,
@@ -505,29 +505,19 @@ fn expand_selection_paths(
         .ok()
         .map(|p| p.to_path_buf());
 
+    let mut rejected = Vec::new();
     for selection_path in selection_paths {
-        // An absolute path resolves against the filesystem root, not against
-        // home, so it can never name a repo-relative file. Say so rather than
-        // handing the raw path to the repo layer.
-        if selection_path.is_absolute() {
-            return Err(DotsyncError::AbsoluteCommitPath {
+        if let Some(problem) = unusable_commit_path(
+            paths,
+            selection_path,
+            internal_paths,
+            repo_relative.as_deref(),
+        ) {
+            rejected.push(RejectedCommitPath {
                 path: selection_path.clone(),
+                problem,
             });
-        }
-        // Dotsync's own state lives in home too. Skipping these silently made
-        // naming one look like a successful commit that recorded nothing.
-        if internal_paths.contains(selection_path) {
-            return Err(DotsyncError::SyncStateCommitPath {
-                path: selection_path.clone(),
-            });
-        }
-        if let Some(ref repo_rel) = repo_relative {
-            if selection_path.starts_with(repo_rel) {
-                return Err(DotsyncError::RepoCommitPath {
-                    path: selection_path.clone(),
-                    repo_root: paths.repo_root.clone(),
-                });
-            }
+            continue;
         }
 
         let home_path = paths.home_dir.join(selection_path);
@@ -562,16 +552,68 @@ fn expand_selection_paths(
         // file. Committing it would report success having recorded nothing,
         // which is how a typo reads to an agent as a saved config change.
         if matched.is_empty() {
-            return Err(DotsyncError::UnmatchedCommitPath {
+            rejected.push(RejectedCommitPath {
                 path: selection_path.clone(),
-                home_path,
-                scope: scope.to_string(),
+                problem: CommitPathProblem::Unmatched { home_path },
             });
+            continue;
         }
         expanded.extend(matched);
     }
 
+    // Every bad path in one answer: an agent that fixes one and reruns pays a
+    // full fetch-and-commit attempt to discover the next one.
+    if !rejected.is_empty() {
+        return Err(DotsyncError::UnusableCommitPaths {
+            scope: scope.to_string(),
+            rejected,
+        });
+    }
+
     Ok(expanded.into_iter().collect())
+}
+
+/// Why dotsync will not record this path, if it will not. Runs before any
+/// matching, because these paths are refused for what they are rather than
+/// for what they do or do not resolve to.
+fn unusable_commit_path(
+    paths: &DotsyncPaths,
+    selection_path: &Path,
+    internal_paths: &BTreeSet<PathBuf>,
+    repo_relative: Option<&Path>,
+) -> Option<CommitPathProblem> {
+    // An absolute path resolves against the filesystem root, not against home,
+    // so it can never name a repo-relative file.
+    if selection_path.is_absolute() {
+        return Some(CommitPathProblem::Absolute);
+    }
+    // Dotsync stores this path verbatim as a repo path and every machine on
+    // the scope joins it onto its own home directory. A `..` component
+    // therefore writes outside home on every machine, so containment has to be
+    // checked here rather than trusted to the repo layer.
+    if selection_path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Some(CommitPathProblem::EscapesHome);
+    }
+    // Dotsync's own state lives in home too, and none of it is config.
+    if internal_paths.contains(selection_path) {
+        return Some(CommitPathProblem::SyncState);
+    }
+    if let Some(repo_relative) = repo_relative {
+        if selection_path == repo_relative {
+            return Some(CommitPathProblem::DotsyncRepoRoot {
+                repo_root: paths.repo_root.clone(),
+            });
+        }
+        if selection_path.starts_with(repo_relative) {
+            return Some(CommitPathProblem::InsideDotsyncRepo {
+                repo_root: paths.repo_root.clone(),
+            });
+        }
+    }
+    None
 }
 
 fn collect_home_directory_files(

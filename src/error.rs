@@ -12,6 +12,71 @@ pub struct ErrorReport {
     pub current_state: Option<String>,
 }
 
+/// One path a commit named that dotsync will not record, and why. Kept
+/// structured so that one run reports every bad path, and each line is
+/// rendered at the edge rather than built into the error.
+#[derive(Debug, Clone)]
+pub struct RejectedCommitPath {
+    pub path: PathBuf,
+    pub problem: CommitPathProblem,
+}
+
+#[derive(Debug, Clone)]
+pub enum CommitPathProblem {
+    Absolute,
+    EscapesHome,
+    /// Matched neither a file in home nor a file already on the target scope.
+    Unmatched {
+        home_path: PathBuf,
+    },
+    SyncState,
+    DotsyncRepoRoot {
+        repo_root: PathBuf,
+    },
+    InsideDotsyncRepo {
+        repo_root: PathBuf,
+    },
+}
+
+impl RejectedCommitPath {
+    pub(crate) fn explain(&self, scope: &str) -> String {
+        let path = self.path.display();
+        match &self.problem {
+            CommitPathProblem::Absolute => format!(
+                "`{path}` is an absolute path, and dotsync resolves every commit path against your home directory."
+            ),
+            CommitPathProblem::EscapesHome => format!(
+                "`{path}` climbs out of your home directory with `..`, and dotsync records the path you name verbatim, so every machine on the scope would write it outside its own home."
+            ),
+            CommitPathProblem::Unmatched { home_path } => format!(
+                "`{path}` matched nothing: no file exists at or under {}, and scope `{scope}` tracks no file at or under `{path}`.",
+                home_path.display()
+            ),
+            CommitPathProblem::SyncState => format!(
+                "`{path}` is this machine's dotsync sync state; it records which machine scope this home uses, so it has to stay machine-local."
+            ),
+            CommitPathProblem::DotsyncRepoRoot { repo_root } => format!(
+                "`{path}` is dotsync's hidden repo itself, at {}, which is where dotsync stores every scope.",
+                repo_root.display()
+            ),
+            CommitPathProblem::InsideDotsyncRepo { repo_root } => format!(
+                "`{path}` is inside dotsync's hidden repo at {}, which is where dotsync stores every scope.",
+                repo_root.display()
+            ),
+        }
+    }
+
+    /// Read by the binary's renderer to add advice about dotsync's own state.
+    pub fn is_dotsync_state(&self) -> bool {
+        matches!(
+            self.problem,
+            CommitPathProblem::SyncState
+                | CommitPathProblem::DotsyncRepoRoot { .. }
+                | CommitPathProblem::InsideDotsyncRepo { .. }
+        )
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum DotsyncError {
     #[error(
@@ -24,18 +89,11 @@ pub enum DotsyncError {
     NonUtf8Path { path: PathBuf },
     #[error("{path} is a git submodule; dotsync manages regular files and symlinks only")]
     GitSubmodule { path: PathBuf },
-    #[error("commit path `{path}` matched no file to commit")]
-    UnmatchedCommitPath {
-        path: PathBuf,
-        home_path: PathBuf,
+    #[error("cannot commit {} of the paths you named", rejected.len())]
+    UnusableCommitPaths {
         scope: String,
+        rejected: Vec<RejectedCommitPath>,
     },
-    #[error("commit path `{path}` is absolute")]
-    AbsoluteCommitPath { path: PathBuf },
-    #[error("commit path `{path}` is this machine's dotsync sync state")]
-    SyncStateCommitPath { path: PathBuf },
-    #[error("commit path `{path}` is inside dotsync's hidden repo")]
-    RepoCommitPath { path: PathBuf, repo_root: PathBuf },
     #[error("{} conflicted file(s) are unchanged since the cascade paused at scope `{scope}`", paths.len())]
     UnresolvedConflict { scope: String, paths: Vec<PathBuf> },
     #[error("failed to read {path}: {source}")]
@@ -137,19 +195,12 @@ impl DotsyncError {
             DotsyncError::HomeNotSet => basic_error_report("home_not_set", self),
             DotsyncError::NonUtf8Path { .. } => basic_error_report("non_utf8_path", self),
             DotsyncError::GitSubmodule { .. } => basic_error_report("git_submodule", self),
-            DotsyncError::UnmatchedCommitPath { .. } => {
-                basic_error_report("unmatched_commit_path", self)
-            }
-            DotsyncError::AbsoluteCommitPath { .. } => {
-                basic_error_report("absolute_commit_path", self)
+            DotsyncError::UnusableCommitPaths { .. } => {
+                basic_error_report("unusable_commit_paths", self)
             }
             DotsyncError::UnresolvedConflict { .. } => {
                 basic_error_report("unresolved_conflict", self)
             }
-            DotsyncError::SyncStateCommitPath { .. } => {
-                basic_error_report("sync_state_commit_path", self)
-            }
-            DotsyncError::RepoCommitPath { .. } => basic_error_report("repo_commit_path", self),
         }
     }
 }
@@ -177,16 +228,13 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
             "scope: {scope}; local target: {local_target}; remote target: {remote_target}"
         )),
         DotsyncError::CascadePaused { scope, .. } => Some(format!("paused scope: {scope}")),
-        DotsyncError::UnmatchedCommitPath {
-            path,
-            home_path,
-            scope,
-        } => Some(format!(
-            "`{}` matched nothing: no file exists at or under {}, and scope `{scope}` tracks no file at or under `{}`.",
-            path.display(),
-            home_path.display(),
-            path.display()
-        )),
+        DotsyncError::UnusableCommitPaths { scope, rejected } => Some(
+            rejected
+                .iter()
+                .map(|rejected| rejected.explain(scope))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
         DotsyncError::UnresolvedConflict { scope, paths } => Some(format!(
             "unchanged since the cascade paused at scope `{scope}`: {}",
             paths
@@ -194,19 +242,6 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
                 .map(|path| path.display().to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
-        )),
-        DotsyncError::SyncStateCommitPath { path } => Some(format!(
-            "`{}` is this machine's dotsync sync state; it records which machine scope this home uses, so it has to stay machine-local.",
-            path.display()
-        )),
-        DotsyncError::RepoCommitPath { path, repo_root } => Some(format!(
-            "`{}` is inside dotsync's hidden repo at {}, which is where dotsync stores the scopes themselves.",
-            path.display(),
-            repo_root.display()
-        )),
-        DotsyncError::AbsoluteCommitPath { path } => Some(format!(
-            "`{}` is an absolute path, and dotsync resolves every commit path against your home directory.",
-            path.display()
         )),
         DotsyncError::PausedCascadeInProgress { scope } => Some(format!("paused scope: {scope}")),
         DotsyncError::NotInitialized { path } => Some(format!(

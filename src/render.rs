@@ -119,39 +119,40 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 "after `dotsync continue` succeeds, rerun the new commit if it is still needed.",
             ],
         ),
-        DotsyncError::SyncStateCommitPath { .. } | DotsyncError::RepoCommitPath { .. } => {
+        DotsyncError::UnusableCommitPaths { scope, rejected } => {
+            let mut steps = vec![format!(
+                "name paths relative to your home directory: `dotsync commit {scope} -m \"message\" -- .config/fish/config.fish`."
+            )];
+            steps.push(
+                "do not use `~/`, absolute paths, or `..`; dotsync resolves every path against your home directory already, and records it verbatim.".to_string(),
+            );
+            if rejected.iter().any(|rejected| rejected.is_dotsync_state()) {
+                steps.push(
+                    "commit the config files you edited instead; dotsync's own state is not config and cannot travel on a scope."
+                        .to_string(),
+                );
+                steps.push(
+                    "to change which scopes exist, edit `.config/dotsync/config.toml` in home and commit that path to `all`."
+                        .to_string(),
+                );
+            }
+            steps.push("run `dotsync status` to see which managed files changed.".to_string());
+
             render_structured_error(
-                "that path is dotsync's own state, not your config",
-                "Dotsync keeps its own state in your home directory: a hidden repo holding every scope, and a machine-local sync-state file recording which machine scope this home last synced and at which revision.",
-                "This commit flow records the home files you name onto a scope branch, and every file on a scope branch is synced into home on every machine that shares that scope.",
-                "It expects the paths you name to be config files you edit, not the state dotsync maintains to do its own job.",
+                if rejected.len() == 1 {
+                    "cannot commit that path"
+                } else {
+                    "cannot commit those paths"
+                },
+                "Dotsync records the home files you name onto a scope branch, then cascades that scope so every machine sharing it receives the change. Every file on a scope is written back into home on each of those machines.",
+                "This commit flow resolves each path you name against your home directory, checks that it is a config file dotsync may record, and commits the ones that changed.",
+                "It expects every path you name to be a config file inside your home directory, named relative to it, and to exist either in home or on the target scope already.",
                 error_report
                     .current_state
                     .as_deref()
                     .unwrap_or(&error_report.message),
-                "Recording dotsync's own state on a scope would sync it onto every machine sharing that scope, overwriting the state each of those machines needs in order to be itself.",
-                &[
-                    "commit the config files you edited instead; run `dotsync status` to see which managed files changed.",
-                    "to change which scopes exist, edit `.config/dotsync/config.toml` in home and commit that path to `all`.",
-                ],
-            )
-        }
-        DotsyncError::UnmatchedCommitPath { .. } | DotsyncError::AbsoluteCommitPath { .. } => {
-            render_structured_error(
-                "cannot commit that path",
-                "Dotsync records the home files you name onto a scope branch, then cascades that scope so every machine sharing it receives the change.",
-                "This commit flow resolves each path you name against your home directory and against the files already tracked on the target scope.",
-                "It expects every path you name to be relative to your home directory, such as `.bashrc`, `.config/fish/config.fish`, or `.config/fish/`.",
-                error_report
-                    .current_state
-                    .as_deref()
-                    .unwrap_or(&error_report.message),
-                "Committing a path dotsync cannot resolve would record no change while reporting success, so you would believe the config was saved when it was not.",
-                &[
-                    "name paths relative to your home directory: `dotsync commit <scope> -m \"message\" -- .config/fish/config.fish`.",
-                    "do not use `~/` or absolute paths; dotsync resolves every path against your home directory already.",
-                    "run `dotsync status` to see which managed files changed.",
-                ],
+                "Dotsync stopped before recording anything. A commit records every path you named or none of them, so fixing the paths above and rerunning the same command is safe.",
+                &steps.iter().map(String::as_str).collect::<Vec<_>>(),
             )
         }
         DotsyncError::InvalidScope { .. } => render_structured_error(

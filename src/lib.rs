@@ -16,7 +16,7 @@ pub use crate::commit::{
     CommitReport, CommitSelection, ContinueReport,
 };
 pub use crate::config::DotsyncPaths;
-pub use crate::error::{DotsyncError, ErrorReport};
+pub use crate::error::{CommitPathProblem, DotsyncError, ErrorReport, RejectedCommitPath};
 pub use crate::inspect::{
     diff_home, list_scope_tree, list_scopes, read_scope_file, DiffReport, FileReport, ScopeInfo,
     ScopeListReport, TreeReport,

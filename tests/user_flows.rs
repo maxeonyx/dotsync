@@ -1377,23 +1377,23 @@ fn commit_path_that_matches_nothing_is_an_error() {
 dotsync: cannot commit that path
 
 What dotsync does:
-Dotsync records the home files you name onto a scope branch, then cascades that scope so every machine sharing it receives the change.
+Dotsync records the home files you name onto a scope branch, then cascades that scope so every machine sharing it receives the change. Every file on a scope is written back into home on each of those machines.
 
 This flow:
-This commit flow resolves each path you name against your home directory and against the files already tracked on the target scope.
+This commit flow resolves each path you name against your home directory, checks that it is a config file dotsync may record, and commits the ones that changed.
 
 Expected:
-It expects every path you name to be relative to your home directory, such as `.bashrc`, `.config/fish/config.fish`, or `.config/fish/`.
+It expects every path you name to be a config file inside your home directory, named relative to it, and to exist either in home or on the target scope already.
 
 Current state found:
 `nonexistent-file` matched nothing: no file exists at or under {}/nonexistent-file, and scope `all` tracks no file at or under `nonexistent-file`.
 
 Why dotsync stopped:
-Committing a path dotsync cannot resolve would record no change while reporting success, so you would believe the config was saved when it was not.
+Dotsync stopped before recording anything. A commit records every path you named or none of them, so fixing the paths above and rerunning the same command is safe.
 
 Correct flow:
-- name paths relative to your home directory: `dotsync commit <scope> -m \"message\" -- .config/fish/config.fish`.
-- do not use `~/` or absolute paths; dotsync resolves every path against your home directory already.
+- name paths relative to your home directory: `dotsync commit all -m \"message\" -- .config/fish/config.fish`.
+- do not use `~/`, absolute paths, or `..`; dotsync resolves every path against your home directory already, and records it verbatim.
 - run `dotsync status` to see which managed files changed.
 ",
             machine.home_dir.display()
@@ -1542,26 +1542,29 @@ fn commit_path_inside_dotsyncs_own_state_is_an_error() {
         &state_output,
         &format!(
             "\
-dotsync: that path is dotsync's own state, not your config
+dotsync: cannot commit that path
 
 What dotsync does:
-Dotsync keeps its own state in your home directory: a hidden repo holding every scope, and a machine-local sync-state file recording which machine scope this home last synced and at which revision.
+Dotsync records the home files you name onto a scope branch, then cascades that scope so every machine sharing it receives the change. Every file on a scope is written back into home on each of those machines.
 
 This flow:
-This commit flow records the home files you name onto a scope branch, and every file on a scope branch is synced into home on every machine that shares that scope.
+This commit flow resolves each path you name against your home directory, checks that it is a config file dotsync may record, and commits the ones that changed.
 
 Expected:
-It expects the paths you name to be config files you edit, not the state dotsync maintains to do its own job.
+It expects every path you name to be a config file inside your home directory, named relative to it, and to exist either in home or on the target scope already.
 
 Current state found:
 `{sync_state}` is this machine's dotsync sync state; it records which machine scope this home uses, so it has to stay machine-local.
 
 Why dotsync stopped:
-Recording dotsync's own state on a scope would sync it onto every machine sharing that scope, overwriting the state each of those machines needs in order to be itself.
+Dotsync stopped before recording anything. A commit records every path you named or none of them, so fixing the paths above and rerunning the same command is safe.
 
 Correct flow:
-- commit the config files you edited instead; run `dotsync status` to see which managed files changed.
+- name paths relative to your home directory: `dotsync commit all -m \"message\" -- .config/fish/config.fish`.
+- do not use `~/`, absolute paths, or `..`; dotsync resolves every path against your home directory already, and records it verbatim.
+- commit the config files you edited instead; dotsync's own state is not config and cannot travel on a scope.
 - to change which scopes exist, edit `.config/dotsync/config.toml` in home and commit that path to `all`.
+- run `dotsync status` to see which managed files changed.
 "
         ),
     );
