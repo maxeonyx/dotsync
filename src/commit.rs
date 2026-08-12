@@ -24,7 +24,7 @@ use crate::error::DotsyncError;
 
 use crate::repo::{
     collect_managed_tree_entries, fetch_origin, load_repo_direct, load_scope_commit,
-    push_scope_updates, read_tree_entry_bytes,
+    push_scope_updates, read_tree_entry_bytes, PushReport,
 };
 use crate::sync::{SyncOptions, SyncReport};
 
@@ -62,17 +62,31 @@ struct PausedCascadeStep {
     parent_scopes: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CommitReport {
     pub committed_scope: String,
     pub cascaded_scopes: Vec<String>,
     pub sync: SyncReport,
+    pub push: PushReport,
 }
 
-#[derive(Debug, Clone, Default)]
+impl CommitReport {
+    /// A commit that found nothing to do: no history, so nothing to publish.
+    fn nothing_to_commit() -> Self {
+        Self {
+            committed_scope: String::new(),
+            cascaded_scopes: Vec::new(),
+            sync: SyncReport::default(),
+            push: PushReport::UpToDate,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ContinueReport {
     pub cascaded_scopes: Vec<String>,
     pub sync: SyncReport,
+    pub push: PushReport,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -139,7 +153,7 @@ pub async fn commit_and_sync(
                 "scoped commit is not available until home-diff commit flow lands",
             ));
         }
-        return Ok(CommandOutcome::Success(CommitReport::default()));
+        return Ok(CommandOutcome::Success(CommitReport::nothing_to_commit()));
     }
 
     let mut tx = repo.start_transaction();
@@ -159,7 +173,7 @@ pub async fn commit_and_sync(
         })?;
 
         if new_tree.tree_ids() == base_tree.tree_ids() {
-            return Ok(CommandOutcome::Success(CommitReport::default()));
+            return Ok(CommandOutcome::Success(CommitReport::nothing_to_commit()));
         }
 
         tx.repo_mut()
@@ -327,7 +341,7 @@ pub async fn commit_and_sync(
     // Push as soon as the history exists: the home sync below can legitimately
     // stop on drift, and a stop must never strand committed scope history.
     let push = push_scope_updates(paths).await?;
-    let mut sync = crate::sync::sync_repo_to_home(
+    let sync = crate::sync::sync_repo_to_home(
         paths,
         SyncOptions {
             force: options.force,
@@ -336,12 +350,12 @@ pub async fn commit_and_sync(
         Some(&machine_scope),
     )
     .await?;
-    sync.push = push;
 
     Ok(CommandOutcome::Success(CommitReport {
         committed_scope: options.scope,
         cascaded_scopes,
         sync,
+        push,
     }))
 }
 
@@ -878,17 +892,17 @@ pub async fn continue_after_conflict(
         })?;
     remove_paused_cascade_state(paths)?;
     let push = push_scope_updates(paths).await?;
-    let mut sync = crate::sync::sync_repo_to_home(
+    let sync = crate::sync::sync_repo_to_home(
         paths,
         options,
         &expected_changes,
         Some(&state.machine_scope),
     )
     .await?;
-    sync.push = push;
     Ok(CommandOutcome::Success(ContinueReport {
         cascaded_scopes,
         sync,
+        push,
     }))
 }
 

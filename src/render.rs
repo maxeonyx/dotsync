@@ -173,30 +173,30 @@ pub(crate) fn render_structured_error(
 }
 
 /// Notes printed to stderr alongside a successful run: what was overwritten,
-/// and what did not reach the remote.
-pub(crate) fn success_notes(drifts: &[FileDrift], push: &PushReport) -> Vec<String> {
-    let mut notes = notes_for_push(push);
+/// and what did not reach the remote. `push` is `None` only for commands that
+/// do not publish at all, so a publishing command cannot quietly omit this.
+pub(crate) fn success_notes(drifts: &[FileDrift], push: Option<&PushReport>) -> Vec<String> {
+    let mut notes = push.map(notes_for_push).unwrap_or_default();
     notes.extend(notes_for_drifts(drifts));
     notes
 }
 
 fn notes_for_push(push: &PushReport) -> Vec<String> {
-    if push.unpushed_scopes.is_empty() {
-        return Vec::new();
+    match push {
+        PushReport::UpToDate => Vec::new(),
+        PushReport::Refused {
+            scopes,
+            rejection_reason,
+        } => {
+            let reason = rejection_reason
+                .clone()
+                .unwrap_or_else(|| "no reason reported by the remote".to_string());
+            vec![
+                format!("dotsync: the remote refused {} ({reason})", scopes.join(", ")),
+                "dotsync: those scopes are committed here but not published, so the remote does not have this change yet. The next run will try again.".to_string(),
+            ]
+        }
     }
-
-    let reason = push
-        .reason
-        .as_ref()
-        .map(|reason| format!(" ({reason})"))
-        .unwrap_or_default();
-    vec![
-        format!(
-            "dotsync: could not push {}{reason}",
-            push.unpushed_scopes.join(", ")
-        ),
-        "dotsync: those scopes are committed here but not published, so the remote does not have this change yet. Run `dotsync` again to publish them.".to_string(),
-    ]
 }
 
 fn notes_for_drifts(drifts: &[FileDrift]) -> Vec<String> {

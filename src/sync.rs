@@ -33,6 +33,13 @@ pub struct SyncReport {
     pub current_scope: String,
     pub synced_paths: Vec<PathBuf>,
     pub drifts: Vec<FileDrift>,
+}
+
+/// The `dotsync` (sync) command: what reached home, and what reached the
+/// remote.
+#[derive(Debug, Clone)]
+pub struct SyncCommandReport {
+    pub sync: SyncReport,
     pub push: PushReport,
 }
 
@@ -48,15 +55,17 @@ pub(crate) struct SyncState {
     pub(crate) last_synced_revision: CommitId,
 }
 
-pub async fn sync(paths: &DotsyncPaths, options: SyncOptions) -> Result<SyncReport, DotsyncError> {
+pub async fn sync(
+    paths: &DotsyncPaths,
+    options: SyncOptions,
+) -> Result<SyncCommandReport, DotsyncError> {
     let repo = load_repo_direct(paths).await?;
     let _repo = fetch_origin(repo).await?;
     // Publish before touching home: scope commits left behind by an
     // interrupted run must reach the remote even if the home sync stops.
     let push = push_scope_updates(paths).await?;
-    let mut report = sync_repo_to_home(paths, options, &[], None).await?;
-    report.push = push;
-    Ok(report)
+    let sync = sync_repo_to_home(paths, options, &[], None).await?;
+    Ok(SyncCommandReport { sync, push })
 }
 
 pub(crate) fn resolve_current_scope(
@@ -232,7 +241,6 @@ pub(crate) async fn sync_repo_to_home(
         current_scope,
         synced_paths,
         drifts,
-        push: PushReport::default(),
     })
 }
 

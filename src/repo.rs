@@ -178,14 +178,32 @@ pub(crate) fn sync_local_bookmarks_from_remote(
     Ok(())
 }
 
-/// What a push actually achieved. A remote that refuses an update is not a
-/// dead end — the scope stays local-ahead and the next run pushes it again —
-/// but the run must say so, or the user is left believing a change reached the
-/// remote when it did not.
-#[derive(Debug, Clone, Default)]
-pub struct PushReport {
-    pub unpushed_scopes: Vec<String>,
-    pub reason: Option<String>,
+/// What a run did about publishing local scope commits. Any scope named by
+/// this report is committed on this machine and absent from the remote.
+///
+/// A refused push is not a dead end — the scope stays local-ahead, which is an
+/// ordinary state — but the run must say so, or the user is left believing a
+/// change reached the remote when it did not. There is deliberately no
+/// `Default`: a command that pushes has to say what happened.
+#[derive(Debug, Clone)]
+pub enum PushReport {
+    /// Nothing is waiting to be published: the push succeeded, or there was
+    /// nothing to push.
+    UpToDate,
+    /// The remote refused these scopes.
+    Refused {
+        scopes: Vec<String>,
+        rejection_reason: Option<String>,
+    },
+}
+
+impl PushReport {
+    pub fn unpushed_scopes(&self) -> &[String] {
+        match self {
+            PushReport::UpToDate => &[],
+            PushReport::Refused { scopes, .. } => scopes,
+        }
+    }
 }
 
 pub(crate) async fn push_scope_updates(paths: &DotsyncPaths) -> Result<PushReport, DotsyncError> {
@@ -214,7 +232,7 @@ pub(crate) async fn push_scope_updates(paths: &DotsyncPaths) -> Result<PushRepor
         .collect();
 
     if updates.is_empty() {
-        return Ok(PushReport::default());
+        return Ok(PushReport::UpToDate);
     }
 
     let attempted: Vec<String> = updates
@@ -242,12 +260,16 @@ pub(crate) async fn push_scope_updates(paths: &DotsyncPaths) -> Result<PushRepor
         .iter()
         .map(|reference| reference.as_str().trim_start_matches("refs/heads/"))
         .collect();
-    Ok(PushReport {
-        unpushed_scopes: attempted
-            .into_iter()
-            .filter(|scope| !pushed.contains(&scope.as_str()))
-            .collect(),
-        reason: stats
+    let refused: Vec<String> = attempted
+        .into_iter()
+        .filter(|scope| !pushed.contains(&scope.as_str()))
+        .collect();
+    if refused.is_empty() {
+        return Ok(PushReport::UpToDate);
+    }
+    Ok(PushReport::Refused {
+        scopes: refused,
+        rejection_reason: stats
             .rejected
             .iter()
             .chain(stats.remote_rejected.iter())
