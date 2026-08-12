@@ -73,8 +73,8 @@ struct Cli {
     #[arg(long = "output", value_enum, default_value = "human", global = true)]
     output_format: OutputFormat,
 
-    /// Proceed even when drift is detected (plain `dotsync` sync)
-    #[arg(long)]
+    /// Proceed even when drift is detected (sync, commit, continue, abort)
+    #[arg(long, global = true)]
     force: bool,
 }
 
@@ -126,25 +126,13 @@ enum Command {
         #[arg(long)]
         all: bool,
 
-        /// Proceed even when drift is detected
-        #[arg(long)]
-        force: bool,
-
         /// Repo-relative file or directory paths to commit
         paths: Vec<PathBuf>,
     },
     #[command(about = CONTINUE_ABOUT)]
-    Continue {
-        /// Proceed even when drift is detected
-        #[arg(long)]
-        force: bool,
-    },
+    Continue,
     #[command(about = ABORT_ABOUT)]
-    Abort {
-        /// Proceed even when drift is detected
-        #[arg(long)]
-        force: bool,
-    },
+    Abort,
     /// Show managed files that differ from the repo
     Status,
     /// Show line-oriented diffs for managed home files that differ from the repo
@@ -297,12 +285,8 @@ impl Action {
                 let remote_url = init_remote_from_args(remote_url, context)?;
                 Ok(Self::Init { remote_url })
             }
-            Some(Command::Continue { force }) => Ok(Self::Continue {
-                force: force || cli.force,
-            }),
-            Some(Command::Abort { force }) => Ok(Self::Abort {
-                force: force || cli.force,
-            }),
+            Some(Command::Continue) => Ok(Self::Continue { force: cli.force }),
+            Some(Command::Abort) => Ok(Self::Abort { force: cli.force }),
             Some(Command::Status) => {
                 reject_force_before(cli.force, "status")?;
                 Ok(Self::Status)
@@ -319,7 +303,6 @@ impl Action {
                 scope,
                 message,
                 all,
-                force,
                 paths,
             }) => {
                 let selection = match (all, paths.is_empty()) {
@@ -335,7 +318,7 @@ impl Action {
                 Ok(Self::Commit {
                     scope,
                     message,
-                    force: force || cli.force,
+                    force: cli.force,
                     selection,
                 })
             }
@@ -385,11 +368,13 @@ async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
     }
 }
 
-/// `--force` is declared both before the subcommand (for the plain `dotsync`
-/// sync) and on the commands that write home. Commands that never write home
-/// have no meaning for it, so accepting it there - which is what a global flag
-/// does - would teach an agent that retrying with `--force` could change the
-/// answer.
+/// `--force` is global, like `--output`, so it parses in either position and
+/// one message explains it wherever it means nothing. Declaring it per command
+/// instead would hand the commands that reject it clap's generic 'unexpected
+/// argument' - and on `init`, clap's 'to pass --force as a value' tip, which
+/// would make the flag the remote URL. Commands that never write home have no
+/// meaning for it, and silently accepting it there would teach an agent that
+/// retrying with `--force` could change the answer.
 fn reject_force_before(force: bool, command: &str) -> Result<(), UsageError> {
     if !force {
         return Ok(());
