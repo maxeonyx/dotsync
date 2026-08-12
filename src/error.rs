@@ -419,8 +419,10 @@ impl DotsyncError {
             DotsyncError::RepoAlreadyExists { .. } => basic_error_report("repo_exists", self),
             DotsyncError::NotInitialized { path } => ErrorReport {
                 code: "not_initialized",
+                // Command-neutral: the human rendering names the command
+                // that was run, and this message is read by whatever ran it.
                 message: format!(
-                    "Dotsync could not find its hidden repo at {}. Run `dotsync init <remote-url>` from this home directory, then rerun `dotsync status`.",
+                    "Dotsync could not find its hidden repo at {}. Run `dotsync init <remote-url>` from this home directory first.",
                     path.display()
                 ),
                 drifts: Vec::new(),

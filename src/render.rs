@@ -215,7 +215,10 @@ fn current_state_text(report: &ErrorReport) -> String {
     }
 }
 
-pub(crate) fn render_error_human(error: &DotsyncError) -> String {
+/// `command` is the command the user ran, when they ran one dotsync
+/// recognises. A stop that ends by naming the command to rerun has to name
+/// theirs; before this, every one of them named `dotsync status`.
+pub(crate) fn render_error_human(error: &DotsyncError, command: Option<&str>) -> String {
     let error_report = error.to_error_report();
 
     match error {
@@ -442,12 +445,37 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             original,
         } => format!(
             "{}\n\nAlso:\nDotsync could not remove the partly created repo at {}: {source}. Delete that directory before running `dotsync init` again.",
-            render_error_human(original),
+            render_error_human(original, command),
             path.display()
         ),
-        DotsyncError::NotInitialized { path } => format!(
-            "dotsync: not initialized\n\nWhat happened:\nDotsync could not find its hidden repo at {}.\n\nWhat to do:\n- Run `dotsync init <remote-url>` from this home directory.\n- Then rerun `dotsync status`.\n\nThe remote URL is the git remote that stores your dotsync repo.",
-            path.display()
+        DotsyncError::NotInitialized { .. } => render_structured_error(
+            "not initialized",
+            "Dotsync keeps your config in a hidden repo at ~/.local/share/dotsync/repo and syncs the scopes this machine belongs to into your home directory. Every command works against that repo.",
+            "This flow opened that repo to find out what this machine's scopes hold.",
+            "It expects `dotsync init <remote-url>` to have been run in this home directory already, which is what creates the repo.",
+            &current_state_text(&error_report),
+            "There is nothing to compare your home directory against, so dotsync cannot answer for it.",
+            &[
+                "run `dotsync init <remote-url>` from this home directory. The remote URL is the git remote that stores your dotsync repo.",
+                &format!("then rerun `dotsync {}`.", command.unwrap_or("status")),
+            ],
+        ),
+        // Naming the repo path in the summary would be pointing an agent at
+        // the one directory it is told never to touch; what it needs is that
+        // this machine is already set up, and which command does the thing it
+        // was reaching for.
+        DotsyncError::RepoAlreadyExists { .. } => render_structured_error(
+            "already initialized",
+            "Dotsync keeps your config in a hidden repo at ~/.local/share/dotsync/repo, created once per machine by `dotsync init` and used by every command after that.",
+            "This init flow clones the remote into that repo and works out which scopes this machine belongs to.",
+            "It expects to be the thing that creates the repo, so it refuses to run over one that exists.",
+            &error_report.message,
+            "Cloning over an existing repo would discard whatever this machine has committed but not published.",
+            &[
+                "run `dotsync` to sync this machine, which is what `init` would have finished by doing.",
+                "run `dotsync status` to see what this machine has changed, and `dotsync view` to see the scopes it knows about.",
+                "to point this machine at a different remote, move the existing repo aside by hand first — dotsync has no command for that yet.",
+            ],
         ),
         DotsyncError::HomeNotSet
         | DotsyncError::NonUtf8Path { .. }
@@ -460,7 +488,6 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
         | DotsyncError::ScopeCycle { .. }
         | DotsyncError::NoCurrentScope
         | DotsyncError::ScopeNotInRepo { .. }
-        | DotsyncError::RepoAlreadyExists { .. }
         | DotsyncError::MissingHostname
         | DotsyncError::Jj { .. } => format!("dotsync: {}", error_report.message),
     }

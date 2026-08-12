@@ -2946,14 +2946,24 @@ fn status_before_init_matches_full_recovery_message() {
     let expected = format!(
         "dotsync: not initialized
 
-What happened:
-Dotsync could not find its hidden repo at {}.
+What dotsync does:
+Dotsync keeps your config in a hidden repo at ~/.local/share/dotsync/repo and syncs the scopes this machine belongs to into your home directory. Every command works against that repo.
 
-What to do:
-- Run `dotsync init <remote-url>` from this home directory.
-- Then rerun `dotsync status`.
+This flow:
+This flow opened that repo to find out what this machine's scopes hold.
 
-The remote URL is the git remote that stores your dotsync repo.
+Expected:
+It expects `dotsync init <remote-url>` to have been run in this home directory already, which is what creates the repo.
+
+Current state found:
+expected repo path: {}; standard location: ~/.local/share/dotsync/repo
+
+Why dotsync stopped:
+There is nothing to compare your home directory against, so dotsync cannot answer for it.
+
+Correct flow:
+- run `dotsync init <remote-url>` from this home directory. The remote URL is the git remote that stores your dotsync repo.
+- then rerun `dotsync status`.
 ",
         machine.repo_dir.display()
     );
@@ -2973,7 +2983,7 @@ fn status_before_init_json_matches_recovery_message() {
         render_output(&status_output)
     );
 
-    let expected = r#"{"current_state":["expected repo path: {repo}; standard location: ~/.local/share/dotsync/repo"],"drifts":[],"error":"not_initialized","forced_overwrites":[],"message":"Dotsync could not find its hidden repo at {repo}. Run `dotsync init <remote-url>` from this home directory, then rerun `dotsync status`.","status":"error"}
+    let expected = r#"{"current_state":["expected repo path: {repo}; standard location: ~/.local/share/dotsync/repo"],"drifts":[],"error":"not_initialized","forced_overwrites":[],"message":"Dotsync could not find its hidden repo at {repo}. Run `dotsync init <remote-url>` from this home directory first.","status":"error"}
 "#
     .replace("{repo}", &machine.repo_dir.display().to_string());
     let stdout = String::from_utf8_lossy(&status_output.stdout);
