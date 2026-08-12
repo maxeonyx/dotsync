@@ -2652,6 +2652,53 @@ fn drift_stop_during_commit_does_not_strand_unpushed_history() {
 }
 
 #[test]
+fn diverged_leaf_scope_keeps_the_local_commit_and_the_home_file() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    // A leaf scope diverges on its own: nothing else is local-ahead, so
+    // reconciliation reaches this scope with no other scope to stop on first.
+    machine.write_file(".config/fish/dev-certs.fish", "set -gx DEV_CERTS 1\n");
+    block_remote_pushes(&machine);
+    machine
+        .run("dotsync commit mx-xps-cy -m 'add dev-certs helper' -- .config/fish/dev-certs.fish");
+    allow_remote_pushes(&machine);
+    assert_ne!(
+        bookmark_revision(&machine, "mx-xps-cy"),
+        remote_branch_revision(&machine, "mx-xps-cy"),
+        "this test needs a push that really was rejected"
+    );
+    seed_remote_scope_file(
+        &machine,
+        "mx-xps-cy",
+        ".config/other-machine.conf",
+        "from another machine\n",
+    );
+
+    machine.run("dotsync");
+
+    assert!(
+        bookmark_has_file(&machine, "mx-xps-cy", ".config/fish/dev-certs.fish"),
+        "the unpushed commit must survive a fetch that cannot be reconciled"
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "mx-xps-cy", ".config/fish/dev-certs.fish"),
+        "set -gx DEV_CERTS 1\n"
+    );
+    assert!(
+        machine.file_exists(".config/fish/dev-certs.fish"),
+        "the home file must survive too — dotsync must never delete a managed file to reconcile bookmarks"
+    );
+}
+
+#[test]
 fn diverged_scope_bookmark_is_reported_as_divergence_not_as_overwrite() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
