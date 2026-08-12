@@ -17,6 +17,7 @@ similar = { version = "3.1.2", default-features = false, features = ["text"] }
 thiserror = "2.0"
 tokio = { version = "1.44", features = ["macros", "rt"] }
 toml = "0.8"
+toml_edit = "0.22"
 
 [dev-dependencies]
 assert_cmd = "2"

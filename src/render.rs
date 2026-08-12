@@ -420,6 +420,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
         | DotsyncError::NoPausedCascade
         | DotsyncError::Io { .. }
         | DotsyncError::ConfigParse { .. }
+        | DotsyncError::ConfigEdit { .. }
         | DotsyncError::MissingParent { .. }
         | DotsyncError::ScopeCycle { .. }
         | DotsyncError::NoCurrentScope

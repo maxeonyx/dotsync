@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use jj_lib::op_store::RefTarget;
 use jj_lib::ref_name::RefNameBuf;
@@ -9,8 +10,8 @@ use crate::cascade::{
     build_cascade_plan, execute_cascade_steps, CascadeCommand, CascadeOutcome, ScopeHeads,
 };
 use crate::config::{
-    default_sync_state_relative_path, load_config, render_config, write_config, DotsyncConfig,
-    DotsyncPaths,
+    config_with_scopes, default_sync_state_relative_path, load_config, load_config_text,
+    repo_config_path, write_config, DotsyncPaths, NewScope, ScopeKind, ALL_SCOPE,
 };
 use crate::drift::RecordedFromHome;
 use crate::error::{jj_error, DotsyncError};
@@ -102,7 +103,7 @@ async fn create_repo_and_join(
     // repo handle directly.
     let remote_empty = repo.view().all_remote_bookmarks().next().is_none();
     let (current_scope, repo) = if remote_empty {
-        bootstrap_empty_remote(repo, &identity).await?
+        bootstrap_empty_remote(paths, repo, &identity).await?
     } else {
         join_existing_remote(paths, repo, &identity).await?
     };
@@ -120,27 +121,55 @@ async fn create_repo_and_join(
     Ok(InitReport { sync, push })
 }
 
+/// The scopes this machine needs that the graph does not have yet, parents
+/// first, each with what dotsync can say about what it is for.
+///
+/// One function for both paths into `init`: an empty remote is the case where
+/// every one of them is missing, including `all`.
+fn scopes_to_create(
+    identity: &MachineIdentity,
+    existing: &HashMap<String, Vec<String>>,
+) -> Vec<NewScope> {
+    let mut new_scopes = Vec::new();
+    if !existing.contains_key(ALL_SCOPE) {
+        new_scopes.push(NewScope {
+            name: ALL_SCOPE.to_string(),
+            parents: Vec::new(),
+            kind: ScopeKind::Root,
+        });
+    }
+    if !existing.contains_key(&identity.os_scope) {
+        new_scopes.push(NewScope {
+            name: identity.os_scope.clone(),
+            parents: vec![ALL_SCOPE.to_string()],
+            kind: ScopeKind::Os,
+        });
+    }
+    if !existing.contains_key(&identity.machine_scope) {
+        new_scopes.push(NewScope {
+            name: identity.machine_scope.clone(),
+            parents: vec![identity.os_scope.clone()],
+            kind: ScopeKind::Machine,
+        });
+    }
+    new_scopes
+}
+
 pub(crate) async fn bootstrap_empty_remote(
+    paths: &DotsyncPaths,
     repo: std::sync::Arc<jj_lib::repo::ReadonlyRepo>,
     identity: &MachineIdentity,
 ) -> Result<(String, std::sync::Arc<jj_lib::repo::ReadonlyRepo>), DotsyncError> {
-    let graph = ScopeGraph::new(HashMap::from([
-        ("all".to_string(), vec![]),
-        (identity.os_scope.clone(), vec!["all".to_string()]),
-        (
-            identity.machine_scope.clone(),
-            vec![identity.os_scope.clone()],
-        ),
-    ]))?;
     let root_commit = repo.store().root_commit();
-    let config = DotsyncConfig {
-        graph: graph.clone(),
-        sync_state_relative_path: default_sync_state_relative_path().into(),
-    };
+    let config_text = config_with_scopes(
+        None,
+        &PathBuf::from(default_sync_state_relative_path()),
+        &scopes_to_create(identity, &HashMap::new()),
+        &repo_config_path(paths),
+    )?;
 
     let mut tx = repo.start_transaction();
-    let config_tree =
-        write_config(tx.repo_mut(), &root_commit.tree(), &render_config(&config)).await?;
+    let config_tree = write_config(tx.repo_mut(), &root_commit.tree(), &config_text).await?;
     let all_commit = tx
         .repo_mut()
         .new_commit(vec![root_commit.id().clone()], config_tree)
@@ -188,41 +217,33 @@ pub(crate) async fn join_existing_remote(
     identity: &MachineIdentity,
 ) -> Result<(String, std::sync::Arc<jj_lib::repo::ReadonlyRepo>), DotsyncError> {
     let config = load_config(paths, repo.as_ref()).await?;
-    let graph = config.graph.clone();
+    let new_scopes = scopes_to_create(identity, &config.graph.parents);
 
-    let mut parents = graph.parents.clone();
-    let mut scopes_to_create = 0;
-    if !parents.contains_key(&identity.os_scope) {
-        parents.insert(identity.os_scope.clone(), vec!["all".to_string()]);
-        scopes_to_create += 1;
-    }
-    if !parents.contains_key(&identity.machine_scope) {
-        parents.insert(
-            identity.machine_scope.clone(),
-            vec![identity.os_scope.clone()],
-        );
-        scopes_to_create += 1;
-    }
-
-    if scopes_to_create == 0 {
+    if new_scopes.is_empty() {
         return Ok((identity.machine_scope.clone(), repo));
     }
 
+    // The file this machine adds its scopes to is the file as it is written,
+    // not a re-rendering of the graph parsed out of it: the comments beside
+    // the scopes are what an agent reads to choose one, and they do not
+    // survive a round trip through the graph.
+    let updated_text = config_with_scopes(
+        Some(&load_config_text(paths, repo.as_ref()).await?),
+        &config.sync_state_relative_path,
+        &new_scopes,
+        &repo_config_path(paths),
+    )?;
+
+    let mut parents = config.graph.parents.clone();
+    for scope in &new_scopes {
+        parents.insert(scope.name.clone(), scope.parents.clone());
+    }
     let updated_graph = ScopeGraph::new(parents)?;
 
     let mut tx = repo.start_transaction();
     let mut scope_heads = ScopeHeads::load_existing(tx.repo_mut().base_repo(), &updated_graph)?;
     let all_head = scope_heads.require("all")?;
-    let updated_config = DotsyncConfig {
-        graph: updated_graph.clone(),
-        sync_state_relative_path: config.sync_state_relative_path.clone(),
-    };
-    let config_tree = write_config(
-        tx.repo_mut(),
-        &all_head.tree(),
-        &render_config(&updated_config),
-    )
-    .await?;
+    let config_tree = write_config(tx.repo_mut(), &all_head.tree(), &updated_text).await?;
 
     let config_commit = tx
         .repo_mut()

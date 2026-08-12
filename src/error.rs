@@ -255,6 +255,11 @@ pub enum DotsyncError {
         #[source]
         source: std::io::Error,
     },
+    /// The config file could not be edited to add this machine's scopes. The
+    /// parse that produced it succeeded, so this is dotsync disagreeing with
+    /// itself rather than a file a person got wrong.
+    #[error("failed to update config {path}: {message}")]
+    ConfigEdit { path: PathBuf, message: String },
     #[error("failed to parse config {path}: {source}")]
     ConfigParse {
         path: PathBuf,
@@ -361,6 +366,7 @@ impl DotsyncError {
             | DotsyncError::StaleCommitPaths { .. }
             | DotsyncError::Io { .. }
             | DotsyncError::ConfigParse { .. }
+            | DotsyncError::ConfigEdit { .. }
             | DotsyncError::MissingParent { .. }
             | DotsyncError::ScopeCycle { .. }
             | DotsyncError::NoCurrentScope
@@ -403,6 +409,7 @@ impl DotsyncError {
             DotsyncError::MissingParent { .. } => basic_error_report("missing_parent", self),
             DotsyncError::ScopeCycle { .. } => basic_error_report("scope_cycle", self),
             DotsyncError::ConfigParse { .. } => basic_error_report("config_parse", self),
+            DotsyncError::ConfigEdit { .. } => basic_error_report("config_edit", self),
             DotsyncError::SyncState { .. } => basic_error_report("sync_state", self),
             DotsyncError::CascadePaused { .. } => basic_error_report("cascade_paused", self),
             DotsyncError::PausedCascadeInProgress { .. } => {
@@ -514,6 +521,7 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Vec<String> {
         | DotsyncError::NoPausedCascade
         | DotsyncError::Io { .. }
         | DotsyncError::ConfigParse { .. }
+        | DotsyncError::ConfigEdit { .. }
         | DotsyncError::MissingParent { .. }
         | DotsyncError::ScopeCycle { .. }
         | DotsyncError::NoCurrentScope

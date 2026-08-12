@@ -388,6 +388,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "toml_edit",
 ]
 
 [[package]]

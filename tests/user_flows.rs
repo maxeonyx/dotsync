@@ -397,9 +397,11 @@ fn add_hyprland_scope(machine: &MachineEnvironment) {
 
     let config_path = clone_dir.join(".config/dotsync/config.toml");
     let original = fs::read_to_string(&config_path).expect("read remote config");
+    // Edited the way a person would: one scope entry at a time, leaving the
+    // comments dotsync wrote between them where they are.
     let updated = original.replace(
-        "linux = { parents = [\"all\"] }\nmx-xps-cy = { parents = [\"linux\"] }",
-        "linux = { parents = [\"all\"] }\nhyprland = { parents = [\"linux\"] }\nmx-xps-cy = { parents = [\"hyprland\"] }",
+        "mx-xps-cy = { parents = [\"linux\"] }",
+        "hyprland = { parents = [\"linux\"] }\nmx-xps-cy = { parents = [\"hyprland\"] }",
     );
     assert_ne!(
         updated, original,
