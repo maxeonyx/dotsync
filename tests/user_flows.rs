@@ -84,6 +84,59 @@ impl MachineEnvironment {
         command.output().expect("run dotsync")
     }
 
+    /// Runs dotsync with a `git` on the front of `PATH` that records every
+    /// invocation, and returns those invocations alongside the output.
+    ///
+    /// dotsync reaches the remote by shelling out to `git` — jj-lib's
+    /// supported fetch and push mechanism, and a documented runtime dependency
+    /// — so counting `git fetch` calls is how many times a run talked to the
+    /// network, observed from outside the binary.
+    fn run_recording_git(&self, command: &str) -> (Output, Vec<String>) {
+        let shim_dir = self.home_dir.join("git-shim.ignore");
+        let log_path = shim_dir.join("git-calls.log");
+        write_file_at(
+            &shim_dir.join("git"),
+            &format!(
+                "#!/bin/sh\necho \"$@\" >> \"{}\"\nexec {} \"$@\"\n",
+                log_path.display(),
+                real_git_path().display()
+            ),
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(shim_dir.join("git"), fs::Permissions::from_mode(0o755))
+                .expect("make git shim executable");
+        }
+        if log_path.exists() {
+            fs::remove_file(&log_path).expect("clear git call log");
+        }
+
+        let args = dotsync_args(command);
+        let mut command = Command::new(env!("CARGO_BIN_EXE_dotsync"));
+        command.args(args);
+        command.current_dir(&self.home_dir);
+        command.env("HOME", &self.home_dir);
+        command.env("DOTSYNC_OS", &self.os);
+        command.env("DOTSYNC_HOSTNAME", &self.hostname);
+        command.env(
+            "PATH",
+            format!(
+                "{}:{}",
+                shim_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+        let output = command.output().expect("run dotsync");
+
+        let calls = fs::read_to_string(&log_path)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        (output, calls)
+    }
+
     /// Runs dotsync with no `HOME` in the environment, which is how dotsync
     /// finds both the home directory it manages and its hidden repo.
     fn run_without_home(&self, command: &str) -> Output {
@@ -147,6 +200,20 @@ impl MachineEnvironment {
             .modified()
             .expect("read home file mtime")
     }
+}
+
+/// The real `git`, resolved before any shim goes on `PATH`.
+fn real_git_path() -> PathBuf {
+    let output = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .expect("look up git");
+    assert!(output.status.success(), "{}", render_output(&output));
+    PathBuf::from(
+        String::from_utf8(output.stdout)
+            .expect("git path should be utf-8")
+            .trim(),
+    )
 }
 
 fn test_settings() -> UserSettings {
@@ -777,6 +844,46 @@ mx-xps-cy
         render_output(&file_content_output)
     );
     assert_stdout_snapshot(&file_content_output, "[user]\nname = Shared\n");
+}
+
+/// `view` reports on every scope, and the report is one answer about one
+/// moment — so it is one run, and a run fetches once. Fetching per scope also
+/// makes `view` write an operation per scope into the repo's op log, which is
+/// the opposite of the read-only command DESIGN describes.
+#[test]
+fn view_reaches_the_remote_once() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+    add_hyprland_scope(&machine);
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    let (view_output, git_calls) = machine.run_recording_git("dotsync view");
+    assert!(
+        view_output.status.success(),
+        "{}",
+        render_output(&view_output)
+    );
+
+    let fetches = git_calls
+        .iter()
+        .filter(|call| call.split_whitespace().any(|word| word == "fetch"))
+        .count();
+    assert_eq!(
+        fetches, 1,
+        "one `dotsync view` over 4 scopes must fetch once, not once per scope; git was called: {git_calls:?}"
+    );
 }
 
 #[test]
