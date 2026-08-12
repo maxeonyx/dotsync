@@ -37,27 +37,29 @@ Concretely:
 
 ## Work plan (ordered)
 
+The 2026-08-12 design review (with Max) rewrote DESIGN.md to specify the convergence model, conflicts-as-commits, the resolution surface, the failure/offline model, and the minimum-state principle. The work below implements that design.
+
 ### 1. Recovery release (#19) — do this first
 
-Fix the four-case fetch reconciliation, make mutating commands push pending local-ahead bookmarks, and reorder push before the home sync in the commit flow. Black-box tests: simulate a failed push (e.g. remote temporarily unwritable), assert the machine is not wedged (status works, next plain `dotsync` pushes and converges).
+Fix the four-case fetch reconciliation (local-ahead is normal, never an error), make mutating commands push pending local-ahead bookmarks, and reorder push before the home sync in the commit flow. Black-box tests: simulate a failed push (e.g. remote temporarily unwritable), assert the machine is not wedged (status works, next plain `dotsync` pushes and converges).
 
-Verification is unusually good here: mc-wsl-fd is live-wedged in exactly this state. After releasing and installing, plain `dotsync` on this machine should push the July 27 dev-certs cascade, sync, and leave `dotsync status` clean — with zero manual repo surgery. That's the acceptance test.
+This is a targeted unwedge, not the full convergence pass — small, releasable, and verification is unusually good: mc-wsl-fd is live-wedged in exactly this state. After releasing and installing, plain `dotsync` on this machine should push the July 27 dev-certs cascade, sync, and leave `dotsync status` clean — with zero manual repo surgery. That's the acceptance test.
 
-### 2. Divergence handling (#17)
+### 2. The convergence pass (#17 and the heart of the design)
 
-Real divergence (case d) gets merged through the cascade machinery like any other multi-machine change, with pause/continue on conflict. Where a merge isn't automatically safe, the error shows base/ours/theirs and per-side diffs, and names the dotsync command to run next.
+Replace fetch-reconciliation + cascade with the single convergence operation from DESIGN.md: per scope in topo order, new head = merge(local head, remote head, updated parent heads), skip no-ops, push in a retry loop, offline skips fetch. Kill-in-the-middle black-box tests enforce that every interruption point converges on rerun — this is the enforcement mechanism for no-dead-ends, not a one-off audit.
 
-### 3. Crash-resume audit (no dead ends, systematically)
+### 3. Conflicts as commits
 
-Enumerate every mutating flow, list each interruption point, and define + test the convergent rerun for each. Add kill-in-the-middle black-box tests. This is the enforcement mechanism for the design principle, not a one-off cleanup.
+Write conflicted merges as real commits; derive "paused" from conflicted heads; delete `.dotsync-paused-cascade.json`; never push conflicted heads. Materialize conflict markers into home via sync (jj's own materialization code, scope-labeled sides, base included); drift treats materialized markers as expected content. `continue` verifies markers gone, resolves at the rootmost conflicted scope, propagates via descendant rewriting. `abort` returns to the last fully cascaded machine scope tip, abandoning only unpushed conflicted commits. Add `dotsync show conflict` rendering derived state.
 
 ### 4. Read-only robustness
 
-`status`, `view`, `diff` work on any repo state and report weirdness instead of failing. Consider whether read-only commands should fetch at all, or report against last-fetched state with a staleness note when offline.
+`status`, `view`, `diff` work on any repo state — including conflicted heads and offline — and report weirdness instead of failing. Read-only commands report what convergence would do (in-memory merges), never mutate.
 
 ### 5. Agent validation loop
 
-Use the headless agent-scenario infrastructure (`tests/agent-scenarios/`) with a cheap model to validate the full UX: make a config change, run dotsync, resolve a conflict, done. Add a scenario that starts from an interrupted-push state — the agent must recover using dotsync alone. Iterate on messages/UX until cheap agents reliably succeed. This is the actual product bar: the tool has failed in practice precisely when real agents met unplanned states.
+Use the headless agent-scenario infrastructure (`tests/agent-scenarios/`) with a cheap model to validate the full UX: make a config change, run dotsync, resolve a conflict from markers, done. Add scenarios starting from an interrupted-push state and a conflicted-head state — the agent must recover using dotsync alone. Iterate on messages/UX until cheap agents reliably succeed. This is the actual product bar: the tool has failed in practice precisely when real agents met unplanned states.
 
 ### 6. Backlog triage
 
@@ -65,13 +67,9 @@ Use the headless agent-scenario infrastructure (`tests/agent-scenarios/`) with a
 - Issues [#5](https://github.com/maxeonyx/dotsync/issues/5), [#8](https://github.com/maxeonyx/dotsync/issues/8), [#10](https://github.com/maxeonyx/dotsync/issues/10), [#11](https://github.com/maxeonyx/dotsync/issues/11): partially or fully addressed by PRs #14/#16 (`view`, `diff`, init/status UX) — verify and close or trim.
 - Issues [#4](https://github.com/maxeonyx/dotsync/issues/4), [#18](https://github.com/maxeonyx/dotsync/issues/18): re-triage after steps 1–4; several items fall out of them naturally.
 
-## Key design decision: pause model
+## Key design decision: conflicts are commits (2026-08-12 revision)
 
-**In jj, the working copy IS always a commit and can be in a conflicted state.** This is the key simplification.
-
-- **On pause:** Do NOT create any permanent commit or move any bookmark. The working copy commit `@` simply becomes the conflicted merge result. Persist the intended merge parents (exact commit IDs) and remaining cascade steps.
-- **On continue:** The user has edited `@` to resolve conflicts. Snapshot `@`'s tree, create the real merge commit with the persisted parent IDs, move the bookmark, continue the cascade.
-- **A pause is workspace state + persisted intent, not history.**
+The old pause model ("don't create conflicted history; persist merge intent in a state file") is retired — it was a holdover from the v0.2 working-copy era and created dead ends. The current model is specified in DESIGN.md ("The convergence model" and "Conflict resolution in home"): the cascade always completes atomically, conflicted merges are real commits, conflicted heads are the queue of pending resolution work, "paused" is derived state, conflicted heads are never pushed, and the only machine-local state is sync-state.json. The `.dotsync-paused-cascade.json` file is to be removed as part of implementing this.
 
 ## Conflict message requirements (human-readable, verified manually)
 
