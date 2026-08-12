@@ -2202,6 +2202,60 @@ fn conflict_messages_agree_that_resolving_means_editing_home() {
 }
 
 #[test]
+fn continue_refuses_a_pause_that_predates_the_resolution_check() {
+    let harness = TestHarness::new();
+    let (machine, _pause) = pause_a_conflict_on_linux(&harness);
+
+    // A machine that upgrades while a cascade is paused holds a pause file
+    // written by the older binary, which recorded no pre-pause contents. The
+    // resolution check has nothing to compare against there, and skipping it
+    // silently reopens the data loss it exists to prevent.
+    let pause_path = machine.repo_dir.join(".dotsync-paused-cascade.json");
+    let mut pause_state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&pause_path).expect("read pause state"))
+            .expect("pause state is JSON");
+    let pause_object = pause_state
+        .as_object_mut()
+        .expect("pause state is an object");
+    let recorded = pause_object
+        .remove("paused_home_contents")
+        .expect("this dotsync records pre-pause contents");
+    assert!(
+        recorded.as_object().is_some_and(|map| !map.is_empty()),
+        "the pause should have recorded contents to remove"
+    );
+    fs::write(
+        &pause_path,
+        serde_json::to_string_pretty(&pause_state).expect("serialize pause state"),
+    )
+    .expect("write pause state");
+
+    let continued = machine.run("dotsync continue");
+    assert_eq!(
+        continued.status.code(),
+        Some(1),
+        "continue must refuse a pause it cannot verify\n{}",
+        render_output(&continued)
+    );
+    let stderr = String::from_utf8_lossy(&continued.stderr).into_owned();
+    assert!(
+        stderr.contains("run `dotsync abort`"),
+        "the refusal must point at the way out\n{}",
+        render_output(&continued)
+    );
+
+    // The way out has to actually work: abort reads nothing the old pause file
+    // lacks.
+    let aborted = machine.run("dotsync abort");
+    assert!(aborted.status.success(), "{}", render_output(&aborted));
+    assert_eq!(
+        machine.read_file(".config/app.conf"),
+        "setting = \"linux\"\n",
+        "abort should have reverted home to this machine's scope state"
+    );
+}
+
+#[test]
 fn continue_refuses_a_conflicted_file_that_was_never_resolved() {
     let harness = TestHarness::new();
     let (machine_b, _pause) = pause_a_conflict_on_linux(&harness);
