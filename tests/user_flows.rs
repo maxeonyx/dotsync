@@ -2355,6 +2355,73 @@ dotsync: 1 changed managed file(s) for mx-xps-cy
 }
 
 #[test]
+fn output_format_is_accepted_after_the_subcommand() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    // `--force` is global and `--output` was not, so the two flags on the same
+    // struct had opposite positional rules and neither one said so.
+    let status_output = machine.run("dotsync status --output json");
+    assert_eq!(
+        status_output.status.code(),
+        Some(0),
+        "{}",
+        render_output(&status_output)
+    );
+
+    let payload = parse_stdout_json(&status_output);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "status");
+    assert_eq!(payload["machine_scope"], "mx-xps-cy");
+}
+
+#[test]
+fn clap_usage_errors_emit_the_json_contract() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    // Clap's own usage errors used to exit 2 with plain text and nothing on
+    // stdout, so an agent driving dotsync with `--output json` got no JSON at
+    // all for the most common mistake it can make.
+    for command in [
+        "dotsync commit --output json",
+        "dotsync --output json commit",
+        "dotsync --output json commit all --nosuchflag",
+    ] {
+        let output = machine.run(command);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "`{command}` should be a usage error\n{}",
+            render_output(&output)
+        );
+
+        let payload = parse_stdout_json(&output);
+        assert_eq!(payload["status"], "error", "`{command}`");
+        assert_eq!(payload["error"], "usage", "`{command}`");
+        assert!(
+            payload["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()),
+            "`{command}` should explain the usage error in its JSON message\n{}",
+            render_output(&output)
+        );
+        assert!(
+            !output.stderr.is_empty(),
+            "`{command}` should still explain itself on stderr\n{}",
+            render_output(&output)
+        );
+    }
+}
+
+#[test]
 fn status_shows_deleted_file() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
