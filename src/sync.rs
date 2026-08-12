@@ -21,11 +21,19 @@ pub struct SyncOptions {
     pub force: bool,
 }
 
+/// One managed path whose home content is not what the repo says it should be.
+///
+/// This carries the two sides rather than a rendered diff: a drift is a fact
+/// about content, and how it reads — unified diff, one line in `status`, a JSON
+/// field — is a decision for whichever edge is reporting it.
 #[derive(Debug, Clone)]
 pub struct FileDrift {
     pub repo_path: PathBuf,
     pub system_path: PathBuf,
-    pub diff: String,
+    /// What the repo holds, or `None` when the repo has no such file.
+    pub repo_bytes: Option<Vec<u8>>,
+    /// What home holds, or `None` when the file was deleted from home.
+    pub home_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -120,45 +128,12 @@ pub(crate) async fn detect_drifts(
             drifts.push(FileDrift {
                 repo_path: relative.clone(),
                 system_path: system_path.clone(),
-                diff: render_diff(&repo_bytes, &system_bytes),
+                repo_bytes: Some(repo_bytes),
+                home_bytes: Some(system_bytes),
             });
         }
     }
     Ok(drifts)
-}
-
-fn render_diff(repo_bytes: &[u8], system_bytes: &[u8]) -> String {
-    match (
-        String::from_utf8(repo_bytes.to_vec()),
-        String::from_utf8(system_bytes.to_vec()),
-    ) {
-        (Ok(repo), Ok(system)) => render_text_diff(&repo, &system),
-        _ => "binary content differs".to_string(),
-    }
-}
-
-fn render_text_diff(repo: &str, system: &str) -> String {
-    let repo_lines = repo.lines().collect::<Vec<_>>();
-    let system_lines = system.lines().collect::<Vec<_>>();
-    let mut lines = vec!["--- repo".to_string(), "+++ system".to_string()];
-    let max_len = repo_lines.len().max(system_lines.len());
-
-    for index in 0..max_len {
-        match (repo_lines.get(index), system_lines.get(index)) {
-            (Some(repo_line), Some(system_line)) if repo_line == system_line => {
-                lines.push(format!(" {repo_line}"));
-            }
-            (Some(repo_line), Some(system_line)) => {
-                lines.push(format!("-{repo_line}"));
-                lines.push(format!("+{system_line}"));
-            }
-            (Some(repo_line), None) => lines.push(format!("-{repo_line}")),
-            (None, Some(system_line)) => lines.push(format!("+{system_line}")),
-            (None, None) => unreachable!("index is bounded by max line length"),
-        }
-    }
-
-    lines.join("\n")
 }
 
 pub(crate) async fn copy_repo_file_to_home(

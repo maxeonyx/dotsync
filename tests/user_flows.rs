@@ -588,6 +588,7 @@ Correct flow:
 - .gitconfig
 --- repo
 +++ system
+@@ -1,2 +1,2 @@
  [user]
 -name = "Repo"
 +name = "Drifted"
@@ -641,6 +642,7 @@ dotsync: 1 drifted managed file(s) for mx-xps-cy
 - .config/app.conf
 --- repo
 +++ system
+@@ -1,2 +1,2 @@
  line one
 -line two
 +changed two

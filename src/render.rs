@@ -1,6 +1,7 @@
 use crate::UsageError;
 use dotsync::{DotsyncError, ErrorReport, FileDrift, PushReport};
 use serde_json::json;
+use similar::TextDiff;
 use std::path::Path;
 
 pub(crate) fn render_error_json(error: &ErrorReport) -> serde_json::Value {
@@ -25,8 +26,40 @@ pub(crate) fn render_drift_json(drift: &FileDrift) -> serde_json::Value {
     json!({
         "path": display_path(&drift.repo_path),
         "system_path": display_path(&drift.system_path),
-        "diff": drift.diff,
+        "diff": render_drift_diff(drift),
     })
+}
+
+/// A unified diff of what the repo holds against what home holds.
+///
+/// An absent side reads as empty, so a file deleted from home renders as its
+/// whole content removed rather than as nothing at all. Non-UTF-8 content has
+/// no line structure to diff, so it is reported rather than mangled.
+pub(crate) fn render_drift_diff(drift: &FileDrift) -> String {
+    let (Some(repo), Some(system)) = (
+        drift_side_text(drift.repo_bytes.as_deref()),
+        drift_side_text(drift.home_bytes.as_deref()),
+    ) else {
+        return "binary content differs".to_string();
+    };
+
+    let mut rendered = TextDiff::from_lines(&repo, &system)
+        .unified_diff()
+        .header("repo", "system")
+        .to_string();
+    // Every caller prints this as one block with `eprintln!`, so the diff's own
+    // trailing newline would show up as a blank line.
+    if rendered.ends_with('\n') {
+        rendered.pop();
+    }
+    rendered
+}
+
+fn drift_side_text(bytes: Option<&[u8]>) -> Option<String> {
+    match bytes {
+        None => Some(String::new()),
+        Some(bytes) => String::from_utf8(bytes.to_vec()).ok(),
+    }
 }
 
 pub(crate) fn render_error_human(error: &DotsyncError) -> String {
@@ -293,7 +326,7 @@ fn notes_for_drifts(drifts: &[FileDrift]) -> Vec<String> {
     notes.extend(drifts.iter().flat_map(|drift| {
         [
             format!("- {}", drift.repo_path.display()),
-            drift.diff.clone(),
+            render_drift_diff(drift),
         ]
     }));
     notes
@@ -305,7 +338,7 @@ pub(crate) fn render_drifts_human(drifts: &[FileDrift]) -> Vec<String> {
         .flat_map(|drift| {
             [
                 format!("- {}", drift.repo_path.display()),
-                drift.diff.clone(),
+                render_drift_diff(drift),
             ]
         })
         .collect()

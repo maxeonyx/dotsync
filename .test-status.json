@@ -41,7 +41,7 @@
     "dotsync::user_flows$continue_refuses_a_pause_that_predates_the_resolution_check": "passing",
     "dotsync::user_flows$continue_without_pause_returns_clear_error": "passing",
     "dotsync::user_flows$deleting_a_managed_file_blocks_sync_and_is_committable": "pending",
-    "dotsync::user_flows$diff_reports_an_inserted_line_as_a_single_addition": "pending",
+    "dotsync::user_flows$diff_reports_an_inserted_line_as_a_single_addition": "passing",
     "dotsync::user_flows$diff_shows_line_oriented_home_drift_without_syncing": "passing",
     "dotsync::user_flows$diff_works_while_local_scopes_are_ahead_of_remote": "passing",
     "dotsync::user_flows$diverged_leaf_scope_keeps_the_local_commit_and_the_home_file": "passing",
