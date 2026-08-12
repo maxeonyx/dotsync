@@ -38,6 +38,8 @@ Concretely:
 ## Priorities and constraints (Max, 2026-08-12)
 
 - **Prioritise conceptual simplification opportunities & the removal of bad modelling & incidental complexity. Anything that is robustly wrong or unnecessary is explicitly in scope to remove.** In practice: when a work item supersedes a mechanism, delete the old mechanism in the same item rather than layering; every review pass explicitly hunts for removal opportunities; known scaffolding (dead-end `NotImplemented` error, full home-dir scan in the commit path, the index-paired fake diff, the pause state file) gets deleted at the first item that touches it.
+- **The cull applies to the product surface, not just internals** (Max, 2026-08-12): "not just gurky internals, but sharp product edges too. Remember - me, and mainly agents with no memory, are the only users. So self-documentation is *critical* and backwards compatibility (on the frontend, not the backend though (ie. the repo / scope model)) is an *antipattern* on this project." When a flag, command shape, message, or JSON field is a sharp edge, redesign it outright rather than preserving it for compatibility. The repo/scope model (the backend) is where compatibility matters.
+- **Method for the cull: back-chain smells to root causes.** Don't fix smells where they present; trace each to the modelling decision that produced it and fix that, accepting potentially large refactorings. Smell inventory and root-cause analysis live in the "Smells and root causes" section below.
 - **Dotfiles repo history**: if a change would need to modify the live dotfiles repo history, try to find another way first, or stop and tell Max — he'll have a separate agent do only that. dotsync agents never mutate the hidden repo or the remote dotfiles history by hand.
 - **Work within the agent-tools workspace process** (`../../AGENTS.md`): improve process first, loop-based development, reviewer/implementer separation (the agent that made a fix cannot attest it), and after pushing dotsync main: update the workspace submodule pointer, regenerate the umbrella version file, and observe CI — reconcile it against intent, never chase green.
 
@@ -55,9 +57,28 @@ Live acceptance passed: plain `dotsync` pushed the July 27 dev-certs cascade fro
 
 Replace fetch-reconciliation + cascade with the single convergence operation from DESIGN.md: per scope in topo order, new head = merge(local head, remote head, updated parent heads), skip no-ops, push in a retry loop, offline skips fetch. Kill-in-the-middle black-box tests enforce that every interruption point converges on rerun — this is the enforcement mechanism for no-dead-ends, not a one-off audit.
 
+Deletions this item performs (expanded 2026-08-12):
+
+- **First commit of this item's branch: delete the `NotImplemented` dead-end and its home-directory walk** (`src/commit.rs:161` + `home_dir_has_unmanaged_files`, `:693–744`). The walk recursively scans all of `~` purely to decide whether to print a dead-end message about a v0.3-era plan that no longer exists. Behavior change: an empty-selection commit becomes ordinary "nothing to commit" (which since item 1 also publishes pending scopes). The pinning test `v03_commit_returns_not_implemented` is removed and replaced by a test pinning the new behavior.
+- **`sync_local_bookmarks_from_remote` (`src/repo.rs:125`) is replaced wholesale, not extended** — the convergence pass is the general operation and this function is its special-cased shadow. The `scope_diverged` error goes with it: divergence stops being an error. Item 1 deliberately kept this function free of merge machinery so it deletes cleanly.
+- **Push stops being a single attempt.** The retry loop (fetch, converge, push again) lands here, and rejection-kind classification finally gets a consumer: non-fast-forward → retry within the run; refused-writes → report and stop. The current "hard `GitPushError` is fatal, rejection is not" split is re-derived from the design.
+- **Deletion drift becomes visible** (`src/sync.rs:111`, `NotFound => continue`). DESIGN's three-way table says a managed file deleted from home is drift — blocks sync, committable. Today `status` shows deletions but the drift gate protecting sync skips them, so sync silently recreates deliberately deleted files. Needs the last-synced-tree three-way comparison; lands here where convergence work already builds against sync-state.
+
+### 2.5 Sync tells the truth cheaply
+
+Small, independently releasable sync-layer honesty fixes:
+
+- **A real diff.** `render_text_diff` (`src/sync.rs:130–145`) pairs lines by index and pads to the longer file — an insertion at the top misreports every following line as changed. This is what agents read when deciding whether drift is safe to overwrite. Replace with a real LCS/Myers diff behind the same `render_diff` seam. Root of [#8](https://github.com/maxeonyx/dotsync/issues/8).
+- **Write only when bytes differ.** Sync currently rewrites every managed file every run (`src/sync.rs:178` writes unconditionally), churning mtimes across all managed config and poking editors, watchers, and build tools.
+
 ### 3. Conflicts as commits
 
-Write conflicted merges as real commits; derive "paused" from conflicted heads; delete `.dotsync-paused-cascade.json`; never push conflicted heads. Materialize conflict markers into home via sync (jj's own materialization code, scope-labeled sides, base included); drift treats materialized markers as expected content. `continue` verifies markers gone, resolves at the rootmost conflicted scope, propagates via descendant rewriting. `abort` returns to the last fully cascaded machine scope tip, abandoning only unpushed conflicted commits. Add `dotsync show conflict` rendering derived state.
+Write conflicted merges as real commits; derive "paused" from conflicted heads; delete `.dotsync-paused-cascade.json`; never push conflicted heads. Materialize conflict markers into home via sync (jj's own materialization code, scope-labeled sides, base included); drift treats materialized markers as expected content. `continue` verifies markers gone, resolves at the rootmost conflicted scope, propagates via descendant rewriting. `abort` returns to the last fully cascaded machine scope tip, abandoning only unpushed conflicted commits, and reverts **all** the config files — a full sync of home, not a selective restore. Add `dotsync show conflict` rendering derived state.
+
+Deletions and consequences (expanded 2026-08-12):
+
+- **The pause file's whole ecosystem deletes together**: save/load/remove (`src/commit.rs:965–998`), the three pause-site writes (`:243`, `:320`, `:874`), `reject_commit_if_cascade_paused`, abort's backward bookmark restore, **and the `WithheldPausedCascade` publish guard added in item 1**. "Never push conflicted heads" replaces the guard structurally — put that eligibility check *inside* `push_scope_updates` so every call site is covered by construction (item 1's reviewer identified the current guard-in-one-caller shape as invariant-by-convention).
+- **The exit-code-3 JSON pause contract changes shape** (breaking, and that's fine — frontend backwards compatibility is an antipattern here). `scopes_pending` stops existing because the cascade always completes; the payload becomes a description of conflicted heads derived from the repo.
 
 ### 4. Read-only robustness
 
