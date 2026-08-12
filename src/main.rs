@@ -73,8 +73,8 @@ struct Cli {
     #[arg(long = "output", value_enum, default_value = "human", global = true)]
     output_format: OutputFormat,
 
-    /// Proceed even when drift is detected
-    #[arg(long, global = true)]
+    /// Proceed even when drift is detected (plain `dotsync` sync)
+    #[arg(long)]
     force: bool,
 }
 
@@ -98,9 +98,7 @@ enum Action {
     Abort {
         force: bool,
     },
-    Status {
-        force: bool,
-    },
+    Status,
     Diff,
     View {
         scope: Option<String>,
@@ -128,13 +126,25 @@ enum Command {
         #[arg(long)]
         all: bool,
 
+        /// Proceed even when drift is detected
+        #[arg(long)]
+        force: bool,
+
         /// Repo-relative file or directory paths to commit
         paths: Vec<PathBuf>,
     },
     #[command(about = CONTINUE_ABOUT)]
-    Continue,
+    Continue {
+        /// Proceed even when drift is detected
+        #[arg(long)]
+        force: bool,
+    },
     #[command(about = ABORT_ABOUT)]
-    Abort,
+    Abort {
+        /// Proceed even when drift is detected
+        #[arg(long)]
+        force: bool,
+    },
     /// Show managed files that differ from the repo
     Status,
     /// Show line-oriented diffs for managed home files that differ from the repo
@@ -283,18 +293,33 @@ impl Action {
     fn try_from_cli(cli: Cli, context: CliContext) -> Result<Self, UsageError> {
         match cli.command {
             Some(Command::Init { remote_url }) => {
+                reject_force_before(cli.force, "init")?;
                 let remote_url = init_remote_from_args(remote_url, context)?;
                 Ok(Self::Init { remote_url })
             }
-            Some(Command::Continue) => Ok(Self::Continue { force: cli.force }),
-            Some(Command::Abort) => Ok(Self::Abort { force: cli.force }),
-            Some(Command::Status) => Ok(Self::Status { force: false }),
-            Some(Command::Diff) => Ok(Self::Diff),
-            Some(Command::View { scope, file }) => Ok(Self::View { scope, file }),
+            Some(Command::Continue { force }) => Ok(Self::Continue {
+                force: force || cli.force,
+            }),
+            Some(Command::Abort { force }) => Ok(Self::Abort {
+                force: force || cli.force,
+            }),
+            Some(Command::Status) => {
+                reject_force_before(cli.force, "status")?;
+                Ok(Self::Status)
+            }
+            Some(Command::Diff) => {
+                reject_force_before(cli.force, "diff")?;
+                Ok(Self::Diff)
+            }
+            Some(Command::View { scope, file }) => {
+                reject_force_before(cli.force, "view")?;
+                Ok(Self::View { scope, file })
+            }
             Some(Command::Commit {
                 scope,
                 message,
                 all,
+                force,
                 paths,
             }) => {
                 let selection = match (all, paths.is_empty()) {
@@ -310,11 +335,13 @@ impl Action {
                 Ok(Self::Commit {
                     scope,
                     message,
-                    force: cli.force,
+                    force: force || cli.force,
                     selection,
                 })
             }
             Some(Command::Unknown(args)) => {
+                // `--force` is checked per command below, and an unknown
+                // command has no behavior to force.
                 let command = args.first().map(String::as_str).unwrap_or("<empty>");
                 Err(usage_error(&format!(
                     "unknown command `{command}`; run `dotsync --help` for supported commands"
@@ -352,10 +379,24 @@ async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
         Action::Init { remote_url } => run_init(remote_url).await,
         Action::Continue { force } => run_continue(force).await,
         Action::Abort { force } => run_abort(force).await,
-        Action::Status { force } => run_status(force).await,
+        Action::Status => run_status().await,
         Action::Diff => run_diff().await,
         Action::View { scope, file } => run_view(scope, file).await,
     }
+}
+
+/// `--force` is declared both before the subcommand (for the plain `dotsync`
+/// sync) and on the commands that write home. Commands that never write home
+/// have no meaning for it, so accepting it there - which is what a global flag
+/// does - would teach an agent that retrying with `--force` could change the
+/// answer.
+fn reject_force_before(force: bool, command: &str) -> Result<(), UsageError> {
+    if !force {
+        return Ok(());
+    }
+    Err(usage_error(&format!(
+        "`--force` has no meaning for `{command}`; it only affects commands that write files into your home directory: plain `dotsync`, `commit`, `continue`, and `abort`"
+    )))
 }
 
 fn usage_error(message: &str) -> UsageError {
@@ -479,7 +520,7 @@ async fn run_sync(force: bool) -> Result<CliOutput, DotsyncError> {
     }))
 }
 
-async fn run_status(_force: bool) -> Result<CliOutput, DotsyncError> {
+async fn run_status() -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     let report = status(&paths).await?;
     let files = report
