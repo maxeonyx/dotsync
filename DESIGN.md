@@ -122,16 +122,31 @@ dotsync tracks a minimal machine-local sync state file recording which machine s
 
 2. **Drift attribution** — comparing home state against the last-synced revision rather than repo HEAD distinguishes "repo advanced elsewhere" from "home drifted locally." A plain sync can then accept legitimate remote updates without treating them as local drift, while still stopping before overwriting files that changed in home since the last sync.
 
-The three-way comparison (last-synced tree, home, new tip) classifies every file situation without special cases:
+The three-way comparison (last-synced tree `L`, home `H`, new tip `T`) classifies every file situation without special cases. Presence and equality across the three sides is the whole domain, so every situation lands in exactly one class:
 
-| In last-synced tree? | In home? | Meaning | Behavior |
-|---|---|---|---|
-| no | no (in new tip) | file added on another machine | not drift — sync writes it |
-| yes | no | was synced here, then deleted locally | **deletion drift** — blocks like an edit |
-| yes | yes, differs | edited locally | edit drift — blocks |
-| yes (absent in new tip) | yes | deleted from repo elsewhere | sync removes it from home |
+| Class | `L` / `H` / `T` | Behavior |
+|---|---|---|
+| in sync | all three identical | nothing to do |
+| incoming add | absent / absent / present | not drift — sync writes it |
+| incoming update ("stale, not yours") | present / equal to `L` / changed | not drift — sync writes it; **`commit` refuses it** |
+| incoming delete | present / equal to `L` / absent | not drift — sync removes it from home |
+| edit drift | present / changed / equal to `L` | blocks; commit records it |
+| edit drift, removed from the repo | present / changed / absent | blocks; commit records it |
+| deletion drift | present / absent / equal to `L` | blocks; commit records the deletion |
+| deletion drift, tip also changed | present / absent / changed | blocks; commit records the deletion |
+| diverged edit | present / changed / changed differently | blocks sync; commit merges the two, pausing on conflict |
+| already applied | present / changed / changed to the same bytes | not drift — this run's own commit, or a crashed run's writes |
+| untracked collision | absent / present / present, differing | blocks — home holds content dotsync has never seen |
+| untracked | absent / present / absent | not managed; only `commit` cares |
+| converged deletion | present / absent / absent | nothing to do |
 
-Deleting a managed file from home is drift like any other: it shows in `status` and `diff`, blocks sync (overridable with `--force`), and is recorded to a scope with `dotsync commit <scope> -- <path>` like any other change. Files added on other machines flow in frictionlessly because they were never in this machine's last-synced tree.
+The row that carries the most weight is **incoming update**: home holds exactly what was last synced, and the tip has moved on. A two-sided comparison of home against the tip cannot tell it apart from a local edit, so `status` reports it as a change and a `commit` naming that path re-records the older bytes and cascades them — silently reverting whoever published the change. Naming the class is what makes that unrepresentable: `status` files it under incoming rather than changed, and `commit` refuses it, pointing at plain `dotsync`.
+
+Deleting a managed file from home is drift like any other: it shows in `status` and `diff`, blocks sync, and is recorded to a scope with `dotsync commit <scope> -- <path>`. Files added on other machines flow in frictionlessly because they were never in this machine's last-synced tree.
+
+When there is no usable sync state — a fresh machine, a deleted state file, or one naming a revision this repo does not have — the last-synced side is empty rather than assumed. Dotsync then removes nothing from home and reads no missing file as a deletion, because it has no record of putting anything there; what it can still judge from home and the tip alone, it still judges.
+
+**`--force` has two shapes, because the commands asking it do not all have something to scope the answer to.** Plain `dotsync` and `continue` name no paths, so their `--force` is blanket: overwrite every drifted file. `commit` names paths, and its `--force` rides that same list — it overrides the refusal for exactly those paths, takes home's side for them, and leaves every other drifted file alone. `dotsync commit linux -m msg --force -- .bashrc` overwrites `.bashrc` and nothing else; `dotsync --force` overwrites everything. Paths recorded on that authority are reported as `forced_overwrites`. `init` and `abort` refuse the flag: neither ever makes the choice, because `init` has nothing of yours to overwrite and `abort` exists to discard home edits.
 
 The sync state file path is configured in `config.toml` under `[sync] state_path` and lives in the home directory (not the repo). It is never synced as a managed dotfile.
 
