@@ -23,7 +23,7 @@ use crate::cascade::{
 use crate::config::{
     internal_repo_paths, load_config, DotsyncPaths, ALL_SCOPE, DOTSYNC_CONFIG_RELATIVE_PATH,
 };
-use crate::drift::{classify_home_against_scope, read_home_bytes, FileState};
+use crate::drift::{classify_home_against_scope, read_home_bytes, FileState, RecordedFromHome};
 use crate::error::{CommitPathProblem, DotsyncError, RefusedCommitPath, RejectedCommitPath};
 use crate::repo::{
     collect_managed_tree_entries, fetch_origin, load_repo_direct, load_scope_commit,
@@ -169,6 +169,16 @@ pub async fn commit_and_sync(
         .as_ref()
         .and_then(|state| repo.store().get_commit(&state.last_synced_revision).ok());
 
+    // Whether this commit's bytes reach this machine at all. When the target
+    // scope is an ancestor of the machine scope the cascade carries them down
+    // into home, so home has a version of the target scope it started from and
+    // will have a version of it to catch up to. When it is not — another
+    // machine's leaf, a sibling branch of the DAG — neither is true, and both
+    // the merge base and the sync baseline below fall back to what dotsync did
+    // before this wave. Whether such commits should be allowed without an
+    // explicit per-path force is still open (PLAN.md §1.5, D6).
+    let cascades_into_home = scope_is_ancestor_or_self(&graph, &options.scope, &machine_scope);
+
     let mut tx = repo.start_transaction();
     let mut scope_heads = ScopeHeads::load_existing(tx.repo_mut().base_repo(), &graph)?;
     let original_scope_commit_ids = scope_heads.commit_ids_by_scope();
@@ -176,16 +186,19 @@ pub async fn commit_and_sync(
 
     let merge_base_tree = commit_merge_base_tree(
         tx.repo_mut(),
-        &graph,
+        cascades_into_home,
         &options.scope,
-        &machine_scope,
         &base_commit,
         last_synced_commit.as_ref(),
     )
     .await?;
+    let mut recorded_from_home = RecordedFromHome::default();
     let mut builder = MergedTreeBuilder::new(merge_base_tree.clone());
     for relative in &selected_paths {
-        apply_home_path_to_tree(tx.repo_mut(), paths, relative, &mut builder).await?;
+        let bytes = apply_home_path_to_tree(tx.repo_mut(), paths, relative, &mut builder).await?;
+        if cascades_into_home {
+            recorded_from_home.record(relative, bytes);
+        }
     }
     let home_tree = builder.write_tree().await.map_err(|err| DotsyncError::Jj {
         message: format!("write commit tree for {}: {err}", options.scope),
@@ -213,7 +226,10 @@ pub async fn commit_and_sync(
 
     let mut builder = MergedTreeBuilder::new(merged_tree);
     for relative in &forced_paths {
-        apply_home_path_to_tree(tx.repo_mut(), paths, relative, &mut builder).await?;
+        let bytes = apply_home_path_to_tree(tx.repo_mut(), paths, relative, &mut builder).await?;
+        if cascades_into_home {
+            recorded_from_home.record(relative, bytes);
+        }
     }
     let new_tree = builder.write_tree().await.map_err(|err| DotsyncError::Jj {
         message: format!("write forced commit tree for {}: {err}", options.scope),
@@ -336,9 +352,13 @@ pub async fn commit_and_sync(
     // Push as soon as the history exists: the home sync below can legitimately
     // stop on drift, and a stop must never strand committed scope history.
     let push = push_scope_updates(paths).await?;
+    // The commit just read these paths out of home and wrote them into the
+    // repo, so for this sync those bytes are the last-synced side: home is
+    // behind whatever the cascade merged them into, not drifted from it.
     let sync = crate::sync::sync_repo_to_home(
         paths,
         ForceScope::from_paths(&forced_paths),
+        &recorded_from_home,
         Some(&machine_scope),
     )
     .await?;
@@ -400,6 +420,7 @@ async fn select_changes_to_record(
         sync_state,
         machine_scope,
         &named_paths.iter().flatten().cloned().collect(),
+        &RecordedFromHome::default(),
     )
     .await?;
 
@@ -469,23 +490,20 @@ async fn select_changes_to_record(
 /// moved by an earlier read-only command, because nothing but a completed sync
 /// writes the sync state.
 ///
-/// Falls back to the scope's own head when the target is not an ancestor of
-/// this machine's scope: home was never derived from such a scope, so there is
-/// no version of it this machine can claim to have started from. Whether those
-/// commits should be allowed at all is an open question (PLAN.md §1.5, D6);
-/// until it is answered they behave exactly as they did before.
+/// Falls back to the scope's own head when the commit does not cascade into
+/// this home: home was never derived from such a scope, so there is no version
+/// of it this machine can claim to have started from.
 async fn commit_merge_base_tree(
     mut_repo: &mut jj_lib::repo::MutableRepo,
-    graph: &ScopeGraph,
+    cascades_into_home: bool,
     target_scope: &str,
-    machine_scope: &str,
     target_head: &jj_lib::commit::Commit,
     last_synced: Option<&jj_lib::commit::Commit>,
 ) -> Result<jj_lib::merged_tree::MergedTree, DotsyncError> {
     let Some(last_synced) = last_synced else {
         return Ok(target_head.tree());
     };
-    if !scope_is_ancestor_or_self(graph, target_scope, machine_scope) {
+    if !cascades_into_home {
         return Ok(target_head.tree());
     }
 
@@ -778,12 +796,16 @@ fn path_has_prefix(path: &Path, prefix: &Path) -> bool {
     path == prefix || path.starts_with(prefix)
 }
 
+/// Writes home's current content for `relative` into `builder`, and returns
+/// exactly the bytes it recorded — `None` when home has no such file, which is
+/// how a deletion is recorded. The caller keeps those bytes as the baseline
+/// for its own home sync; see `RecordedFromHome`.
 async fn apply_home_path_to_tree(
     mut_repo: &mut jj_lib::repo::MutableRepo,
     paths: &DotsyncPaths,
     relative: &Path,
     builder: &mut MergedTreeBuilder,
-) -> Result<(), DotsyncError> {
+) -> Result<Option<Vec<u8>>, DotsyncError> {
     let relative_str = relative.to_str().ok_or_else(|| DotsyncError::NonUtf8Path {
         path: relative.to_path_buf(),
     })?;
@@ -792,33 +814,28 @@ async fn apply_home_path_to_tree(
             message: format!("invalid repo path {}: {err}", relative.display()),
         })?;
 
-    let home_path = paths.home_dir.join(relative);
-    if home_path.exists() {
-        let bytes = fs::read(&home_path).map_err(|source| DotsyncError::Io {
-            path: home_path,
-            source,
-        })?;
-        let mut reader = bytes.as_slice();
-        let file_id = mut_repo
-            .store()
-            .write_file(repo_path.as_ref(), &mut reader)
-            .await
-            .map_err(|err| DotsyncError::Jj {
-                message: format!("write repo file {}: {err}", relative.display()),
-            })?;
-        builder.set_or_remove(
-            repo_path,
-            Merge::normal(TreeValue::File {
-                id: file_id,
-                executable: false,
-                copy_id: CopyId::placeholder(),
-            }),
-        );
-    } else {
+    let Some(bytes) = read_home_bytes(paths, relative)? else {
         builder.set_or_remove(repo_path, Merge::absent());
-    }
+        return Ok(None);
+    };
 
-    Ok(())
+    let mut reader = bytes.as_slice();
+    let file_id = mut_repo
+        .store()
+        .write_file(repo_path.as_ref(), &mut reader)
+        .await
+        .map_err(|err| DotsyncError::Jj {
+            message: format!("write repo file {}: {err}", relative.display()),
+        })?;
+    builder.set_or_remove(
+        repo_path,
+        Merge::normal(TreeValue::File {
+            id: file_id,
+            executable: false,
+            copy_id: CopyId::placeholder(),
+        }),
+    );
+    Ok(Some(bytes))
 }
 
 /// Home contents of the conflicted files, recorded when a cascade pauses so
@@ -898,9 +915,15 @@ pub async fn continue_after_conflict(
                 state.paused_scope
             ),
         })?;
+    let cascades_into_home =
+        scope_is_ancestor_or_self(&config.graph, &state.paused_scope, &state.machine_scope);
+    let mut recorded_from_home = RecordedFromHome::default();
     let mut builder = MergedTreeBuilder::new(merged_tree);
     for relative in state.paused_home_contents.keys() {
-        apply_home_path_to_tree(tx.repo_mut(), paths, relative, &mut builder).await?;
+        let bytes = apply_home_path_to_tree(tx.repo_mut(), paths, relative, &mut builder).await?;
+        if cascades_into_home {
+            recorded_from_home.record(relative, bytes);
+        }
     }
     let resolved_tree = builder.write_tree().await.map_err(|err| DotsyncError::Jj {
         message: format!("write resolved tree for {}: {err}", state.paused_scope),
@@ -990,7 +1013,13 @@ pub async fn continue_after_conflict(
         })?;
     remove_paused_cascade_state(paths)?;
     let push = push_scope_updates(paths).await?;
-    let sync = crate::sync::sync_repo_to_home(paths, force, Some(&state.machine_scope)).await?;
+    let sync = crate::sync::sync_repo_to_home(
+        paths,
+        force,
+        &recorded_from_home,
+        Some(&state.machine_scope),
+    )
+    .await?;
     Ok(ContinueReport { sync, push })
 }
 
@@ -1024,9 +1053,13 @@ pub async fn abort_paused_cascade(paths: &DotsyncPaths) -> Result<AbortReport, D
     // refuse. Drift outside the paused selection goes the same way, which is
     // what DESIGN.md's "reverts all the config files" says and what the old
     // selective restore quietly did not do.
-    let sync =
-        crate::sync::sync_repo_to_home(paths, ForceScope::Everything, Some(&state.machine_scope))
-            .await?;
+    let sync = crate::sync::sync_repo_to_home(
+        paths,
+        ForceScope::Everything,
+        &RecordedFromHome::default(),
+        Some(&state.machine_scope),
+    )
+    .await?;
 
     Ok(AbortReport {
         aborted_scope: state.paused_scope,

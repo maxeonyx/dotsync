@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use jj_lib::repo::Repo as _;
 
 use crate::config::{internal_repo_paths, load_config, DotsyncPaths};
-use crate::drift::classify_home_against_scope;
+use crate::drift::{classify_home_against_scope, RecordedFromHome};
 use crate::error::{jj_error, DotsyncError};
 use crate::repo::{
     collect_managed_tree_entries, fetch_origin, load_repo_direct, load_scope_commit,
@@ -142,6 +142,7 @@ pub async fn diff_home(paths: &DotsyncPaths) -> Result<DiffReport, DotsyncError>
         sync_state.as_ref(),
         &machine_scope,
         &BTreeSet::new(),
+        &RecordedFromHome::default(),
     )
     .await?;
 

@@ -8,7 +8,7 @@ use jj_lib::object_id::ObjectId;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{load_config, DotsyncConfig, DotsyncPaths};
-use crate::drift::{classify_home_against_scope, ClassifiedPath, FileState};
+use crate::drift::{classify_home_against_scope, ClassifiedPath, FileState, RecordedFromHome};
 use crate::error::DotsyncError;
 use crate::machine::detect_machine;
 use crate::repo::{
@@ -115,7 +115,7 @@ pub async fn sync(
         },
         None => push_scope_updates(paths).await?,
     };
-    let sync = sync_repo_to_home(paths, force, None).await?;
+    let sync = sync_repo_to_home(paths, force, &RecordedFromHome::default(), None).await?;
     Ok(SyncCommandReport { sync, push })
 }
 
@@ -159,9 +159,15 @@ fn write_home_file(
     })
 }
 
+/// Writes the machine scope's tip into home, stopping first on anything home
+/// holds that dotsync neither put there nor has a record of.
+///
+/// `recorded_from_home` is empty for every caller but the two that have just
+/// written home content into the repo — see `RecordedFromHome`.
 pub(crate) async fn sync_repo_to_home(
     paths: &DotsyncPaths,
     force: ForceScope,
+    recorded_from_home: &RecordedFromHome,
     machine_scope_hint: Option<&str>,
 ) -> Result<SyncReport, DotsyncError> {
     let config = load_config(paths).await?;
@@ -179,6 +185,7 @@ pub(crate) async fn sync_repo_to_home(
         valid_sync_state,
         &current_scope,
         &BTreeSet::new(),
+        recorded_from_home,
     )
     .await?;
 

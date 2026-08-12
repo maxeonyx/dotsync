@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::config::{load_config, DotsyncPaths};
-use crate::drift::{classify_home_against_scope, FileState};
+use crate::drift::{classify_home_against_scope, FileState, RecordedFromHome};
 use crate::error::DotsyncError;
 use crate::repo::{fetch_origin, load_repo_direct};
 use crate::sync::{load_sync_state, resolve_current_scope};
@@ -41,6 +41,7 @@ pub async fn status(paths: &DotsyncPaths) -> Result<StatusReport, DotsyncError> 
         sync_state.as_ref(),
         &machine_scope,
         &BTreeSet::new(),
+        &RecordedFromHome::default(),
     )
     .await?;
 

@@ -212,6 +212,45 @@ pub(crate) fn classify(
     }
 }
 
+/// What a run has just written into the repo out of home, per path: the bytes
+/// it recorded, or `None` for a path it recorded as deleted.
+///
+/// This is a *baseline override*, not the old `expected_repo_changes`
+/// suppression list, and the difference is the whole point. That list said
+/// "do not look at these paths at all", was computed by diffing two repo
+/// commits, and was threaded through five call sites that each meant something
+/// slightly different by it — one of them meaning "paths I am allowed to
+/// clobber". This says only "for these paths, the last-synced side is this
+/// content", and the classification then does its ordinary job on top.
+///
+/// It is true because a commit is a sync in reverse for the paths it records:
+/// it reads those bytes out of home and writes them into the repo, so at that
+/// moment they are exactly what this machine last synchronised — even though
+/// no sync state has been saved yet, and even though the cascade may have
+/// merged them with somebody else's change on the way. A path still holding
+/// what was recorded is therefore behind the new tip (incoming: write the
+/// merge down), and a path that changed again since is an unrecorded edit
+/// (drift: stop). Nothing is muted.
+///
+/// It never leaves the run that produced it: one producer, one consumer, no
+/// state on disk.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RecordedFromHome(BTreeMap<PathBuf, Option<Vec<u8>>>);
+
+impl RecordedFromHome {
+    pub(crate) fn record(&mut self, relative: &Path, bytes: Option<Vec<u8>>) {
+        self.0.insert(relative.to_path_buf(), bytes);
+    }
+
+    pub(crate) fn paths(&self) -> impl Iterator<Item = &PathBuf> {
+        self.0.keys()
+    }
+
+    fn baseline(&self, relative: &Path) -> Option<&Option<Vec<u8>>> {
+        self.0.get(relative)
+    }
+}
+
 /// One classified path together with the bytes the sides hold, read once so
 /// that the consumers never go back to the repo or to home for them.
 #[derive(Debug, Clone)]
@@ -253,6 +292,7 @@ pub(crate) async fn classify_paths(
     repo: &dyn jj_lib::repo::Repo,
     last_synced_entries: Option<&BTreeMap<PathBuf, TreeValue>>,
     tip_entries: &BTreeMap<PathBuf, TreeValue>,
+    recorded_from_home: &RecordedFromHome,
     domain: &BTreeSet<PathBuf>,
 ) -> Result<BTreeMap<PathBuf, ClassifiedPath>, DotsyncError> {
     let no_record = BTreeMap::new();
@@ -260,8 +300,10 @@ pub(crate) async fn classify_paths(
 
     let mut classified = BTreeMap::new();
     for relative in domain {
-        let last_synced_bytes =
-            read_entry_bytes(repo, relative, last_synced_entries.get(relative)).await?;
+        let last_synced_bytes = match recorded_from_home.baseline(relative) {
+            Some(recorded) => recorded.clone(),
+            None => read_entry_bytes(repo, relative, last_synced_entries.get(relative)).await?,
+        };
         let tip_bytes = read_entry_bytes(repo, relative, tip_entries.get(relative)).await?;
         let home_bytes = read_home_bytes(paths, relative)?;
         let state = classify(
@@ -344,6 +386,7 @@ pub(crate) async fn classify_home_against_scope(
     sync_state: Option<&SyncState>,
     scope: &str,
     extra_paths: &BTreeSet<PathBuf>,
+    recorded_from_home: &RecordedFromHome,
 ) -> Result<HomeClassification, DotsyncError> {
     let internal_paths = internal_repo_paths(config);
     let tip = load_scope_commit(repo, scope)?;
@@ -352,11 +395,13 @@ pub(crate) async fn classify_home_against_scope(
 
     let mut domain = managed_domain(last_synced_entries.as_ref(), &tip_entries);
     domain.extend(extra_paths.iter().cloned());
+    domain.extend(recorded_from_home.paths().cloned());
     let paths = classify_paths(
         paths,
         repo,
         last_synced_entries.as_ref(),
         &tip_entries,
+        recorded_from_home,
         &domain,
     )
     .await?;
