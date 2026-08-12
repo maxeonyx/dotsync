@@ -2664,6 +2664,106 @@ fn drift_stop_during_commit_does_not_strand_unpushed_history() {
 }
 
 #[test]
+fn paused_cascade_withholds_publishing_until_it_is_resolved() {
+    let harness = TestHarness::new();
+    let machine_a = harness.machine("machine-a", "linux", "goof-a");
+    let machine_b = harness.machine("machine-b", "linux", "goof-b");
+
+    let init_a = machine_a.init();
+    assert!(init_a.status.success(), "{}", render_output(&init_a));
+    let init_b = machine_b.init();
+    assert!(init_b.status.success(), "{}", render_output(&init_b));
+    let sync_a_after_join = machine_a.run("dotsync --force");
+    assert!(
+        sync_a_after_join.status.success(),
+        "{}",
+        render_output(&sync_a_after_join)
+    );
+
+    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
+    let commit_base = machine_a.run("dotsync commit all -m 'add base config' -- .config/app.conf");
+    assert!(
+        commit_base.status.success(),
+        "{}",
+        render_output(&commit_base)
+    );
+    machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
+    let commit_linux =
+        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
+    assert!(
+        commit_linux.status.success(),
+        "{}",
+        render_output(&commit_linux)
+    );
+
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
+    let conflict =
+        machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
+    assert_eq!(
+        conflict.status.code(),
+        Some(3),
+        "this test needs a paused cascade\n{}",
+        render_output(&conflict)
+    );
+
+    // Put home back to the machine scope's content so the sync below has no
+    // drift to stop on: this test is about publishing, not about drift.
+    machine_b.write_file(".config/app.conf", "setting = \"linux\"\n");
+    let remote_before =
+        ["all", "linux", "goof-a", "goof-b"].map(|scope| remote_branch_revision(&machine_b, scope));
+
+    let sync_output = machine_b.run("dotsync --output json");
+    assert!(
+        sync_output.status.success(),
+        "a paused cascade must not stop dotsync from running: {}",
+        render_output(&sync_output)
+    );
+
+    for (scope, before) in ["all", "linux", "goof-a", "goof-b"]
+        .iter()
+        .zip(remote_before)
+    {
+        assert_eq!(
+            remote_branch_revision(&machine_b, scope),
+            before,
+            "a half-cascaded `{scope}` must not be published while the cascade is paused — `dotsync abort` could not take it back"
+        );
+    }
+
+    let json = parse_stdout_json(&sync_output);
+    let unpushed = json["unpushed_scopes"]
+        .as_array()
+        .expect("unpushed_scopes should be an array")
+        .iter()
+        .map(|scope| {
+            scope
+                .as_str()
+                .expect("scope should be a string")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        unpushed.contains(&"all".to_string()),
+        "the withheld scopes must be reported: {}",
+        render_output(&sync_output)
+    );
+
+    let stderr = String::from_utf8_lossy(&sync_output.stderr);
+    assert!(
+        stderr.to_lowercase().contains("paused"),
+        "the run must say why it did not publish: {}",
+        render_output(&sync_output)
+    );
+    assert!(
+        stderr.contains("dotsync continue") && stderr.contains("dotsync abort"),
+        "the run must say how to unblock publishing: {}",
+        render_output(&sync_output)
+    );
+}
+
+#[test]
 fn diverged_leaf_scope_keeps_the_local_commit_and_the_home_file() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
