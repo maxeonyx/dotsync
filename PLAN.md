@@ -63,6 +63,8 @@ Write conflicted merges as real commits; derive "paused" from conflicted heads; 
 
 `status`, `view`, `diff` work on any repo state — including conflicted heads and offline — and report weirdness instead of failing. Read-only commands report what convergence would do (in-memory merges), never mutate.
 
+`status` must also report unpushed scopes. After item 1, a refused push is reported by the run that hit it and nowhere else: once that run's output scrolls away, a machine holding unpublished commits looks completely clean, and the honest-failure work of item 1 becomes invisible a minute later. Deferred here deliberately (found during the item 1 review) because it belongs with the rest of the read-only reporting surface.
+
 ### 5. Agent validation loop
 
 Use the headless agent-scenario infrastructure (`tests/agent-scenarios/`) with a cheap model to validate the full UX: make a config change, run dotsync, resolve a conflict from markers, done. Add scenarios starting from an interrupted-push state and a conflicted-head state — the agent must recover using dotsync alone. Iterate on messages/UX until cheap agents reliably succeed. This is the actual product bar: the tool has failed in practice precisely when real agents met unplanned states.
@@ -133,9 +135,12 @@ All commands emit JSON on stdout when `--output json` is passed. Human-readable 
   "command": "commit",
   "scope": "all",
   "synced_files": [".gitconfig", ".shellrc"],
-  "machine_scope": "mx-xps-cy"
+  "machine_scope": "mx-xps-cy",
+  "unpushed_scopes": []
 }
 ```
+
+`unpushed_scopes` is emitted by every command that publishes (`init`, sync, `commit`, `continue`) and lists scopes that are committed on this machine but not on the remote — because the remote refused them, or because publishing was withheld while a cascade is paused. Empty means everything this run had to publish reached the remote. `abort` does not publish and does not emit the field.
 
 ### Error (exit code 1)
 ```json

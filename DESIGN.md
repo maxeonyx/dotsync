@@ -1,5 +1,7 @@
 # dotsync — Design Story
 
+**This document describes the target design, not the shipped state.** Things described here in the present tense may not be built yet — conflicts-as-commits and the convergence pass are the current examples. `PLAN.md` tracks what exists, what is in progress, and in what order the rest lands; when the two disagree about what dotsync does today, `PLAN.md` is right.
+
 ## The problem
 
 You have config files scattered across `~/` on multiple machines. Some config is universal (`.gitconfig`), some is OS-specific (hyprland on linux), some is machine-specific (wallpaper paths). You want a single repo that is the source of truth for all of it, and you want AI agents — your primary method of editing config — to be able to maintain it naturally.
