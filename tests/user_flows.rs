@@ -4963,3 +4963,40 @@ fn work_done_offline_reaches_the_remote_on_the_next_online_run() {
         );
     }
 }
+
+/// DESIGN.md, "Failure model: no dead ends": every state dotsync can produce
+/// must be one dotsync commands alone can recover from. An init that cannot
+/// reach the remote is the likeliest failure there is — a typo in the URL, no
+/// network yet — and it must not leave behind a repo that the retry refuses to
+/// touch.
+#[test]
+fn an_init_that_could_not_reach_the_remote_can_simply_be_retried() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    harness.disconnect_remote();
+    let failed_init = machine.init();
+    assert_eq!(
+        failed_init.status.code(),
+        Some(1),
+        "init has nothing to work from when it cannot reach the remote\n{}",
+        render_output(&failed_init)
+    );
+    assert!(
+        String::from_utf8_lossy(&failed_init.stderr).contains("could not reach the remote"),
+        "init must say what actually went wrong\n{}",
+        render_output(&failed_init)
+    );
+
+    harness.reconnect_remote();
+    let retried_init = machine.init();
+    assert!(
+        retried_init.status.success(),
+        "the remedy for a failed init is running it again\n{}",
+        render_output(&retried_init)
+    );
+    assert!(
+        machine.file_exists(".config/dotsync/config.toml"),
+        "the retried init must have set this machine up properly"
+    );
+}
