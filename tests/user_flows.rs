@@ -553,13 +553,20 @@ fn clone_remote_branch_to(path: &Path, remote_dir: &Path, branch: &str) {
 }
 
 /// Unix-only, like the `pre-receive` hook fixtures: dotsync's Windows story
-/// has its own open questions and no test here pretends to cover them.
-#[cfg(unix)]
+/// has its own open questions and no test here pretends to cover them. Gated
+/// inside the body rather than on the function so the suite still compiles
+/// everywhere, which is what CI's Windows build would notice.
 fn symlink_at(target: &Path, link: &Path) {
     if let Some(parent) = link.parent() {
         fs::create_dir_all(parent).expect("create parent dir");
     }
+    #[cfg(unix)]
     std::os::unix::fs::symlink(target, link).expect("create symlink");
+    #[cfg(not(unix))]
+    {
+        let _ = (target, link);
+        panic!("symlink fixtures are unix-only");
+    }
 }
 
 fn write_file_at(path: &Path, contents: &str) {
