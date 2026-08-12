@@ -1,10 +1,10 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use crate::config::{load_config, DotsyncPaths};
+use crate::config::DotsyncPaths;
 use crate::drift::{classify_home_against_scope, FileState, RecordedFromHome};
 use crate::error::DotsyncError;
-use crate::repo::{fetch_origin, load_repo_direct};
+use crate::session::{in_session, Run};
 use crate::sync::{load_sync_state, resolve_current_scope};
 
 /// What `status` found, split by whether anyone has to decide anything.
@@ -28,38 +28,37 @@ pub struct FileChange {
     pub state: FileState,
 }
 
-pub async fn status(paths: &DotsyncPaths) -> Result<StatusReport, DotsyncError> {
-    let config = load_config(paths).await?;
-    let repo = load_repo_direct(paths).await?;
-    let repo = fetch_origin(repo).await?;
-    let sync_state = load_sync_state(paths, &config)?;
-    let machine_scope = resolve_current_scope(&config, sync_state.as_ref(), None)?;
-    let classification = classify_home_against_scope(
-        paths,
-        repo.as_ref(),
-        &config,
-        sync_state.as_ref(),
-        &machine_scope,
-        &BTreeSet::new(),
-        &RecordedFromHome::default(),
-    )
-    .await?;
+pub async fn status(paths: &DotsyncPaths) -> Run<Result<StatusReport, DotsyncError>> {
+    in_session(paths, async |session, _paths| {
+        session.fetch().await?;
+        let sync_state = load_sync_state(session.paths(), session.config())?;
+        let machine_scope = resolve_current_scope(session.config(), sync_state.as_ref(), None)?;
+        let classification = classify_home_against_scope(
+            session,
+            sync_state.as_ref(),
+            &machine_scope,
+            &BTreeSet::new(),
+            &RecordedFromHome::default(),
+        )
+        .await?;
 
-    let file_changes = |include: fn(FileState) -> bool| {
-        classification
-            .paths
-            .iter()
-            .filter(|(_, path)| include(path.state))
-            .map(|(relative, path)| FileChange {
-                path: relative.clone(),
-                state: path.state,
-            })
-            .collect::<Vec<_>>()
-    };
+        let file_changes = |include: fn(FileState) -> bool| {
+            classification
+                .paths
+                .iter()
+                .filter(|(_, path)| include(path.state))
+                .map(|(relative, path)| FileChange {
+                    path: relative.clone(),
+                    state: path.state,
+                })
+                .collect::<Vec<_>>()
+        };
 
-    Ok(StatusReport {
-        machine_scope,
-        changes: file_changes(FileState::is_drift),
-        incoming: file_changes(FileState::is_incoming),
+        Ok(StatusReport {
+            machine_scope,
+            changes: file_changes(FileState::is_drift),
+            incoming: file_changes(FileState::is_incoming),
+        })
     })
+    .await
 }

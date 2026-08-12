@@ -1,13 +1,11 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
-    abort_paused_cascade, commit_and_sync, continue_after_conflict, diff_home, init,
-    list_scope_tree, list_scopes, read_scope_file, status, sync, CommitOptions, DiffReport,
-    DotsyncError, DotsyncPaths, FileChange, FileDrift, FileState, ForceScope, ScopeListReport,
-    TreeReport,
+    abort_paused_cascade, commit_and_sync, continue_after_conflict, diff_home, init, status, sync,
+    view, CommitFailure, CommitOptions, DiffReport, DotsyncError, DotsyncPaths, FileChange,
+    FileDrift, FileState, ForceScope, Run, UnreachableRemote, ViewReport,
 };
 mod render;
 use serde_json::json;
-use std::collections::BTreeSet;
 use std::env;
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
@@ -51,7 +49,11 @@ const COMMIT_ABOUT: &str = "Commit selected home changes to a scope, cascade, sy
 
 const COMMIT_LONG_ABOUT: &str = "PATHS are home-relative files or directories to record on SCOPE. Omit them to record every managed file this machine has changed, which is exactly the set `dotsync status` lists as changes.
 
-dotsync compares three sides of every path: what it last synced to this machine, what is in home now, and what the scopes hold now. A path whose home content is simply older than the repo has not been changed here, so `commit` refuses it and points at plain `dotsync` instead — committing it would revert whoever published the change that is already there.
+dotsync compares three sides of every path: what it last synced to this machine, what is in home now, and what the scopes hold now. A path whose home content is simply older than the repo has not been changed here, so naming it is refused and pointed at plain `dotsync` instead — committing it would revert whoever published the change that is already there.
+
+Naming a directory records what this machine changed under it, adds what is new under it, and steps around what another machine changed. Omitting the paths records only changes to files dotsync already tracks — it never adds anything, which is why a new file has to be opted into by naming it or the directory it is in.
+
+A run reports both halves of what that came to: `newly_tracked` for the files it put on the scope for the first time, and `skipped_paths` for the files under a named directory it left alone. Both appear in `--output json` and as notes on stderr, alongside `forced_overwrites`.
 
 `--force` means \"home wins anyway\", and on `commit` it applies only to the paths you name. That is deliberately different from `--force` on plain `dotsync` and on `continue`, which name no paths and so overwrite every drifted file. So `dotsync commit linux -m msg --force -- .bashrc` overwrites `.bashrc` and nothing else, while `dotsync --force` overwrites everything that drifted.
 
@@ -182,11 +184,52 @@ struct UsageError {
     message: String,
 }
 
+/// What to print, and what the run that produced it could not do.
+///
+/// The remote state sits out here rather than inside either arm, because it is
+/// as true of a run that stopped as of one that finished — and putting it in
+/// both arms is how it came to be reported on only one of them.
 #[derive(Debug)]
-enum CliOutput {
+struct CliOutput {
+    kind: OutputKind,
+    unreachable_remote: Option<UnreachableRemote>,
+}
+
+#[derive(Debug)]
+enum OutputKind {
     Success(SuccessOutput),
     Error(ErrorOutput),
     Usage(UsageError),
+}
+
+impl CliOutput {
+    /// Output from something that never became a run: a bad command line, or
+    /// an environment dotsync cannot work in.
+    fn without_run(kind: OutputKind) -> Self {
+        Self {
+            kind,
+            unreachable_remote: None,
+        }
+    }
+}
+
+/// Turns a finished run into output, carrying what the run could not do onto
+/// whichever arm it ended in. The one place that decision is made.
+fn output_of<T, E: Into<ErrorOutput>>(
+    run: Run<Result<T, E>>,
+    render: impl FnOnce(T) -> SuccessOutput,
+) -> CliOutput {
+    let Run {
+        report,
+        unreachable_remote,
+    } = run;
+    CliOutput {
+        kind: match report {
+            Ok(report) => OutputKind::Success(render(report)),
+            Err(error) => OutputKind::Error(error.into()),
+        },
+        unreachable_remote,
+    }
 }
 
 /// A run that stopped, plus anything it had already done that the error alone
@@ -206,6 +249,17 @@ impl From<DotsyncError> for ErrorOutput {
     }
 }
 
+impl From<CommitFailure> for ErrorOutput {
+    /// A commit that stopped after writing history has to say what it
+    /// overwrote on the way past.
+    fn from(failure: CommitFailure) -> Self {
+        Self {
+            error: failure.error,
+            forced_overwrites: failure.forced_overwrites,
+        }
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     if try_handle_version_json_request() {
@@ -219,12 +273,15 @@ async fn main() {
     let output_format = cli.output_format;
     let outcome = match Action::try_from_cli(cli, detect_cli_context()) {
         Ok(action) => dispatch(action).await,
-        Err(error) => Ok(CliOutput::Usage(error)),
+        Err(error) => Ok(CliOutput::without_run(OutputKind::Usage(error))),
     };
 
     let exit_code = match outcome {
         Ok(output) => emit_output(&output_format, output),
-        Err(error) => emit_output(&output_format, CliOutput::Error(error.into())),
+        Err(error) => emit_output(
+            &output_format,
+            CliOutput::without_run(OutputKind::Error(error.into())),
+        ),
     };
     std::process::exit(exit_code);
 }
@@ -420,12 +477,12 @@ async fn run_init(remote_url: InitRemote) -> Result<CliOutput, DotsyncError> {
         InitRemote::Provided(remote_url) => remote_url,
         InitRemote::Prompt => match prompt_init_remote_url() {
             Ok(remote_url) => remote_url,
-            Err(error) => return Ok(CliOutput::Usage(error)),
+            Err(error) => return Ok(CliOutput::without_run(OutputKind::Usage(error))),
         },
     };
     let paths = discover_paths()?;
-    let report = init(&paths, &remote_url).await?;
-    Ok(CliOutput::Success(SuccessOutput {
+    let run = init(&paths, &remote_url).await;
+    Ok(output_of(run, |report| SuccessOutput {
         json: json!({
             "status": "ok",
             "command": "init",
@@ -464,8 +521,8 @@ fn prompt_init_remote_url() -> Result<String, UsageError> {
 
 async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let report = continue_after_conflict(&paths, blanket_force(force)).await?;
-    Ok(CliOutput::Success(SuccessOutput {
+    let run = continue_after_conflict(&paths, blanket_force(force)).await;
+    Ok(output_of(run, |report| SuccessOutput {
         json: json!({
             "status": "ok",
             "command": "continue",
@@ -486,8 +543,8 @@ async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
 
 async fn run_abort() -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let report = abort_paused_cascade(&paths).await?;
-    Ok(CliOutput::Success(SuccessOutput {
+    let run = abort_paused_cascade(&paths).await;
+    Ok(output_of(run, |report| SuccessOutput {
         json: json!({
             "status": "ok",
             "command": "abort",
@@ -509,8 +566,8 @@ async fn run_abort() -> Result<CliOutput, DotsyncError> {
 
 async fn run_sync(force: bool) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let report = sync(&paths, blanket_force(force)).await?;
-    Ok(CliOutput::Success(SuccessOutput {
+    let run = sync(&paths, blanket_force(force)).await;
+    Ok(output_of(run, |report| SuccessOutput {
         json: json!({
             "status": "ok",
             "command": "sync",
@@ -532,94 +589,124 @@ async fn run_sync(force: bool) -> Result<CliOutput, DotsyncError> {
 
 async fn run_status() -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let report = status(&paths).await?;
-    let files = report
-        .changes
-        .iter()
-        .map(|change| render_change_json(change, true))
-        .chain(
-            report
-                .incoming
-                .iter()
-                .map(|change| render_change_json(change, false)),
-        )
-        .collect::<Vec<_>>();
-
-    Ok(CliOutput::Success(SuccessOutput {
-        json: json!({
-            "status": "ok",
-            "command": "status",
-            "machine_scope": report.machine_scope,
-            "changed_count": report.changes.len(),
-            "incoming_count": report.incoming.len(),
-            "groups": [{
-                "scope": serde_json::Value::Null,
-                "files": files,
-            }],
-        }),
-        human: render_status_human(&report),
-        notes: Vec::new(),
-        stdout: None,
-        exit_code: 0,
+    let run = status(&paths).await;
+    Ok(output_of(run, |report| {
+        let files = report
+            .changes
+            .iter()
+            .map(|change| render_change_json(change, true))
+            .chain(
+                report
+                    .incoming
+                    .iter()
+                    .map(|change| render_change_json(change, false)),
+            )
+            .collect::<Vec<_>>();
+        SuccessOutput {
+            json: json!({
+                "status": "ok",
+                "command": "status",
+                "machine_scope": report.machine_scope,
+                "changed_count": report.changes.len(),
+                "incoming_count": report.incoming.len(),
+                "groups": [{
+                    "scope": serde_json::Value::Null,
+                    "files": files,
+                }],
+            }),
+            human: render_status_human(&report),
+            notes: Vec::new(),
+            stdout: None,
+            exit_code: 0,
+        }
     }))
 }
 
 async fn run_diff() -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let report = diff_home(&paths).await?;
-    let changed_count = report.drifts.len();
-    let drifts = report
-        .drifts
-        .iter()
-        .map(render::render_drift_json)
-        .collect::<Vec<_>>();
-    let exit_code = if report.drifts.is_empty() { 0 } else { 1 };
-
-    Ok(CliOutput::Success(SuccessOutput {
+    let run = diff_home(&paths).await;
+    Ok(output_of(run, |report| SuccessOutput {
         json: json!({
             "status": "ok",
             "command": "diff",
             "machine_scope": report.machine_scope,
-            "changed_count": changed_count,
-            "drifts": drifts,
+            "changed_count": report.drifts.len(),
+            "drifts": report
+                .drifts
+                .iter()
+                .map(render::render_drift_json)
+                .collect::<Vec<_>>(),
         }),
+        // Drift is what `diff` exists to report, so it is not an error — but
+        // scripts and agents need to tell clean from dirty without parsing.
+        exit_code: if report.drifts.is_empty() { 0 } else { 1 },
         human: render_diff_human(&report),
         notes: Vec::new(),
         stdout: None,
-        exit_code,
     }))
 }
 
 async fn run_view(scope: Option<String>, file: Option<PathBuf>) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    match (scope, file) {
-        (Some(scope), Some(file)) => {
-            let report = read_scope_file(&paths, &scope, &file).await?;
-            Ok(file_success_output(
-                "view",
-                &report.scope,
-                &report.path,
-                report.contents,
-            ))
-        }
-        (Some(scope), None) => {
-            let report = list_scope_tree(&paths, &scope).await?;
-            Ok(CliOutput::Success(SuccessOutput {
-                json: json!({
-                    "status": "ok",
-                    "command": "view",
-                    "scope": report.scope,
-                    "files": report.paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
-                }),
-                human: String::new(),
-                notes: Vec::new(),
-                stdout: Some(render_view_scope_stdout(&report)),
-                exit_code: 0,
-            }))
-        }
-        (None, Some(file)) => run_view_file_scopes(&paths, file).await,
-        (None, None) => run_view_overview(&paths).await,
-    }
+    let run = view(&paths, scope.as_deref(), file.as_deref()).await;
+    Ok(output_of(run, |report| match report {
+        ViewReport::FileContents {
+            scope,
+            file,
+            contents,
+        } => SuccessOutput {
+            json: json!({
+                "status": "ok",
+                "command": "view",
+                "scope": scope,
+                "path": render::display_path(&file),
+                "contents": String::from_utf8_lossy(&contents),
+            }),
+            human: String::new(),
+            notes: Vec::new(),
+            stdout: Some(String::from_utf8_lossy(&contents).into_owned()),
+            exit_code: 0,
+        },
+        ViewReport::Scope { scope, files } => SuccessOutput {
+            json: json!({
+                "status": "ok",
+                "command": "view",
+                "scope": scope,
+                "files": files.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
+            }),
+            human: String::new(),
+            notes: Vec::new(),
+            stdout: Some(render_view_scope_stdout(&scope, &files)),
+            exit_code: 0,
+        },
+        ViewReport::FileScopes { file, scopes } => SuccessOutput {
+            json: json!({
+                "status": "ok",
+                "command": "view",
+                "file": render::display_path(&file),
+                "scopes": scopes,
+            }),
+            human: String::new(),
+            notes: Vec::new(),
+            stdout: Some(render_view_file_scopes_stdout(&file, &scopes)),
+            exit_code: 0,
+        },
+        ViewReport::Overview { scopes, files } => SuccessOutput {
+            json: json!({
+                "status": "ok",
+                "command": "view",
+                "scopes": scopes.iter().map(|scope| json!({
+                    "name": scope.name,
+                    "parents": scope.parents,
+                })).collect::<Vec<_>>(),
+                "files": files.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
+            }),
+            human: String::new(),
+            notes: Vec::new(),
+            stdout: Some(render_view_overview_stdout(&scopes, &files)),
+            exit_code: 0,
+        },
+    }))
 }
 
 async fn run_commit(
@@ -629,7 +716,7 @@ async fn run_commit(
     commit_paths: Vec<PathBuf>,
 ) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let report = match commit_and_sync(
+    let run = commit_and_sync(
         &paths,
         CommitOptions {
             scope,
@@ -638,17 +725,8 @@ async fn run_commit(
             paths: commit_paths,
         },
     )
-    .await
-    {
-        Ok(report) => report,
-        Err(failure) => {
-            return Ok(CliOutput::Error(ErrorOutput {
-                error: failure.error,
-                forced_overwrites: failure.forced_overwrites,
-            }))
-        }
-    };
-    Ok(CliOutput::Success(SuccessOutput {
+    .await;
+    Ok(output_of(run, |report| SuccessOutput {
         json: json!({
             "status": "ok",
             "command": "commit",
@@ -656,6 +734,11 @@ async fn run_commit(
             "machine_scope": report.sync.current_scope,
             "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
             "forced_overwrites": report.forced_overwrites.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
+            "newly_tracked": report.newly_tracked.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
+            "skipped_paths": report.skipped.iter().map(|skipped| json!({
+                "path": render::display_path(&skipped.path),
+                "status": skipped.state.code(),
+            })).collect::<Vec<_>>(),
             "unpushed_scopes": report.push.unpushed_scopes(),
         }),
         human: format!(
@@ -663,8 +746,10 @@ async fn run_commit(
             report.committed_scope,
             report.sync.synced_paths.len()
         ),
-        notes: render::forced_overwrite_notes(&report.forced_overwrites)
+        notes: render::newly_tracked_notes(&report.newly_tracked)
             .into_iter()
+            .chain(render::skipped_path_notes(&report.skipped))
+            .chain(render::forced_overwrite_notes(&report.forced_overwrites))
             .chain(render::success_notes(
                 &report.sync.drifts,
                 Some(&report.push),
@@ -732,72 +817,19 @@ fn render_diff_human(report: &DiffReport) -> String {
     lines.join("\n")
 }
 
-async fn run_view_overview(paths: &DotsyncPaths) -> Result<CliOutput, DotsyncError> {
-    let scopes = list_scopes(paths).await?;
-    let mut files = BTreeSet::new();
-    for scope in &scopes.scopes {
-        for path in list_scope_tree(paths, &scope.name).await?.paths {
-            files.insert(path);
-        }
-    }
-
-    Ok(CliOutput::Success(SuccessOutput {
-        json: json!({
-            "status": "ok",
-            "command": "view",
-            "scopes": scopes.scopes.iter().map(|scope| json!({
-                "name": scope.name,
-                "parents": scope.parents,
-            })).collect::<Vec<_>>(),
-            "files": files.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
-        }),
-        human: String::new(),
-        notes: Vec::new(),
-        stdout: Some(render_view_overview_stdout(&scopes, &files)),
-        exit_code: 0,
-    }))
-}
-
-async fn run_view_file_scopes(
-    paths: &DotsyncPaths,
-    file: PathBuf,
-) -> Result<CliOutput, DotsyncError> {
-    let scopes = list_scopes(paths).await?;
-    let mut matching_scopes = Vec::new();
-    for scope in &scopes.scopes {
-        let tree = list_scope_tree(paths, &scope.name).await?;
-        if tree.paths.iter().any(|path| path == &file) {
-            matching_scopes.push(scope.name.clone());
-        }
-    }
-
-    Ok(CliOutput::Success(SuccessOutput {
-        json: json!({
-            "status": "ok",
-            "command": "view",
-            "file": render::display_path(&file),
-            "scopes": matching_scopes,
-        }),
-        human: String::new(),
-        notes: Vec::new(),
-        stdout: Some(render_view_file_scopes_stdout(&file, &matching_scopes)),
-        exit_code: 0,
-    }))
-}
-
-fn render_view_overview_stdout(report: &ScopeListReport, files: &BTreeSet<PathBuf>) -> String {
+fn render_view_overview_stdout(scopes: &[dotsync::ScopeInfo], files: &[PathBuf]) -> String {
     render_lines(
         std::iter::once("Scopes".to_string())
-            .chain(report.scopes.iter().map(render_scope_line))
+            .chain(scopes.iter().map(render_scope_line))
             .chain([String::new(), "Files".to_string()])
             .chain(files.iter().map(|path| render::display_path(path))),
     )
 }
 
-fn render_view_scope_stdout(report: &TreeReport) -> String {
+fn render_view_scope_stdout(scope: &str, files: &[PathBuf]) -> String {
     render_lines(
-        std::iter::once(format!("Scope {}", report.scope))
-            .chain(report.paths.iter().map(|path| render::display_path(path))),
+        std::iter::once(format!("Scope {scope}"))
+            .chain(files.iter().map(|path| render::display_path(path))),
     )
 }
 
@@ -824,27 +856,6 @@ fn render_scope_line(scope: &dotsync::ScopeInfo) -> String {
     } else {
         format!("{} <- {}", scope.name, scope.parents.join(", "))
     }
-}
-
-fn file_success_output(
-    command: &str,
-    scope: &str,
-    path: &std::path::Path,
-    contents: Vec<u8>,
-) -> CliOutput {
-    CliOutput::Success(SuccessOutput {
-        json: json!({
-            "status": "ok",
-            "command": command,
-            "scope": scope,
-            "path": render::display_path(path),
-            "contents": String::from_utf8_lossy(&contents),
-        }),
-        human: String::new(),
-        notes: Vec::new(),
-        stdout: Some(String::from_utf8_lossy(&contents).into_owned()),
-        exit_code: 0,
-    })
 }
 
 /// One status line: a marker an agent can scan for, then the reason in words
@@ -887,13 +898,25 @@ fn change_marker(state: FileState) -> &'static str {
 }
 
 fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
-    match output {
-        CliOutput::Success(success) => {
+    let CliOutput {
+        kind,
+        unreachable_remote,
+    } = output;
+    // Before anything else the run has to say: it is the frame for all of it.
+    for note in render::unreachable_remote_notes(unreachable_remote.as_ref()) {
+        eprintln!("{note}");
+    }
+
+    match kind {
+        OutputKind::Success(success) => {
             for note in success.notes {
                 eprintln!("{note}");
             }
             if matches!(output_format, OutputFormat::Json) {
-                println!("{}", success.json);
+                println!(
+                    "{}",
+                    render::with_remote_state(success.json, unreachable_remote.as_ref())
+                );
             } else if let Some(stdout) = success.stdout {
                 print!("{stdout}");
             } else {
@@ -901,7 +924,7 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
             }
             success.exit_code
         }
-        CliOutput::Error(ErrorOutput {
+        OutputKind::Error(ErrorOutput {
             error,
             forced_overwrites,
         }) => {
@@ -920,11 +943,17 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
                 print_drifts(&error_report.drifts);
             }
             if matches!(output_format, OutputFormat::Json) {
-                println!("{}", render::render_error_json(&error_report));
+                println!(
+                    "{}",
+                    render::with_remote_state(
+                        render::render_error_json(&error_report),
+                        unreachable_remote.as_ref()
+                    )
+                );
             }
             exit_code
         }
-        CliOutput::Usage(error) => {
+        OutputKind::Usage(error) => {
             eprintln!("dotsync: {}", error.message);
             if matches!(output_format, OutputFormat::Json) {
                 println!("{}", render::render_usage_error_json(&error));

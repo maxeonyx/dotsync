@@ -30,8 +30,25 @@ pub struct RejectedCommitPath {
 /// whose content is not this machine's to record. Structured so that one run
 /// reports every such path, and so the explanation can name what actually
 /// happened to the file.
+///
+/// Refused, not skipped: this is a path the command named exactly, so dotsync
+/// stops and argues rather than quietly deciding for the user. The paths a
+/// bulk selection steps around are `SkippedCommitPath`, and the difference
+/// between the two is the whole of what naming a path exactly buys you.
 #[derive(Debug, Clone)]
 pub struct RefusedCommitPath {
+    pub path: PathBuf,
+    pub state: FileState,
+}
+
+/// One path a named directory matched that the commit left out, because home
+/// holds no change of this machine's own at it.
+///
+/// Not an error and not a refusal: the run succeeds, and this is what it has
+/// to say about what it did not do — so it is reported alongside the result
+/// rather than instead of one.
+#[derive(Debug, Clone)]
+pub struct SkippedCommitPath {
     pub path: PathBuf,
     pub state: FileState,
 }
@@ -62,6 +79,12 @@ impl RefusedCommitPath {
 
 #[derive(Debug, Clone)]
 pub enum CommitPathProblem {
+    /// Your whole home directory, however it was named.
+    HomeRoot,
+    /// The path is a symlink, or reaches its file through one.
+    Symlink {
+        resolves_to: PathBuf,
+    },
     Absolute,
     EscapesHome,
     /// Matched neither a file in home nor a file already on the target scope.
@@ -83,6 +106,13 @@ impl RejectedCommitPath {
     pub(crate) fn explain(&self, scope: &str) -> String {
         let path = self.path.display();
         match &self.problem {
+            CommitPathProblem::HomeRoot => format!(
+                "`{path}` is your whole home directory. Dotsync would walk all of it and put every file it found on scope `{scope}` — ssh keys, credentials, browser profiles — and every machine sharing that scope would then have them written into its own home."
+            ),
+            CommitPathProblem::Symlink { resolves_to } => format!(
+                "`{path}` is a symlink, or reaches its file through one: it resolves to {}. Dotsync records the content it finds at the path you name, and every machine on scope `{scope}` writes that content back to that same path — so a link is either somebody else's file being published under your path, or a later sync writing through the link to somewhere dotsync does not manage.",
+                resolves_to.display()
+            ),
             CommitPathProblem::Absolute => format!(
                 "`{path}` is an absolute path, and dotsync resolves every commit path against your home directory."
             ),
@@ -124,6 +154,16 @@ impl RejectedCommitPath {
     /// scope graph.
     pub fn is_scope_graph(&self) -> bool {
         matches!(self.problem, CommitPathProblem::ScopeGraphOutsideAllScope)
+    }
+
+    /// Read by the binary's renderer to say what to name instead of home.
+    pub fn is_home_root(&self) -> bool {
+        matches!(self.problem, CommitPathProblem::HomeRoot)
+    }
+
+    /// Read by the binary's renderer to explain what dotsync does with links.
+    pub fn is_symlink(&self) -> bool {
+        matches!(self.problem, CommitPathProblem::Symlink { .. })
     }
 }
 
@@ -199,7 +239,9 @@ pub enum DotsyncError {
     },
     #[error("paused cascade at scope `{scope}` must be resolved before starting another commit")]
     PausedCascadeInProgress { scope: String },
-    #[error("no paused cascade to continue")]
+    /// Raised by `continue` and by `abort`, so it says what is not there
+    /// rather than what the caller wanted to do with it.
+    #[error("there is no paused cascade on this machine")]
     NoPausedCascade,
     #[error("repo already exists at {path}")]
     RepoAlreadyExists { path: PathBuf },
@@ -207,6 +249,23 @@ pub enum DotsyncError {
     NotInitialized { path: PathBuf },
     #[error("unable to determine machine hostname")]
     MissingHostname,
+    /// Reaching the remote failed. Raised only where reaching it is the point
+    /// of the command: everywhere else a run degrades to the last state it did
+    /// fetch and says so — see `Session::fetch`.
+    #[error("could not reach the remote: {reason}")]
+    RemoteUnreachable { reason: String },
+    /// An `init` that stopped and could not take its own leavings with it.
+    /// Carries the failure that stopped it, because that is still the thing to
+    /// fix; the half-made repo is what stops the retry from starting.
+    #[error(
+        "{original}\n\nDotsync could also not remove the partly created repo at {path}: {source}. Delete that directory before running `dotsync init` again."
+    )]
+    PartialInitLeftBehind {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+        original: Box<DotsyncError>,
+    },
     #[error("jj operation failed: {message}")]
     Jj { message: String },
 }
@@ -251,6 +310,15 @@ impl DotsyncError {
                 forced_overwrites: Vec::new(),
             },
             DotsyncError::MissingHostname => basic_error_report("missing_hostname", self),
+            DotsyncError::RemoteUnreachable { .. } => {
+                basic_error_report("remote_unreachable", self)
+            }
+            // Classified as whatever stopped the init, because that is what
+            // the reader has to act on; the message carries both halves.
+            DotsyncError::PartialInitLeftBehind { original, .. } => ErrorReport {
+                message: self.to_string(),
+                ..original.to_error_report()
+            },
             DotsyncError::Io { .. } => basic_error_report("io", self),
             DotsyncError::Jj { .. } => basic_error_report("jj", self),
             DotsyncError::HomeNotSet => basic_error_report("home_not_set", self),
@@ -339,7 +407,9 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
         | DotsyncError::DriftDetected { .. }
         | DotsyncError::RepoAlreadyExists { .. }
         | DotsyncError::MissingHostname
+        | DotsyncError::RemoteUnreachable { .. }
         | DotsyncError::Jj { .. } => None,
+        DotsyncError::PartialInitLeftBehind { original, .. } => error_current_state(original),
     }
 }
 

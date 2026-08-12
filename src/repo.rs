@@ -20,6 +20,7 @@ use jj_lib::str_util::StringExpression;
 
 use crate::config::DotsyncPaths;
 use crate::error::{jj_error, DotsyncError};
+use crate::session::Session;
 
 pub(crate) fn default_settings() -> Result<UserSettings, DotsyncError> {
     let config = StackedConfig::with_defaults();
@@ -91,7 +92,12 @@ pub(crate) async fn fetch_origin(
             None,
             None,
         )
-        .map_err(|err| jj_error(format!("fetch origin: {err}")))?;
+        .map_err(|err| match err {
+            git::GitFetchError::Subprocess(_) => DotsyncError::RemoteUnreachable {
+                reason: remote_failure_reason(&err),
+            },
+            other => jj_error(format!("fetch origin: {other}")),
+        })?;
     fetch
         .import_refs()
         .map_err(|err| jj_error(format!("import fetched refs: {err}")))?;
@@ -99,6 +105,22 @@ pub(crate) async fn fetch_origin(
     tx.commit("dotsync: fetch origin")
         .await
         .map_err(|err| jj_error(format!("commit fetch operation: {err}")))
+}
+
+/// What git said when dotsync could not talk to the remote.
+///
+/// jj wraps every failure of its `git` subprocess in one variant whose inner
+/// type it does not export, so dotsync cannot tell "host did not resolve" from
+/// "permission denied" from "your git is too old for this option". It does not
+/// need to: all of them mean this run did not reach the remote, and all of
+/// them are handled the same way. Which one it was is git's own words, quoted
+/// back in the notice so the reader can tell them apart.
+fn remote_failure_reason(error: &dyn std::fmt::Display) -> String {
+    error
+        .to_string()
+        .trim_start_matches("External git program failed:")
+        .trim()
+        .to_string()
 }
 
 /// Reconciles every local scope bookmark against the remote bookmark it
@@ -214,6 +236,11 @@ pub enum PushReport {
         scopes: Vec<String>,
         paused_scope: String,
     },
+    /// The remote could not be reached, so these scopes stay local-ahead until
+    /// a run that can reach it publishes them. That is the same state a
+    /// refused push leaves them in, and an ordinary input to the next
+    /// convergence — not a failure of this run.
+    Unreachable { scopes: Vec<String>, reason: String },
 }
 
 impl PushReport {
@@ -222,6 +249,7 @@ impl PushReport {
             PushReport::UpToDate => &[],
             PushReport::Refused { scopes, .. } => scopes,
             PushReport::WithheldPausedCascade { scopes, .. } => scopes,
+            PushReport::Unreachable { scopes, .. } => scopes,
         }
     }
 }
@@ -248,16 +276,15 @@ fn pending_bookmark_updates(repo: &ReadonlyRepo) -> Vec<(RefNameBuf, BookmarkPus
 }
 
 /// The scopes a push would offer the remote right now.
-pub(crate) async fn pending_push_scopes(paths: &DotsyncPaths) -> Result<Vec<String>, DotsyncError> {
-    let repo = load_repo_direct(paths).await?;
-    Ok(pending_bookmark_updates(&repo)
+pub(crate) fn pending_push_scopes(session: &Session) -> Vec<String> {
+    pending_bookmark_updates(session.repo())
         .into_iter()
         .map(|(name, _)| name.as_str().to_string())
-        .collect())
+        .collect()
 }
 
-pub(crate) async fn push_scope_updates(paths: &DotsyncPaths) -> Result<PushReport, DotsyncError> {
-    let repo = load_repo_direct(paths).await?;
+pub(crate) async fn push_scope_updates(session: &mut Session) -> Result<PushReport, DotsyncError> {
+    let repo = session.repo().clone();
     let settings = default_settings()?;
     let subprocess_options = GitSubprocessOptions::from_settings(&settings)
         .map_err(|err| jj_error(format!("load git subprocess settings: {err}")))?;
@@ -273,7 +300,7 @@ pub(crate) async fn push_scope_updates(paths: &DotsyncPaths) -> Result<PushRepor
         .map(|(name, _)| name.as_str().to_string())
         .collect();
     let mut tx = repo.start_transaction();
-    let stats = git::push_branches(
+    let stats = match git::push_branches(
         tx.repo_mut(),
         subprocess_options,
         "origin".as_ref(),
@@ -282,11 +309,23 @@ pub(crate) async fn push_scope_updates(paths: &DotsyncPaths) -> Result<PushRepor
         },
         &mut QuietGitCallback,
         &GitPushOptions::default(),
-    )
-    .map_err(|err| jj_error(format!("push branches: {err}")))?;
-    tx.commit("dotsync: push scope updates")
-        .await
-        .map_err(|err| jj_error(format!("commit push operation: {err}")))?;
+    ) {
+        Ok(stats) => stats,
+        Err(err @ git::GitPushError::Subprocess(_)) => {
+            return Ok(PushReport::Unreachable {
+                scopes: attempted,
+                reason: remote_failure_reason(&err),
+            })
+        }
+        Err(other) => return Err(jj_error(format!("push branches: {other}"))),
+    };
+    session
+        .advance_to(
+            tx.commit("dotsync: push scope updates")
+                .await
+                .map_err(|err| jj_error(format!("commit push operation: {err}")))?,
+        )
+        .await?;
 
     let pushed: Vec<&str> = stats
         .pushed

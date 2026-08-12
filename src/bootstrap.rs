@@ -20,6 +20,7 @@ use crate::repo::{
     PushReport,
 };
 use crate::scope_graph::ScopeGraph;
+use crate::session::{Run, Session};
 use crate::sync::{sync_repo_to_home, ForceScope, SyncReport};
 
 #[derive(Debug, Clone)]
@@ -29,12 +30,50 @@ pub struct InitReport {
     pub push: PushReport,
 }
 
-pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, DotsyncError> {
+/// Unlike every other command, `init` cannot carry on against a last-fetched
+/// state, because there isn't one yet — so its run never reports an unreachable
+/// remote as an aside. It reports it as the error it is.
+pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Run<Result<InitReport, DotsyncError>> {
+    Run {
+        report: init_repo(paths, remote_url).await,
+        unreachable_remote: None,
+    }
+}
+
+async fn init_repo(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, DotsyncError> {
     if paths.repo_root.exists() {
         return Err(DotsyncError::RepoAlreadyExists {
             path: paths.repo_root.clone(),
         });
     }
+
+    match create_repo_and_join(paths, remote_url).await {
+        Ok(report) => Ok(report),
+        // Everything under the repo root was made by this run — init refuses
+        // to start when it already exists — so an init that stopped part-way
+        // takes its own leavings with it. Otherwise the remedy for the
+        // commonest failure there is, a remote this machine cannot reach yet,
+        // would be deleting a directory by hand before the retry is even
+        // allowed to start.
+        Err(error) => Err(match std::fs::remove_dir_all(&paths.repo_root) {
+            Ok(()) => error,
+            // Nothing was created yet, so there is nothing to say.
+            Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => error,
+            // A cleanup that failed silently would be the worst of both: the
+            // retry refuses to start and nothing ever said why.
+            Err(source) => DotsyncError::PartialInitLeftBehind {
+                path: paths.repo_root.clone(),
+                source,
+                original: Box::new(error),
+            },
+        }),
+    }
+}
+
+async fn create_repo_and_join(
+    paths: &DotsyncPaths,
+    remote_url: &str,
+) -> Result<InitReport, DotsyncError> {
     if let Some(parent) = paths.repo_root.parent() {
         std::fs::create_dir_all(parent).map_err(|source| DotsyncError::Io {
             path: parent.to_path_buf(),
@@ -51,20 +90,27 @@ pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, 
         .await
         .map_err(|err| jj_error(format!("init repo: {err}")))?;
     let _repo = add_origin_remote(repo, remote_url).await?;
+    // The remote lives in the git config rather than in the repo view, and a
+    // repo handle carries the git config it was opened with — so unlike every
+    // other transaction in dotsync, this one is only visible after re-opening.
     let repo = load_repo_direct(paths).await?;
     let repo = fetch_origin(repo).await?;
     let identity = detect_machine()?;
 
+    // Only after this does the repo hold an `all` scope to read a scope graph
+    // out of, which is what a session is: everything before it works on the
+    // repo handle directly.
     let remote_empty = repo.view().all_remote_bookmarks().next().is_none();
-    let current_scope = if remote_empty {
-        bootstrap_empty_remote(paths, &identity).await?
+    let (current_scope, repo) = if remote_empty {
+        bootstrap_empty_remote(repo, &identity).await?
     } else {
         join_existing_remote(paths, repo, &identity).await?
     };
 
-    let push = push_scope_updates(paths).await?;
+    let mut session = Session::from_repo(paths, repo).await?;
+    let push = push_scope_updates(&mut session).await?;
     let sync = sync_repo_to_home(
-        paths,
+        &session,
         ForceScope::Everything,
         &RecordedFromHome::default(),
         Some(&current_scope),
@@ -75,9 +121,9 @@ pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, 
 }
 
 pub(crate) async fn bootstrap_empty_remote(
-    paths: &DotsyncPaths,
+    repo: std::sync::Arc<jj_lib::repo::ReadonlyRepo>,
     identity: &MachineIdentity,
-) -> Result<String, DotsyncError> {
+) -> Result<(String, std::sync::Arc<jj_lib::repo::ReadonlyRepo>), DotsyncError> {
     let graph = ScopeGraph::new(HashMap::from([
         ("all".to_string(), vec![]),
         (identity.os_scope.clone(), vec!["all".to_string()]),
@@ -86,7 +132,6 @@ pub(crate) async fn bootstrap_empty_remote(
             vec![identity.os_scope.clone()],
         ),
     ]))?;
-    let repo = load_repo_direct(paths).await?;
     let root_commit = repo.store().root_commit();
     let config = DotsyncConfig {
         graph: graph.clone(),
@@ -129,19 +174,20 @@ pub(crate) async fn bootstrap_empty_remote(
         RefNameBuf::from(identity.machine_scope.as_str()).as_ref(),
         RefTarget::normal(machine_commit.id().clone()),
     );
-    tx.commit("dotsync: initialize scopes")
+    let repo = tx
+        .commit("dotsync: initialize scopes")
         .await
         .map_err(|err| jj_error(format!("commit init scopes: {err}")))?;
 
-    Ok(identity.machine_scope.clone())
+    Ok((identity.machine_scope.clone(), repo))
 }
 
 pub(crate) async fn join_existing_remote(
     paths: &DotsyncPaths,
-    _repo: std::sync::Arc<jj_lib::repo::ReadonlyRepo>,
+    repo: std::sync::Arc<jj_lib::repo::ReadonlyRepo>,
     identity: &MachineIdentity,
-) -> Result<String, DotsyncError> {
-    let config = load_config(paths).await?;
+) -> Result<(String, std::sync::Arc<jj_lib::repo::ReadonlyRepo>), DotsyncError> {
+    let config = load_config(paths, repo.as_ref()).await?;
     let graph = config.graph.clone();
 
     let mut parents = graph.parents.clone();
@@ -159,11 +205,10 @@ pub(crate) async fn join_existing_remote(
     }
 
     if scopes_to_create == 0 {
-        return Ok(identity.machine_scope.clone());
+        return Ok((identity.machine_scope.clone(), repo));
     }
 
     let updated_graph = ScopeGraph::new(parents)?;
-    let repo = load_repo_direct(paths).await?;
 
     let mut tx = repo.start_transaction();
     let mut scope_heads = ScopeHeads::load_existing(tx.repo_mut().base_repo(), &updated_graph)?;
@@ -251,10 +296,10 @@ pub(crate) async fn join_existing_remote(
         scope_heads.update(identity.machine_scope.clone(), commit);
     }
 
-    let _repo = tx
+    let repo = tx
         .commit("dotsync: initialize machine scope")
         .await
         .map_err(|err| jj_error(format!("commit join scope changes: {err}")))?;
 
-    Ok(identity.machine_scope.clone())
+    Ok((identity.machine_scope.clone(), repo))
 }

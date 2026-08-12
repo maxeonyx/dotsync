@@ -1,5 +1,7 @@
 use crate::UsageError;
-use dotsync::{DotsyncError, ErrorReport, FileDrift, PushReport};
+use dotsync::{
+    DotsyncError, ErrorReport, FileDrift, PushReport, SkippedCommitPath, UnreachableRemote,
+};
 use serde_json::json;
 use similar::TextDiff;
 use std::path::Path;
@@ -177,6 +179,22 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             steps.push(
                 "do not use `~/`, absolute paths, or `..`; dotsync resolves every path against your home directory already, and records it verbatim.".to_string(),
             );
+            if rejected.iter().any(|rejected| rejected.is_symlink()) {
+                steps.push(
+                    "name the real file instead of the link, if it lives in your home directory."
+                        .to_string(),
+                );
+                steps.push(
+                    "config kept outside home and linked into place cannot be committed yet; dotsync has no answer for what a scope should hold for such a path, so it refuses rather than guessing."
+                        .to_string(),
+                );
+            }
+            if rejected.iter().any(|rejected| rejected.is_home_root()) {
+                steps.push(
+                    "name the directories or files you actually mean: `dotsync commit <scope> -m \"message\" -- .config/fish/ .bashrc`. Dotsync will not sweep a whole home directory onto a scope."
+                        .to_string(),
+                );
+            }
             if rejected.iter().any(|rejected| rejected.is_scope_graph()) {
                 steps.push(
                     "commit the scope graph to `all`, which is the only scope dotsync reads it from: `dotsync commit all -m \"message\" -- .config/dotsync/config.toml`."
@@ -258,6 +276,32 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 "After that, let dotsync recreate valid sync state from a successful sync.",
             ],
         ),
+        // Every other command carries on against the last state it fetched
+        // and says so in a note. `init` is the one whose whole job is to reach
+        // the remote, so for it this really is a stop.
+        DotsyncError::RemoteUnreachable { reason } => render_structured_error(
+            "could not reach the remote",
+            "Dotsync keeps your config in a hidden repo and shares it between your machines through a git remote, so every machine starts from what the others have already published.",
+            "This init flow clones that remote into the hidden repo, works out which scopes this machine belongs to, and syncs them into home.",
+            "It expects the remote URL you gave it to be reachable from this machine now.",
+            reason,
+            "Dotsync stopped rather than starting from an empty history: scopes created here would collide with the ones already on the remote the first time this machine reached it.",
+            &[
+                "check the remote URL, this machine's network, and your credentials for that remote.",
+                "then run `dotsync init <remote-url>` again.",
+            ],
+        ),
+        // The original failure is what there is to fix, so it renders in full;
+        // the leftover directory is the extra step the retry now needs.
+        DotsyncError::PartialInitLeftBehind {
+            path,
+            source,
+            original,
+        } => format!(
+            "{}\n\nAlso:\nDotsync could not remove the partly created repo at {}: {source}. Delete that directory before running `dotsync init` again.",
+            render_error_human(original),
+            path.display()
+        ),
         DotsyncError::NotInitialized { path } => format!(
             "dotsync: not initialized\n\nWhat happened:\nDotsync could not find its hidden repo at {}.\n\nWhat to do:\n- Run `dotsync init <remote-url>` from this home directory.\n- Then rerun `dotsync status`.\n\nThe remote URL is the git remote that stores your dotsync repo.",
             path.display()
@@ -298,6 +342,36 @@ pub(crate) fn render_structured_error(
     )
 }
 
+/// Which state a run is reporting against, when it is not the remote's.
+///
+/// Printed by every command that could not fetch, before anything else it has
+/// to say, because it is the frame for all of it: the drift, the scope list
+/// and the commit that follows are all against the state this machine last
+/// fetched rather than against the state the remote is in now.
+pub(crate) fn unreachable_remote_notes(unreachable: Option<&UnreachableRemote>) -> Vec<String> {
+    let Some(unreachable) = unreachable else {
+        return Vec::new();
+    };
+    vec![
+        "dotsync: could not reach the remote; reporting against the last-fetched state".to_string(),
+        format!("dotsync: {}", unreachable.reason),
+    ]
+}
+
+/// The machine-readable half of the same fact. Added at the one place every
+/// command's JSON passes through, so no command can forget it — and only when
+/// there is something to say, because a run that reached the remote and a run
+/// that never needed it are the same answer to a reader of this field.
+pub(crate) fn with_remote_state(
+    mut json: serde_json::Value,
+    unreachable: Option<&UnreachableRemote>,
+) -> serde_json::Value {
+    if let Some(unreachable) = unreachable {
+        json["remote_unreachable"] = json!(unreachable.reason);
+    }
+    json
+}
+
 /// What a run overwrote under `--force`, said out loud. A forced overwrite is
 /// the one thing a run can do that discards somebody else's work, so both
 /// exits report it: the run that stopped afterwards, and the run that
@@ -314,6 +388,65 @@ pub(crate) fn forced_overwrite_notes(forced_overwrites: &[std::path::PathBuf]) -
         forced_overwrites
             .iter()
             .map(|path| format!("- {}", path.display())),
+    );
+    notes
+}
+
+/// What a commit put on the scope for the first time.
+///
+/// Every machine sharing the scope will have these written into its home
+/// directory by its next sync, which is a bigger thing than changing a line —
+/// and a bulk selection can do it without the user having named a single one
+/// of them.
+pub(crate) fn newly_tracked_notes(newly_tracked: &[std::path::PathBuf]) -> Vec<String> {
+    if newly_tracked.is_empty() {
+        return Vec::new();
+    }
+    let mut notes = vec![format!(
+        "dotsync: started tracking {} new file(s) on this scope",
+        newly_tracked.len()
+    )];
+    notes.extend(listed(
+        newly_tracked.iter().map(|path| path.display().to_string()),
+    ));
+    notes
+}
+
+/// At most a handful of lines, then a count. A commit can name hundreds of
+/// files, and a note that scrolls the run's own result off the screen is worse
+/// than a shorter one.
+fn listed(lines: impl ExactSizeIterator<Item = String>) -> Vec<String> {
+    const SHOWN: usize = 5;
+    let total = lines.len();
+    let mut listed = lines
+        .take(SHOWN)
+        .map(|line| format!("- {line}"))
+        .collect::<Vec<_>>();
+    if total > SHOWN {
+        listed.push(format!("- ... and {} more", total - SHOWN));
+    }
+    listed
+}
+
+/// What a named directory matched that the commit left alone.
+///
+/// A bulk selection that recorded less than it matched has to say so: an agent
+/// that names a directory and reads "committed" would otherwise believe a
+/// change reached the scope when another machine's version is still there.
+pub(crate) fn skipped_path_notes(skipped: &[SkippedCommitPath]) -> Vec<String> {
+    if skipped.is_empty() {
+        return Vec::new();
+    }
+    let mut notes = vec![format!(
+        "dotsync: did not record {} file(s) under the paths you named, because this machine has not changed them",
+        skipped.len()
+    )];
+    notes.extend(listed(skipped.iter().map(|skipped| {
+        format!("{} ({})", skipped.path.display(), skipped.state.reason())
+    })));
+    notes.push(
+        "dotsync: run `dotsync` to bring them up to date, or name one exactly to be told what happened to it."
+            .to_string(),
     );
     notes
 }
@@ -342,6 +475,13 @@ fn notes_for_push(push: &PushReport) -> Vec<String> {
                 "dotsync: those scopes are committed here but not published, so the remote does not have this change yet. The next run will try again.".to_string(),
             ]
         }
+        PushReport::Unreachable { scopes, reason } => vec![
+            format!(
+                "dotsync: could not publish {} ({reason})",
+                scopes.join(", ")
+            ),
+            "dotsync: those scopes are committed here and will be published by the next run that reaches the remote.".to_string(),
+        ],
         PushReport::WithheldPausedCascade {
             scopes,
             paused_scope,

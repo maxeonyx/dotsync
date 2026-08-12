@@ -7,13 +7,12 @@ use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{load_config, DotsyncConfig, DotsyncPaths};
+use crate::config::{DotsyncConfig, DotsyncPaths};
 use crate::drift::{classify_home_against_scope, ClassifiedPath, FileState, RecordedFromHome};
 use crate::error::DotsyncError;
 use crate::machine::detect_machine;
-use crate::repo::{
-    fetch_origin, load_repo_direct, pending_push_scopes, push_scope_updates, PushReport,
-};
+use crate::repo::{pending_push_scopes, push_scope_updates, PushReport};
+use crate::session::{in_session, Run, Session};
 
 /// Which drifted home files a run may overwrite.
 ///
@@ -102,21 +101,24 @@ pub(crate) struct SyncState {
 pub async fn sync(
     paths: &DotsyncPaths,
     force: ForceScope,
-) -> Result<SyncCommandReport, DotsyncError> {
-    let repo = load_repo_direct(paths).await?;
-    let _repo = fetch_origin(repo).await?;
-    // Publish before touching home: scope commits left behind by an
-    // interrupted run must reach the remote even if the home sync stops. The
-    // exception is a paused cascade, whose scopes are only half cascaded.
-    let push = match crate::commit::paused_cascade_scope(paths)? {
-        Some(paused_scope) => PushReport::WithheldPausedCascade {
-            scopes: pending_push_scopes(paths).await?,
-            paused_scope,
-        },
-        None => push_scope_updates(paths).await?,
-    };
-    let sync = sync_repo_to_home(paths, force, &RecordedFromHome::default(), None).await?;
-    Ok(SyncCommandReport { sync, push })
+) -> Run<Result<SyncCommandReport, DotsyncError>> {
+    in_session(paths, async |session, _paths| {
+        session.fetch().await?;
+        // Publish before touching home: scope commits left behind by an
+        // interrupted run must reach the remote even if the home sync stops.
+        // The exception is a paused cascade, whose scopes are only half
+        // cascaded.
+        let push = match crate::commit::paused_cascade_scope(session.paths())? {
+            Some(paused_scope) => PushReport::WithheldPausedCascade {
+                scopes: pending_push_scopes(session),
+                paused_scope,
+            },
+            None => push_scope_updates(session).await?,
+        };
+        let sync = sync_repo_to_home(session, force, &RecordedFromHome::default(), None).await?;
+        Ok(SyncCommandReport { sync, push })
+    })
+    .await
 }
 
 pub(crate) fn resolve_current_scope(
@@ -165,23 +167,21 @@ fn write_home_file(
 /// `recorded_from_home` is empty for every caller but the two that have just
 /// written home content into the repo — see `RecordedFromHome`.
 pub(crate) async fn sync_repo_to_home(
-    paths: &DotsyncPaths,
+    session: &Session,
     force: ForceScope,
     recorded_from_home: &RecordedFromHome,
     machine_scope_hint: Option<&str>,
 ) -> Result<SyncReport, DotsyncError> {
-    let config = load_config(paths).await?;
-    let repo = load_repo_direct(paths).await?;
+    let paths = session.paths();
+    let config = session.config();
 
-    let sync_state = load_sync_state(paths, &config)?;
+    let sync_state = load_sync_state(paths, config)?;
     let valid_sync_state = sync_state
         .as_ref()
         .filter(|state| config.graph.parents.contains_key(&state.machine_scope));
-    let current_scope = resolve_current_scope(&config, sync_state.as_ref(), machine_scope_hint)?;
+    let current_scope = resolve_current_scope(config, sync_state.as_ref(), machine_scope_hint)?;
     let classification = classify_home_against_scope(
-        paths,
-        repo.as_ref(),
-        &config,
+        session,
         valid_sync_state,
         &current_scope,
         &BTreeSet::new(),
@@ -227,7 +227,7 @@ pub(crate) async fn sync_repo_to_home(
         }
     }
 
-    save_sync_state(paths, &config, &current_scope, classification.tip.id())?;
+    save_sync_state(paths, config, &current_scope, classification.tip.id())?;
 
     Ok(SyncReport {
         current_scope,

@@ -32,10 +32,27 @@ impl TestHarness {
         }
     }
 
+    /// Puts the remote out of reach, the way a machine off the network finds
+    /// it: the configured URL is unchanged and nothing local is touched, there
+    /// is simply nothing at the other end.
+    fn disconnect_remote(&self) {
+        fs::rename(&self.remote_dir, self.disconnected_remote_dir())
+            .expect("move the remote out of reach");
+    }
+
+    fn reconnect_remote(&self) {
+        fs::rename(self.disconnected_remote_dir(), &self.remote_dir).expect("put the remote back");
+    }
+
+    fn disconnected_remote_dir(&self) -> PathBuf {
+        self.root_dir.join("remote-disconnected.git")
+    }
+
     fn machine(&self, name: &str, os: &str, hostname: &str) -> MachineEnvironment {
         MachineEnvironment::new(
             self.root_dir.join(name),
             self.remote_dir.clone(),
+            self.root_dir.join("git-shim"),
             os,
             hostname,
         )
@@ -46,12 +63,22 @@ struct MachineEnvironment {
     home_dir: PathBuf,
     repo_dir: PathBuf,
     remote_dir: PathBuf,
+    /// Outside the managed home on purpose: a fixture that lived in home would
+    /// show up in anything that reads home, and one of the things dotsync has
+    /// to get right is what it does with files it finds there.
+    shim_dir: PathBuf,
     os: String,
     hostname: String,
 }
 
 impl MachineEnvironment {
-    fn new(root_dir: PathBuf, remote_dir: PathBuf, os: &str, hostname: &str) -> Self {
+    fn new(
+        root_dir: PathBuf,
+        remote_dir: PathBuf,
+        shim_dir: PathBuf,
+        os: &str,
+        hostname: &str,
+    ) -> Self {
         let home_dir = root_dir.join("home");
         let repo_dir = home_dir.join(".local/share/dotsync/repo");
         fs::create_dir_all(&home_dir).expect("create home dir");
@@ -59,6 +86,7 @@ impl MachineEnvironment {
             home_dir,
             repo_dir,
             remote_dir,
+            shim_dir,
             os: os.to_string(),
             hostname: hostname.to_string(),
         }
@@ -82,6 +110,69 @@ impl MachineEnvironment {
         command.env("DOTSYNC_OS", &self.os);
         command.env("DOTSYNC_HOSTNAME", &self.hostname);
         command.output().expect("run dotsync")
+    }
+
+    /// Runs dotsync with a `git` on the front of `PATH` that records every
+    /// invocation, and returns those invocations alongside the output.
+    ///
+    /// dotsync reaches the remote by shelling out to `git` — jj-lib's
+    /// supported fetch and push mechanism, and a documented runtime dependency
+    /// — so counting `git fetch` calls is how many times a run talked to the
+    /// network, observed from outside the binary.
+    fn run_recording_git(&self, command: &str) -> (Output, Vec<String>) {
+        let shim_dir = &self.shim_dir;
+        let log_path = shim_dir.join("git-calls.log");
+        write_file_at(
+            &shim_dir.join("git"),
+            &format!(
+                "#!/bin/sh\necho \"$@\" >> \"$DOTSYNC_TEST_GIT_LOG\"\nexec {} \"$@\"\n",
+                real_git_path().display()
+            ),
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(shim_dir.join("git"), fs::Permissions::from_mode(0o755))
+                .expect("make git shim executable");
+        }
+        if log_path.exists() {
+            fs::remove_file(&log_path).expect("clear git call log");
+        }
+
+        let args = dotsync_args(command);
+        let mut command = Command::new(env!("CARGO_BIN_EXE_dotsync"));
+        command.args(args);
+        command.current_dir(&self.home_dir);
+        command.env("HOME", &self.home_dir);
+        command.env("DOTSYNC_OS", &self.os);
+        command.env("DOTSYNC_HOSTNAME", &self.hostname);
+        command.env("DOTSYNC_TEST_GIT_LOG", &log_path);
+        command.env(
+            "PATH",
+            format!(
+                "{}:{}",
+                shim_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+        let output = command.output().expect("run dotsync");
+
+        let calls = fs::read_to_string(&log_path)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        (output, calls)
+    }
+
+    /// How many times a run asked git to talk to the remote.
+    fn fetches_during(&self, command: &str) -> (Output, usize) {
+        let (output, calls) = self.run_recording_git(command);
+        let fetches = calls
+            .iter()
+            .filter(|call| call.split_whitespace().any(|word| word == "fetch"))
+            .count();
+        (output, fetches)
     }
 
     /// Runs dotsync with no `HOME` in the environment, which is how dotsync
@@ -147,6 +238,20 @@ impl MachineEnvironment {
             .modified()
             .expect("read home file mtime")
     }
+}
+
+/// The real `git`, resolved before any shim goes on `PATH`.
+fn real_git_path() -> PathBuf {
+    let output = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .expect("look up git");
+    assert!(output.status.success(), "{}", render_output(&output));
+    PathBuf::from(
+        String::from_utf8(output.stdout)
+            .expect("git path should be utf-8")
+            .trim(),
+    )
 }
 
 fn test_settings() -> UserSettings {
@@ -445,6 +550,23 @@ fn clone_remote_branch_to(path: &Path, remote_dir: &Path, branch: &str) {
         "git clone failed: {}",
         render_output(&output)
     );
+}
+
+/// Unix-only, like the `pre-receive` hook fixtures: dotsync's Windows story
+/// has its own open questions and no test here pretends to cover them. Gated
+/// inside the body rather than on the function so the suite still compiles
+/// everywhere, which is what CI's Windows build would notice.
+fn symlink_at(target: &Path, link: &Path) {
+    if let Some(parent) = link.parent() {
+        fs::create_dir_all(parent).expect("create parent dir");
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).expect("create symlink");
+    #[cfg(not(unix))]
+    {
+        let _ = (target, link);
+        panic!("symlink fixtures are unix-only");
+    }
 }
 
 fn write_file_at(path: &Path, contents: &str) {
@@ -777,6 +899,46 @@ mx-xps-cy
         render_output(&file_content_output)
     );
     assert_stdout_snapshot(&file_content_output, "[user]\nname = Shared\n");
+}
+
+/// `view` reports on every scope, and the report is one answer about one
+/// moment — so it is one run, and a run fetches once. Fetching per scope also
+/// makes `view` write an operation per scope into the repo's op log, which is
+/// the opposite of the read-only command DESIGN describes.
+#[test]
+fn view_reaches_the_remote_once() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+    add_hyprland_scope(&machine);
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    let (view_output, git_calls) = machine.run_recording_git("dotsync view");
+    assert!(
+        view_output.status.success(),
+        "{}",
+        render_output(&view_output)
+    );
+
+    let fetches = git_calls
+        .iter()
+        .filter(|call| call.split_whitespace().any(|word| word == "fetch"))
+        .count();
+    assert_eq!(
+        fetches, 1,
+        "one `dotsync view` over 4 scopes must fetch once, not once per scope; git was called: {git_calls:?}"
+    );
 }
 
 #[test]
@@ -1144,7 +1306,10 @@ fn continue_without_pause_returns_clear_error() {
         "continue without a paused cascade should return a normal command error\n{}",
         render_output(&continue_output)
     );
-    assert_stderr_snapshot(&continue_output, "dotsync: no paused cascade to continue\n");
+    assert_stderr_snapshot(
+        &continue_output,
+        "dotsync: there is no paused cascade on this machine\n",
+    );
 }
 
 #[test]
@@ -4666,4 +4831,688 @@ dotsync: recorded 1 file(s) over an incoming change, because you passed `--force
 dotsync: committed all and synced 2 file(s)
 ",
     );
+}
+
+// DESIGN.md, "The convergence model": "Offline is just deferred convergence.
+// If fetch fails due to network, dotsync skips it and proceeds against
+// last-known remote state." A machine that cannot reach the remote is in an
+// ordinary state, not a broken one — so no command refuses to run because of
+// it, and every command says which state it is reporting against.
+
+#[test]
+fn read_only_commands_report_against_the_last_fetched_state_when_the_remote_is_unreachable() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    machine.write_file(".bashrc", "export DOTSYNC=edited-here\n");
+    harness.disconnect_remote();
+
+    let status_output = machine.run("dotsync status");
+    assert_eq!(
+        status_output.status.code(),
+        Some(0),
+        "status must report against the last-fetched state rather than fail\n{}",
+        render_output(&status_output)
+    );
+    let status_stderr = String::from_utf8_lossy(&status_output.stderr).into_owned();
+    assert!(
+        status_stderr.contains("could not reach the remote"),
+        "status must say which state it is reporting against\n{status_stderr}"
+    );
+    assert!(
+        status_stderr.contains(".bashrc"),
+        "status must still report the local edit\n{status_stderr}"
+    );
+
+    let diff_output = machine.run("dotsync diff");
+    assert_eq!(
+        diff_output.status.code(),
+        Some(1),
+        "diff must still answer, and still exit 1 for drift\n{}",
+        render_output(&diff_output)
+    );
+    let diff_stderr = String::from_utf8_lossy(&diff_output.stderr).into_owned();
+    assert!(
+        diff_stderr.contains("could not reach the remote"),
+        "diff must say which state it is reporting against\n{diff_stderr}"
+    );
+    assert!(
+        diff_stderr.contains("export DOTSYNC=edited-here"),
+        "diff must still show the drift\n{diff_stderr}"
+    );
+
+    let view_output = machine.run("dotsync view");
+    assert_eq!(
+        view_output.status.code(),
+        Some(0),
+        "view must still list what is checked in\n{}",
+        render_output(&view_output)
+    );
+    assert!(
+        String::from_utf8_lossy(&view_output.stdout).contains(".bashrc"),
+        "{}",
+        render_output(&view_output)
+    );
+    assert!(
+        String::from_utf8_lossy(&view_output.stderr).contains("could not reach the remote"),
+        "{}",
+        render_output(&view_output)
+    );
+
+    let json_output = machine.run("dotsync --output json status");
+    assert_eq!(
+        json_output.status.code(),
+        Some(0),
+        "{}",
+        render_output(&json_output)
+    );
+    let json = parse_stdout_json(&json_output);
+    assert_eq!(json["status"], "ok");
+    assert!(
+        json["remote_unreachable"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "the JSON report must carry why the remote was out of reach\n{}",
+        render_output(&json_output)
+    );
+}
+
+#[test]
+fn work_done_offline_reaches_the_remote_on_the_next_online_run() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    harness.disconnect_remote();
+    machine.write_file(".config/offline.conf", "mode = offline\n");
+
+    let commit_output = machine
+        .run("dotsync --output json commit linux -m 'add offline conf' -- .config/offline.conf");
+    assert_eq!(
+        commit_output.status.code(),
+        Some(0),
+        "a commit made offline is ordinary local-ahead work, not a failure\n{}",
+        render_output(&commit_output)
+    );
+    let commit_stderr = String::from_utf8_lossy(&commit_output.stderr).into_owned();
+    assert!(
+        commit_stderr.contains("could not reach the remote"),
+        "the commit must say it could not reach the remote\n{commit_stderr}"
+    );
+    let commit_json = parse_stdout_json(&commit_output);
+    let unpushed = commit_json["unpushed_scopes"]
+        .as_array()
+        .expect("unpushed_scopes should be an array");
+    assert!(
+        unpushed.iter().any(|scope| scope == "linux"),
+        "the commit must report what did not reach the remote\n{}",
+        render_output(&commit_output)
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "mx-xps-cy", ".config/offline.conf"),
+        "mode = offline\n",
+        "the cascade must land locally even though nothing can be published"
+    );
+
+    // Plain `dotsync` offline is the same story: it syncs home from what is
+    // already here and leaves the unpublished scopes for the next online run.
+    let offline_sync = machine.run("dotsync");
+    assert_eq!(
+        offline_sync.status.code(),
+        Some(0),
+        "plain sync must work offline\n{}",
+        render_output(&offline_sync)
+    );
+
+    harness.reconnect_remote();
+    let online_sync = machine.run("dotsync");
+    assert_eq!(
+        online_sync.status.code(),
+        Some(0),
+        "{}",
+        render_output(&online_sync)
+    );
+    assert!(
+        !String::from_utf8_lossy(&online_sync.stderr).contains("could not reach the remote"),
+        "a run that reached the remote must not claim otherwise\n{}",
+        render_output(&online_sync)
+    );
+    for scope in ["linux", "mx-xps-cy"] {
+        assert_eq!(
+            remote_branch_file_contents(&machine, scope, ".config/offline.conf"),
+            "mode = offline\n",
+            "the next online run must publish what was committed offline on `{scope}`"
+        );
+    }
+}
+
+/// DESIGN.md, "Failure model: no dead ends": every state dotsync can produce
+/// must be one dotsync commands alone can recover from. An init that cannot
+/// reach the remote is the likeliest failure there is — a typo in the URL, no
+/// network yet — and it must not leave behind a repo that the retry refuses to
+/// touch.
+#[test]
+fn an_init_that_could_not_reach_the_remote_can_simply_be_retried() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    harness.disconnect_remote();
+    let failed_init = machine.init();
+    assert_eq!(
+        failed_init.status.code(),
+        Some(1),
+        "init has nothing to work from when it cannot reach the remote\n{}",
+        render_output(&failed_init)
+    );
+    assert!(
+        String::from_utf8_lossy(&failed_init.stderr).contains("could not reach the remote"),
+        "init must say what actually went wrong\n{}",
+        render_output(&failed_init)
+    );
+
+    harness.reconnect_remote();
+    let retried_init = machine.init();
+    assert!(
+        retried_init.status.success(),
+        "the remedy for a failed init is running it again\n{}",
+        render_output(&retried_init)
+    );
+    assert!(
+        machine.file_exists(".config/dotsync/config.toml"),
+        "the retried init must have set this machine up properly"
+    );
+}
+
+/// Naming a directory says "commit what changed under here", which is what a
+/// bare `dotsync commit <scope>` says about the whole machine — so it filters
+/// like one. Naming a path exactly is a claim about that path, and a claim is
+/// what deserves an argument.
+#[test]
+fn a_directory_selection_records_what_this_machine_changed_and_says_what_it_skipped() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    machine_a.write_file(".config/fish/config.fish", "set -g theme dark\n");
+    machine_a.write_file(".config/fish/aliases.fish", "alias ll 'ls -l'\n");
+    let seed = machine_a.run("dotsync commit all -m 'seed fish config' -- .config/fish/");
+    assert!(seed.status.success(), "{}", render_output(&seed));
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+
+    // B publishes a change to one file under that directory. A has not synced
+    // it, and has an edit of its own to a different file under there, plus a
+    // brand new file it wants to add.
+    machine_b.write_file(".config/fish/aliases.fish", "alias ll 'ls -lah'\n");
+    let commit_b = machine_b.run("dotsync commit all -m 'better ll' -- .config/fish/aliases.fish");
+    assert!(commit_b.status.success(), "{}", render_output(&commit_b));
+
+    machine_a.write_file(".config/fish/config.fish", "set -g theme light\n");
+    machine_a.write_file(
+        ".config/fish/functions.fish",
+        "function gs; git status; end\n",
+    );
+
+    // Named exactly, B's file is still refused: that is a claim that home's
+    // copy should win, and it would revert what B published.
+    let named_exactly =
+        machine_a.run("dotsync commit all -m 'take mine' -- .config/fish/aliases.fish");
+    assert_eq!(
+        named_exactly.status.code(),
+        Some(1),
+        "naming a path another machine changed must still be refused\n{}",
+        render_output(&named_exactly)
+    );
+
+    let directory_commit =
+        machine_a.run("dotsync commit all -m 'light theme and functions' -- .config/fish/");
+    assert_eq!(
+        directory_commit.status.code(),
+        Some(0),
+        "a directory selection must commit what changed under it rather than refuse\n{}",
+        render_output(&directory_commit)
+    );
+    let stderr = String::from_utf8_lossy(&directory_commit.stderr).into_owned();
+    assert!(
+        stderr.contains(".config/fish/aliases.fish"),
+        "the run must say which file under the directory it left alone\n{stderr}"
+    );
+
+    assert_eq!(
+        remote_branch_file_contents(&machine_a, "all", ".config/fish/config.fish"),
+        "set -g theme light\n",
+        "the edit this machine made must be recorded"
+    );
+    assert_eq!(
+        remote_branch_file_contents(&machine_a, "all", ".config/fish/functions.fish"),
+        "function gs; git status; end\n",
+        "a new file under a named directory must still be added"
+    );
+    assert_eq!(
+        remote_branch_file_contents(&machine_a, "all", ".config/fish/aliases.fish"),
+        "alias ll 'ls -lah'\n",
+        "the other machine's published change must survive the directory commit"
+    );
+    assert_eq!(
+        machine_a.read_file(".config/fish/aliases.fish"),
+        "alias ll 'ls -lah'\n",
+        "and the sync that follows must bring this machine up to it"
+    );
+}
+
+/// A run that stops still has to say which state it stopped against. Drift is
+/// the commonest stop there is, and its advice is `--force` — overwrite home
+/// with the repo — so a reader who is not told the repo snapshot is however
+/// old this machine's last fetch was cannot judge that advice.
+#[test]
+fn a_run_that_stops_offline_still_says_the_remote_was_out_of_reach() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+    machine.write_file(".bashrc", "export DOTSYNC=one\n");
+    let commit_output = machine.run("dotsync commit all -m 'add bashrc' -- .bashrc");
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
+
+    machine.write_file(".bashrc", "export DOTSYNC=edited\n");
+    harness.disconnect_remote();
+
+    let sync_output = machine.run("dotsync --output json");
+    assert_eq!(
+        sync_output.status.code(),
+        Some(1),
+        "drift still stops the run\n{}",
+        render_output(&sync_output)
+    );
+    assert!(
+        String::from_utf8_lossy(&sync_output.stderr).contains("could not reach the remote"),
+        "a stop must say which state it stopped against\n{}",
+        render_output(&sync_output)
+    );
+    assert!(
+        parse_stdout_json(&sync_output)["remote_unreachable"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "the error JSON must carry why the remote was out of reach\n{}",
+        render_output(&sync_output)
+    );
+
+    // Same for a command that stops before it does anything at all: the run
+    // still happened, and it still could not see the remote.
+    let commit_output =
+        machine.run("dotsync --output json commit nosuchscope -m 'nope' -- .bashrc");
+    assert_eq!(
+        commit_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&commit_output)
+    );
+    assert!(
+        String::from_utf8_lossy(&commit_output.stderr).contains("could not reach the remote"),
+        "a refused commit must say it too\n{}",
+        render_output(&commit_output)
+    );
+    assert!(
+        parse_stdout_json(&commit_output)["remote_unreachable"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "{}",
+        render_output(&commit_output)
+    );
+}
+
+/// Naming a directory is how new files get onto a scope in bulk, and adding a
+/// file to a shared scope is the one thing in a commit that every other
+/// machine will then have written into its home. A run that does it silently
+/// reads exactly like a run that changed one line.
+#[test]
+fn a_commit_says_which_files_it_started_tracking() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_file(".config/fish/config.fish", "set -g fish_greeting off\n");
+    machine.write_file(".config/fish/aliases.fish", "alias ll 'ls -l'\n");
+    let commit_output =
+        machine.run("dotsync --output json commit all -m 'add fish config' -- .config/fish/");
+    assert_eq!(
+        commit_output.status.code(),
+        Some(0),
+        "{}",
+        render_output(&commit_output)
+    );
+
+    let newly_tracked = parse_stdout_json(&commit_output)["newly_tracked"]
+        .as_array()
+        .expect("newly_tracked should be an array")
+        .iter()
+        .filter_map(|path| path.as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        newly_tracked,
+        vec![
+            ".config/fish/aliases.fish".to_string(),
+            ".config/fish/config.fish".to_string()
+        ],
+        "a commit must report the files it put on the scope for the first time\n{}",
+        render_output(&commit_output)
+    );
+    let stderr = String::from_utf8_lossy(&commit_output.stderr).into_owned();
+    assert!(
+        stderr.contains(".config/fish/aliases.fish"),
+        "and say so in words too\n{stderr}"
+    );
+
+    // Editing a file that is already on the scope is not starting to track it.
+    machine.write_file(".config/fish/config.fish", "set -g fish_greeting on\n");
+    let edit_output =
+        machine.run("dotsync --output json commit all -m 'flip greeting' -- .config/fish/");
+    assert_eq!(
+        edit_output.status.code(),
+        Some(0),
+        "{}",
+        render_output(&edit_output)
+    );
+    assert_eq!(
+        parse_stdout_json(&edit_output)["newly_tracked"]
+            .as_array()
+            .expect("newly_tracked should be an array")
+            .len(),
+        0,
+        "an edit to a tracked file is not a new file\n{}",
+        render_output(&edit_output)
+    );
+}
+
+/// `dotsync commit all -m msg -- .` reads like "commit everything", and what
+/// it actually does is walk the whole home directory and publish it: ssh keys,
+/// `.netrc`, browser profiles, anything. Nothing about the run says so, and
+/// once it is on the remote it is on every machine that shares the scope.
+#[test]
+fn a_selection_that_names_the_whole_home_directory_is_refused() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_file(".ssh/id_ed25519", "PRIVATE KEY\n");
+    machine.write_file(".netrc", "machine example.com login me password hunter2\n");
+    machine.write_file(".bashrc", "export DOTSYNC=1\n");
+
+    for selection in [".", "./"] {
+        let output = machine.run(&format!(
+            "dotsync commit all -m 'everything' -- {selection}"
+        ));
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "`{selection}` names the whole home directory and must be refused\n{}",
+            render_output(&output)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            stderr.contains("home directory"),
+            "the refusal must say what was named\n{stderr}"
+        );
+    }
+
+    let absolute = machine.run(&format!(
+        "dotsync commit all -m 'everything' -- {}",
+        machine.home_dir.display()
+    ));
+    assert_eq!(
+        absolute.status.code(),
+        Some(1),
+        "naming home by its absolute path must be refused too\n{}",
+        render_output(&absolute)
+    );
+
+    assert!(
+        !bookmark_has_file(&machine, "all", ".ssh/id_ed25519"),
+        "no refused sweep may have recorded a private key"
+    );
+    assert!(!bookmark_has_file(&machine, "all", ".netrc"));
+
+    // Naming a real directory still works, and still only reaches under it.
+    machine.write_file(".config/app/settings.toml", "theme = \"dark\"\n");
+    let scoped = machine.run("dotsync commit all -m 'app settings' -- .config/app/");
+    assert!(scoped.status.success(), "{}", render_output(&scoped));
+    assert!(bookmark_has_file(
+        &machine,
+        "all",
+        ".config/app/settings.toml"
+    ));
+    assert!(!bookmark_has_file(&machine, "all", ".netrc"));
+}
+
+/// Shells complete directories with a trailing separator, so agents and people
+/// both type them. `.config/fish/` already worked; `.bashrc/` matched the
+/// tracked file by path components and then failed inside the commit, leaking
+/// jj's own vocabulary at a point where nothing is left to teach.
+#[test]
+fn a_trailing_separator_on_a_named_file_is_just_a_trailing_separator() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_file(".bashrc", "export DOTSYNC=one\n");
+    let added = machine.run("dotsync commit all -m 'add bashrc' -- .bashrc");
+    assert!(added.status.success(), "{}", render_output(&added));
+
+    machine.write_file(".bashrc", "export DOTSYNC=two\n");
+    let with_slash = machine.run("dotsync commit all -m 'edit bashrc' -- .bashrc/");
+    assert!(
+        with_slash.status.success(),
+        "a trailing separator must not stop the commit\n{}",
+        render_output(&with_slash)
+    );
+    assert!(
+        !String::from_utf8_lossy(&with_slash.stderr).contains("jj"),
+        "and must never leak jj's vocabulary\n{}",
+        render_output(&with_slash)
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "all", ".bashrc"),
+        "export DOTSYNC=two\n",
+        "the file it named is the file it should record"
+    );
+
+    // `./` in front says nothing either.
+    machine.write_file(".bashrc", "export DOTSYNC=three\n");
+    let with_prefix = machine.run("dotsync commit all -m 'edit again' -- ./.bashrc");
+    assert!(
+        with_prefix.status.success(),
+        "{}",
+        render_output(&with_prefix)
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "all", ".bashrc"),
+        "export DOTSYNC=three\n"
+    );
+}
+
+/// One fetch per run is a property of having a session, not a habit of the
+/// code that happens to hold today. `view` grew an N+1 fetch without anyone
+/// noticing because nothing counted, and every command is one refactor away
+/// from the same thing.
+#[test]
+fn status_diff_sync_and_commit_each_reach_the_remote_once() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+    add_hyprland_scope(&machine);
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+    machine.write_file(".bashrc", "export DOTSYNC=1\n");
+
+    for command in [
+        "dotsync status",
+        "dotsync diff",
+        "dotsync",
+        "dotsync commit all -m 'add bashrc' -- .bashrc",
+    ] {
+        let (output, fetches) = machine.fetches_during(command);
+        assert_eq!(
+            fetches,
+            1,
+            "`{command}` must reach the remote exactly once\n{}",
+            render_output(&output)
+        );
+    }
+}
+
+/// The home-root refusal is a check on the path you typed, and a symlink is a
+/// way of typing a different path. `selflink -> $HOME` walks all of home under
+/// an aliased prefix, which also slips past the repo-root and sync-state
+/// guards, because those are prefix tests on the path as written.
+#[test]
+fn a_symlink_pointing_at_home_cannot_be_used_to_sweep_it() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_file(".ssh/id_ed25519", "PRIVATE KEY\n");
+    machine.write_file(".netrc", "machine example.com login me password hunter2\n");
+    symlink_at(&machine.home_dir, &machine.home_dir.join("selflink"));
+
+    let output = machine.run("dotsync commit all -m 'sweep' -- selflink/");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a symlink to home must not be a way to commit all of home\n{}",
+        render_output(&output)
+    );
+
+    let tracked = machine.run("dotsync view --scope all");
+    assert!(tracked.status.success(), "{}", render_output(&tracked));
+    let tracked = String::from_utf8_lossy(&tracked.stdout).into_owned();
+    for forbidden in ["selflink", "id_ed25519", ".netrc", ".jj", "sync-state"] {
+        assert!(
+            !tracked.contains(forbidden),
+            "`{forbidden}` must never reach a scope\n{tracked}"
+        );
+    }
+}
+
+/// Dotsync records the content at the path you name, and every machine on the
+/// scope writes that content back to the same path. A symlink names something
+/// else — which may live outside home entirely — so until dotsync has an
+/// answer for what that should mean, naming one is refused rather than
+/// guessed at. See PLAN.md §1.5.
+#[test]
+fn a_symlinked_selection_path_is_refused_whether_it_is_a_file_or_a_directory() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    // Config kept outside home and linked into place, which is a real pattern.
+    let outside = machine
+        .home_dir
+        .parent()
+        .expect("home has a parent")
+        .join("elsewhere");
+    write_file_at(&outside.join("nvim/init.lua"), "vim.opt.number = true\n");
+    write_file_at(&outside.join("vimrc"), "set number\n");
+    symlink_at(
+        &outside.join("nvim"),
+        &machine.home_dir.join(".config/nvim"),
+    );
+    symlink_at(&outside.join("vimrc"), &machine.home_dir.join(".vimrc"));
+
+    for selection in [".config/nvim/", ".vimrc"] {
+        let output = machine.run(&format!("dotsync commit all -m 'link' -- {selection}"));
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "`{selection}` is a symlink and must be refused\n{}",
+            render_output(&output)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            stderr.contains("symlink"),
+            "the refusal must say what it found\n{stderr}"
+        );
+    }
+
+    // A path that reaches a real file through a symlinked parent is the same
+    // claim wearing a different hat.
+    let through = machine.run("dotsync commit all -m 'link' -- .config/nvim/init.lua");
+    assert_eq!(
+        through.status.code(),
+        Some(1),
+        "a path that resolves through a symlink must be refused too\n{}",
+        render_output(&through)
+    );
+
+    // Real files next to them are unaffected.
+    machine.write_file(".bashrc", "export DOTSYNC=1\n");
+    let real = machine.run("dotsync commit all -m 'real file' -- .bashrc");
+    assert!(real.status.success(), "{}", render_output(&real));
 }

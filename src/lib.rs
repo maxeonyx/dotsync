@@ -8,6 +8,7 @@ mod inspect;
 mod machine;
 mod repo;
 mod scope_graph;
+mod session;
 mod status;
 mod sync;
 
@@ -20,11 +21,10 @@ pub use crate::config::DotsyncPaths;
 pub use crate::drift::FileState;
 pub use crate::error::{
     CommitPathProblem, DotsyncError, ErrorReport, RefusedCommitPath, RejectedCommitPath,
+    SkippedCommitPath,
 };
-pub use crate::inspect::{
-    diff_home, list_scope_tree, list_scopes, read_scope_file, DiffReport, FileReport, ScopeInfo,
-    ScopeListReport, TreeReport,
-};
+pub use crate::inspect::{diff_home, view, DiffReport, ScopeInfo, ViewReport};
 pub use crate::repo::PushReport;
+pub use crate::session::{Run, UnreachableRemote};
 pub use crate::status::{status, FileChange, StatusReport};
 pub use crate::sync::{sync, FileDrift, ForceScope, SyncCommandReport, SyncReport};
