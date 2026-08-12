@@ -35,6 +35,12 @@ Concretely:
 5. **Push order minimizes the stranded window.** Push scope updates as soon as the cascade transaction lands, before the home sync (which can legitimately stop on drift). A drift stop must not strand unpushed commits.
 6. **Idempotent resume.** For every mutation sequence (commit tx → push → sync → sync-state save), every interruption point gets a defined convergent rerun. Kill-in-the-middle tests enforce this.
 
+## Priorities and constraints (Max, 2026-08-12)
+
+- **Prioritise conceptual simplification opportunities & the removal of bad modelling & incidental complexity. Anything that is robustly wrong or unnecessary is explicitly in scope to remove.** In practice: when a work item supersedes a mechanism, delete the old mechanism in the same item rather than layering; every review pass explicitly hunts for removal opportunities; known scaffolding (dead-end `NotImplemented` error, full home-dir scan in the commit path, the index-paired fake diff, the pause state file) gets deleted at the first item that touches it.
+- **Dotfiles repo history**: if a change would need to modify the live dotfiles repo history, try to find another way first, or stop and tell Max — he'll have a separate agent do only that. dotsync agents never mutate the hidden repo or the remote dotfiles history by hand.
+- **Work within the agent-tools workspace process** (`../../AGENTS.md`): improve process first, loop-based development, reviewer/implementer separation (the agent that made a fix cannot attest it), and after pushing dotsync main: update the workspace submodule pointer, regenerate the umbrella version file, and observe CI — reconcile it against intent, never chase green.
+
 ## Work plan (ordered)
 
 The 2026-08-12 design review (with Max) rewrote DESIGN.md to specify the convergence model, conflicts-as-commits, the resolution surface, the failure/offline model, and the minimum-state principle. The work below implements that design.
