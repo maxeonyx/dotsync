@@ -5281,3 +5281,55 @@ fn a_selection_that_names_the_whole_home_directory_is_refused() {
     ));
     assert!(!bookmark_has_file(&machine, "all", ".netrc"));
 }
+
+/// Shells complete directories with a trailing separator, so agents and people
+/// both type them. `.config/fish/` already worked; `.bashrc/` matched the
+/// tracked file by path components and then failed inside the commit, leaking
+/// jj's own vocabulary at a point where nothing is left to teach.
+#[test]
+fn a_trailing_separator_on_a_named_file_is_just_a_trailing_separator() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_file(".bashrc", "export DOTSYNC=one\n");
+    let added = machine.run("dotsync commit all -m 'add bashrc' -- .bashrc");
+    assert!(added.status.success(), "{}", render_output(&added));
+
+    machine.write_file(".bashrc", "export DOTSYNC=two\n");
+    let with_slash = machine.run("dotsync commit all -m 'edit bashrc' -- .bashrc/");
+    assert!(
+        with_slash.status.success(),
+        "a trailing separator must not stop the commit\n{}",
+        render_output(&with_slash)
+    );
+    assert!(
+        !String::from_utf8_lossy(&with_slash.stderr).contains("jj"),
+        "and must never leak jj's vocabulary\n{}",
+        render_output(&with_slash)
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "all", ".bashrc"),
+        "export DOTSYNC=two\n",
+        "the file it named is the file it should record"
+    );
+
+    // `./` in front says nothing either.
+    machine.write_file(".bashrc", "export DOTSYNC=three\n");
+    let with_prefix = machine.run("dotsync commit all -m 'edit again' -- ./.bashrc");
+    assert!(
+        with_prefix.status.success(),
+        "{}",
+        render_output(&with_prefix)
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "all", ".bashrc"),
+        "export DOTSYNC=three\n"
+    );
+}
