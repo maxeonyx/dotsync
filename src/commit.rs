@@ -23,7 +23,8 @@ use crate::cascade::{
 use crate::config::{internal_repo_paths, DotsyncPaths, ALL_SCOPE, DOTSYNC_CONFIG_RELATIVE_PATH};
 use crate::drift::{classify_home_against_scope, read_home_bytes, FileState, RecordedFromHome};
 use crate::error::{
-    CommitPathProblem, DotsyncError, RefusedCommitPath, RejectedCommitPath, SkippedCommitPath,
+    CommitPathProblem, DotsyncError, RefusedCommitPath, RejectedCommitPath, SkipReason,
+    SkippedCommitPath,
 };
 use crate::repo::{
     collect_managed_tree_entries, load_scope_commit, push_scope_updates, read_tree_entry_bytes,
@@ -534,7 +535,10 @@ async fn select_changes_to_record(
     // bare commit is not simply the same thing over a wider set. Naming a path
     // exactly says something stronger again about that one path, and that
     // claim is argued with below.
-    let mut skipped = Vec::new();
+    let mut skipped = selection
+        .as_ref()
+        .map(|selection| selection.skipped.clone())
+        .unwrap_or_default();
     let selected_paths: Vec<PathBuf> = match &selection {
         None => classification
             .paths
@@ -551,7 +555,7 @@ async fn select_changes_to_record(
                 if !options.force && !selection.named.contains(relative) && state.blocks_commit() {
                     skipped.push(SkippedCommitPath {
                         path: relative.clone(),
-                        state,
+                        reason: SkipReason::NotChangedHere(state),
                     });
                     continue;
                 }
@@ -806,13 +810,16 @@ fn expand_selection_paths(
         let mut matched = BTreeSet::new();
         if is_directory_selection {
             if home_path.exists() {
-                collect_home_directory_files(
-                    &home,
-                    &home_path,
-                    &mut matched,
+                let mut walk = DirectoryWalk {
+                    home_root: &home,
+                    repo_root: &repo_root,
                     internal_paths,
-                    &repo_root,
-                )?;
+                    matched: BTreeSet::new(),
+                    skipped: Vec::new(),
+                };
+                walk.walk(&home_path)?;
+                matched.extend(walk.matched);
+                selected.skipped.extend(walk.skipped);
             }
             matched.extend(
                 target_entries
@@ -868,6 +875,10 @@ fn expand_selection_paths(
 struct SelectedPaths {
     named: BTreeSet<PathBuf>,
     under_directory: BTreeSet<PathBuf>,
+    /// Paths a named directory matched that dotsync cannot record whatever
+    /// their content says — links and things that are not files. The rest of
+    /// the skipping is decided later, by the classification.
+    skipped: Vec<SkippedCommitPath>,
 }
 
 impl SelectedPaths {
@@ -970,64 +981,95 @@ impl Canonical {
     }
 }
 
-/// Every real file at or under `current`, as paths relative to home.
+/// Walks a named directory: every real file under it, and why it left the rest.
 ///
-/// Symlinks are skipped rather than followed: `DirEntry::file_type` does not
-/// follow them, so a linked directory is neither recursed into nor recorded.
-/// The repo-root and internal-path guards below compare resolved paths, so
-/// that no route into this walk — however the caller's path was spelled — can
-/// reach dotsync's own state.
-fn collect_home_directory_files(
-    home_root: &Canonical,
-    current: &Path,
-    expanded: &mut BTreeSet<PathBuf>,
-    internal_paths: &BTreeSet<PathBuf>,
-    repo_root: &Canonical,
-) -> Result<(), DotsyncError> {
-    for entry in fs::read_dir(current).map_err(|source| DotsyncError::Io {
-        path: current.to_path_buf(),
-        source,
-    })? {
-        let entry = entry.map_err(|source| DotsyncError::Io {
+/// Symlinks are not followed — `DirEntry::file_type` does not follow them, so a
+/// linked directory is neither recursed into nor recorded — and they are not
+/// silent either. A commit that quietly dropped a link from a directory it was
+/// told to record would report `newly_tracked` for everything beside it, and an
+/// agent reading that has been told the directory reached the scope.
+///
+/// The repo-root and internal-path guards compare resolved paths, so that no
+/// route into this walk — however the caller's path was spelled — can reach
+/// dotsync's own state. Those two are the deliberate silences: they are never
+/// committable by any spelling, and naming them exactly is refused out loud.
+struct DirectoryWalk<'a> {
+    home_root: &'a Canonical,
+    repo_root: &'a Canonical,
+    internal_paths: &'a BTreeSet<PathBuf>,
+    matched: BTreeSet<PathBuf>,
+    skipped: Vec<SkippedCommitPath>,
+}
+
+impl DirectoryWalk<'_> {
+    fn walk(&mut self, current: &Path) -> Result<(), DotsyncError> {
+        // Once per directory rather than once per entry, and for links as well
+        // as files: a link cannot be resolved to learn its own name, because
+        // resolving it is exactly what dotsync must not do here.
+        let resolved_dir = current.canonicalize().map_err(|source| DotsyncError::Io {
             path: current.to_path_buf(),
             source,
         })?;
-        let path = entry.path();
-        let file_type = entry.file_type().map_err(|source| DotsyncError::Io {
-            path: path.clone(),
-            source,
-        })?;
 
-        if file_type.is_dir() {
-            // Never recurse into the dotsync repo directory itself
-            if repo_root.contains(&path) {
+        for entry in fs::read_dir(current).map_err(|source| DotsyncError::Io {
+            path: current.to_path_buf(),
+            source,
+        })? {
+            let entry = entry.map_err(|source| DotsyncError::Io {
+                path: current.to_path_buf(),
+                source,
+            })?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|source| DotsyncError::Io {
+                path: path.clone(),
+                source,
+            })?;
+
+            if file_type.is_dir() {
+                // Never recurse into the dotsync repo directory itself
+                if self.repo_root.contains(&path) {
+                    continue;
+                }
+                self.walk(&path)?;
                 continue;
             }
-            collect_home_directory_files(home_root, &path, expanded, internal_paths, repo_root)?;
-            continue;
+
+            // Relative to home as the filesystem has it, so that a walk which
+            // started somewhere aliased still names files the way every other
+            // part of dotsync does — or names nothing, if it left home
+            // entirely.
+            let Ok(relative) = resolved_dir
+                .join(entry.file_name())
+                .strip_prefix(self.home_root.path())
+                .map(Path::to_path_buf)
+            else {
+                continue;
+            };
+            if self.internal_paths.contains(&relative) || self.repo_root.contains(&path) {
+                continue;
+            }
+
+            if file_type.is_symlink() {
+                self.skipped.push(SkippedCommitPath {
+                    path: relative,
+                    reason: SkipReason::Symlink {
+                        resolves_to: fs::read_link(&path).ok(),
+                    },
+                });
+                continue;
+            }
+            if !file_type.is_file() {
+                self.skipped.push(SkippedCommitPath {
+                    path: relative,
+                    reason: SkipReason::NotARegularFile,
+                });
+                continue;
+            }
+            self.matched.insert(relative);
         }
 
-        if !file_type.is_file() {
-            continue;
-        }
-
-        // Relative to home as the filesystem has it, so that a walk which
-        // started somewhere aliased still names files the way every other part
-        // of dotsync does — or names nothing, if it left home entirely.
-        let Ok(resolved) = path.canonicalize() else {
-            continue;
-        };
-        let Ok(relative) = resolved.strip_prefix(home_root.path()) else {
-            continue;
-        };
-        let relative = relative.to_path_buf();
-        if internal_paths.contains(&relative) || repo_root.contains(&path) {
-            continue;
-        }
-        expanded.insert(relative);
+        Ok(())
     }
-
-    Ok(())
 }
 
 fn path_has_prefix(path: &Path, prefix: &Path) -> bool {

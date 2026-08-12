@@ -1,7 +1,7 @@
 use crate::{HumanOutput, SuccessOutput, UsageError};
 use dotsync::{
-    DotsyncError, ErrorReport, FileChange, FileDrift, FileState, PushReport, SkippedCommitPath,
-    SyncReport, UnreachableRemote,
+    DotsyncError, ErrorReport, FileChange, FileDrift, FileState, PushReport, SkipReason,
+    SkippedCommitPath, SyncReport, UnreachableRemote,
 };
 use serde_json::json;
 use similar::TextDiff;
@@ -61,10 +61,19 @@ pub(crate) fn changes_json(changes: &[FileChange]) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// The same object a changed file gets, because "why is this path not in the
+/// commit" is the same question `status` answers about a file — and a reason
+/// that is about the path rather than its content is still a reason.
 pub(crate) fn skipped_paths_json(skipped: &[SkippedCommitPath]) -> Vec<serde_json::Value> {
     skipped
         .iter()
-        .map(|skipped| change_json(&skipped.path, skipped.state))
+        .map(|skipped| {
+            json!({
+                "path": display_path(&skipped.path),
+                "state": skipped.reason.code(),
+                "reason": skipped.reason.explain(),
+            })
+        })
         .collect()
 }
 
@@ -521,16 +530,33 @@ pub(crate) fn skipped_path_notes(skipped: &[SkippedCommitPath]) -> Vec<String> {
         return Vec::new();
     }
     let mut notes = vec![format!(
-        "dotsync: did not record {} file(s) under the paths you named, because this machine has not changed them",
+        "dotsync: did not record {} file(s) under the paths you named",
         skipped.len()
     )];
     notes.extend(listed(skipped.iter().map(|skipped| {
-        format!("{} ({})", skipped.path.display(), skipped.state.reason())
+        format!("{} ({})", skipped.path.display(), skipped.reason.explain())
     })));
-    notes.push(
-        "dotsync: run `dotsync` to bring them up to date, or name one exactly to be told what happened to it."
-            .to_string(),
-    );
+    // One line of advice per kind of skip that has any, because the remedies
+    // are not the same: a file another machine changed is a sync away, and a
+    // link is not.
+    if skipped
+        .iter()
+        .any(|skipped| matches!(skipped.reason, SkipReason::NotChangedHere(_)))
+    {
+        notes.push(
+            "dotsync: run `dotsync` to bring those up to date, or name one exactly to be told what happened to it."
+                .to_string(),
+        );
+    }
+    if skipped
+        .iter()
+        .any(|skipped| matches!(skipped.reason, SkipReason::Symlink { .. }))
+    {
+        notes.push(
+            "dotsync: a link cannot be recorded on a scope; move the file it points at into home if you want it managed."
+                .to_string(),
+        );
+    }
     notes
 }
 

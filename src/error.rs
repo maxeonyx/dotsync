@@ -47,8 +47,7 @@ pub struct RefusedCommitPath {
     pub state: FileState,
 }
 
-/// One path a named directory matched that the commit left out, because home
-/// holds no change of this machine's own at it.
+/// One path a named directory matched that the commit left out.
 ///
 /// Not an error and not a refusal: the run succeeds, and this is what it has
 /// to say about what it did not do — so it is reported alongside the result
@@ -56,7 +55,56 @@ pub struct RefusedCommitPath {
 #[derive(Debug, Clone)]
 pub struct SkippedCommitPath {
     pub path: PathBuf,
-    pub state: FileState,
+    pub reason: SkipReason,
+}
+
+/// Why a bulk selection left a path alone.
+#[derive(Debug, Clone)]
+pub enum SkipReason {
+    /// Home holds no change of this machine's own at the path; the state says
+    /// which of the ways that happened.
+    NotChangedHere(FileState),
+    /// The path is a symlink, or a link to a directory. Dotsync records the
+    /// content it finds at the path you name and every machine on the scope
+    /// writes that content back to that same path, and it has no answer yet
+    /// for what a link should mean under that rule — see the open question in
+    /// PLAN.md. Refused when named exactly, reported when merely matched.
+    Symlink { resolves_to: Option<PathBuf> },
+    /// A socket, a device, a fifo: something with no file content to record.
+    NotARegularFile,
+}
+
+impl SkipReason {
+    /// The code an agent branches on, in the same field as a file's state
+    /// everywhere else — because "why is this file not in the commit" is one
+    /// question whether the answer is about content or about the path.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotChangedHere(state) => state.code(),
+            Self::Symlink { .. } => "symlink",
+            Self::NotARegularFile => "not_a_regular_file",
+        }
+    }
+
+    /// The same thing in words, as a phrase that reads after a path.
+    pub fn explain(&self) -> String {
+        match self {
+            Self::NotChangedHere(state) => state.reason().to_string(),
+            Self::Symlink {
+                resolves_to: Some(target),
+            } => format!(
+                "a symlink to {}, and dotsync records the content it finds at the path you name",
+                target.display()
+            ),
+            Self::Symlink { resolves_to: None } => {
+                "a symlink, and dotsync records the content it finds at the path you name"
+                    .to_string()
+            }
+            Self::NotARegularFile => {
+                "not a regular file, so there is no content to record".to_string()
+            }
+        }
+    }
 }
 
 impl RefusedCommitPath {
