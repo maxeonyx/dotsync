@@ -131,11 +131,20 @@ pub(crate) fn render_error_json(error: &ErrorReport) -> serde_json::Value {
     })
 }
 
+/// A usage error in the shape every other error has.
+///
+/// The three collections are always empty here — a run that never started
+/// found no state, overwrote nothing and stopped on no drift — but they are
+/// present, because "every error payload has one shape" is only useful to a
+/// caller if it is true of the first error it ever meets.
 pub(crate) fn render_usage_error_json(error: &UsageError) -> serde_json::Value {
     json!({
         "status": "error",
         "error": "usage",
         "message": error.message,
+        "current_state": Vec::<String>::new(),
+        "drifts": Vec::<serde_json::Value>::new(),
+        "forced_overwrites": Vec::<String>::new(),
     })
 }
 

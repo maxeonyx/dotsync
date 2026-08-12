@@ -325,7 +325,7 @@ async fn main() {
         Ok(cli) => cli,
         Err(error) => std::process::exit(emit_clap_error(error)),
     };
-    let output_format = cli.output_format;
+    let output_format = output_format_of(&cli);
     let outcome = match Action::try_from_cli(cli, detect_cli_context()) {
         Ok(action) => dispatch(action).await,
         Err(error) => Ok(CliOutput::without_run(OutputKind::Usage(error))),
@@ -397,6 +397,22 @@ fn emit_clap_error(error: clap::Error) -> i32 {
         );
     }
     error.exit_code()
+}
+
+/// Which format this run answers in, including when clap could not tell.
+///
+/// `external_subcommand` — the arm that catches an unknown command so dotsync
+/// can say so in its own words — swallows every argument after it, `--output`
+/// included. So `dotsync bogus --output json` parsed the flag into the unknown
+/// command's arguments and left `output_format` at its default, and the run
+/// printed nothing at all on stdout: an empty stdout with exit 2, which is
+/// what a crash looks like. Reading argv is the same fallback clap's own parse
+/// failures already need, for the same reason.
+fn output_format_of(cli: &Cli) -> OutputFormat {
+    match cli.command {
+        Some(Command::Unknown(_)) => output_format_from_args(),
+        _ => cli.output_format,
+    }
 }
 
 fn output_format_from_args() -> OutputFormat {
