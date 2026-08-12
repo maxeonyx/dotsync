@@ -49,6 +49,6 @@ When preparing a clone for local release work, set `git config core.hooksPath .g
 ```bash
 gh release download <tag> --repo maxeonyx/dotsync --pattern 'dotsync-x86_64-linux' --dir /tmp/ --clobber
 chmod +x /tmp/dotsync-x86_64-linux
-sudo cp /tmp/dotsync-x86_64-linux /usr/local/sbin/dotsync
+cp /tmp/dotsync-x86_64-linux ~/.local/bin/dotsync
 dotsync --version  # verify
 ```
