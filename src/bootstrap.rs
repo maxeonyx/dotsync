@@ -10,8 +10,8 @@ use crate::cascade::{
     build_cascade_plan, execute_cascade_steps, CascadeCommand, CascadeOutcome, ScopeHeads,
 };
 use crate::config::{
-    config_with_scopes, default_sync_state_relative_path, load_config, load_config_text,
-    repo_config_path, write_config, DotsyncPaths, NewScope, ScopeKind, ALL_SCOPE,
+    config_with_added_scopes, default_sync_state_relative_path, load_config, load_config_text,
+    new_config, repo_config_path, write_config, DotsyncPaths, NewScope, ScopeKind, ALL_SCOPE,
 };
 use crate::drift::RecordedFromHome;
 use crate::error::{jj_error, DotsyncError};
@@ -103,7 +103,7 @@ async fn create_repo_and_join(
     // repo handle directly.
     let remote_empty = repo.view().all_remote_bookmarks().next().is_none();
     let (current_scope, repo) = if remote_empty {
-        bootstrap_empty_remote(paths, repo, &identity).await?
+        bootstrap_empty_remote(repo, &identity).await?
     } else {
         join_existing_remote(paths, repo, &identity).await?
     };
@@ -156,17 +156,14 @@ fn scopes_to_create(
 }
 
 pub(crate) async fn bootstrap_empty_remote(
-    paths: &DotsyncPaths,
     repo: std::sync::Arc<jj_lib::repo::ReadonlyRepo>,
     identity: &MachineIdentity,
 ) -> Result<(String, std::sync::Arc<jj_lib::repo::ReadonlyRepo>), DotsyncError> {
     let root_commit = repo.store().root_commit();
-    let config_text = config_with_scopes(
-        None,
+    let config_text = new_config(
         &PathBuf::from(default_sync_state_relative_path()),
         &scopes_to_create(identity, &HashMap::new()),
-        &repo_config_path(paths),
-    )?;
+    );
 
     let mut tx = repo.start_transaction();
     let config_tree = write_config(tx.repo_mut(), &root_commit.tree(), &config_text).await?;
@@ -227,9 +224,8 @@ pub(crate) async fn join_existing_remote(
     // not a re-rendering of the graph parsed out of it: the comments beside
     // the scopes are what an agent reads to choose one, and they do not
     // survive a round trip through the graph.
-    let updated_text = config_with_scopes(
-        Some(&load_config_text(paths, repo.as_ref()).await?),
-        &config.sync_state_relative_path,
+    let updated_text = config_with_added_scopes(
+        &load_config_text(paths, repo.as_ref()).await?,
         &new_scopes,
         &repo_config_path(paths),
     )?;

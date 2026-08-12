@@ -118,38 +118,66 @@ impl NewScope {
     }
 }
 
-/// The config file with `new_scopes` added, keeping everything the existing
-/// file already said.
+/// A config file for a machine joining a remote that has none: the header, the
+/// scopes this machine needs, and where its sync state lives.
+pub(crate) fn new_config(sync_state_relative_path: &Path, scopes: &[NewScope]) -> String {
+    let mut document = DocumentMut::new();
+
+    let mut scope_table = Table::new();
+    scope_table.decor_mut().set_prefix(CONFIG_HEADER);
+    document.insert("scopes", Item::Table(scope_table));
+
+    let mut sync = Table::new();
+    sync.insert(
+        "state_path",
+        Item::Value(Value::from(sync_state_relative_path.display().to_string())),
+    );
+    if let Some(mut key) = sync.key_mut("state_path") {
+        key.leaf_decor_mut().set_prefix(SYNC_STATE_COMMENT);
+    }
+    document.insert("sync", Item::Table(sync));
+
+    // A fresh document has a `[scopes]` table because this function just put
+    // one there, so adding to it cannot fail for the reason it can in a file
+    // somebody has edited.
+    add_scopes(&mut document, scopes)
+        .expect("a document this function just built has a `[scopes]` table")
+}
+
+/// The config file with `new_scopes` added, keeping everything it already
+/// said.
 ///
 /// Editing rather than re-rendering is the whole point: this used to serialize
 /// the parsed scope graph back out, which meant the second machine to run
 /// `dotsync init` deleted every comment anyone had written — including the ones
 /// the first machine's init wrote. A scope graph round-trips; the guidance
 /// beside it does not.
-pub(crate) fn config_with_scopes(
-    existing: Option<&str>,
-    sync_state_relative_path: &Path,
+pub(crate) fn config_with_added_scopes(
+    existing: &str,
     new_scopes: &[NewScope],
     config_path: &Path,
 ) -> Result<String, DotsyncError> {
-    let mut document = match existing {
-        Some(existing) => {
-            existing
-                .parse::<DocumentMut>()
-                .map_err(|err| DotsyncError::ConfigEdit {
-                    path: config_path.to_path_buf(),
-                    message: err.to_string(),
-                })?
-        }
-        None => new_config_document(sync_state_relative_path),
-    };
+    let mut document = existing
+        .parse::<DocumentMut>()
+        .map_err(|err| DotsyncError::ConfigEdit {
+            path: config_path.to_path_buf(),
+            message: err.to_string(),
+        })?;
+    add_scopes(&mut document, new_scopes).map_err(|message| DotsyncError::ConfigEdit {
+        path: config_path.to_path_buf(),
+        message,
+    })
+}
 
+/// Appends scope entries, each under the comment that says what it covers.
+///
+/// The `Err` is a bare message rather than a `DotsyncError`, because the two
+/// callers disagree about what it means: in an existing file it is a config
+/// somebody got wrong, and in a fresh one it is impossible.
+fn add_scopes(document: &mut DocumentMut, new_scopes: &[NewScope]) -> Result<String, String> {
     let scopes = document["scopes"]
         .as_table_mut()
-        .ok_or_else(|| DotsyncError::ConfigEdit {
-            path: config_path.to_path_buf(),
-            message: "`[scopes]` is not a table".to_string(),
-        })?;
+        .ok_or_else(|| "`[scopes]` is not a table".to_string())?;
     for scope in new_scopes {
         let mut entry = InlineTable::new();
         if !scope.parents.is_empty() {
@@ -165,28 +193,7 @@ pub(crate) fn config_with_scopes(
                 .set_prefix(format!("\n{}", scope.comment()));
         }
     }
-
     Ok(document.to_string())
-}
-
-fn new_config_document(sync_state_relative_path: &Path) -> DocumentMut {
-    let mut document = DocumentMut::new();
-
-    let mut scopes = Table::new();
-    scopes.decor_mut().set_prefix(CONFIG_HEADER);
-    document.insert("scopes", Item::Table(scopes));
-
-    let mut sync = Table::new();
-    sync.insert(
-        "state_path",
-        Item::Value(Value::from(sync_state_relative_path.display().to_string())),
-    );
-    if let Some(mut key) = sync.key_mut("state_path") {
-        key.leaf_decor_mut().set_prefix(SYNC_STATE_COMMENT);
-    }
-    document.insert("sync", Item::Table(sync));
-
-    document
 }
 
 pub(crate) async fn write_config(
