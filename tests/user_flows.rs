@@ -980,7 +980,7 @@ fn drift_detected_json_contract_stays_compatible() {
     assert_eq!(json["status"], "error");
     assert_eq!(json["error"], "drift_detected");
     assert!(json["message"].as_str().is_some());
-    assert!(json["current_state"].as_str().is_some());
+    assert!(json["current_state"].is_array());
 
     let drifts = json["drifts"]
         .as_array()
@@ -2921,7 +2921,7 @@ fn status_before_init_json_matches_recovery_message() {
         render_output(&status_output)
     );
 
-    let expected = r#"{"current_state":"expected repo path: {repo}; standard location: ~/.local/share/dotsync/repo","drifts":[],"error":"not_initialized","forced_overwrites":[],"message":"Dotsync could not find its hidden repo at {repo}. Run `dotsync init <remote-url>` from this home directory, then rerun `dotsync status`.","status":"error"}
+    let expected = r#"{"current_state":["expected repo path: {repo}; standard location: ~/.local/share/dotsync/repo"],"drifts":[],"error":"not_initialized","forced_overwrites":[],"message":"Dotsync could not find its hidden repo at {repo}. Run `dotsync init <remote-url>` from this home directory, then rerun `dotsync status`.","status":"error"}
 "#
     .replace("{repo}", &machine.repo_dir.display().to_string());
     let stdout = String::from_utf8_lossy(&status_output.stdout);

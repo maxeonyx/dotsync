@@ -10,7 +10,13 @@ pub struct ErrorReport {
     pub code: &'static str,
     pub message: String,
     pub drifts: Vec<FileDrift>,
-    pub current_state: Option<String>,
+    /// What dotsync found, one fact per entry.
+    ///
+    /// A list rather than a paragraph because a run that refused three paths
+    /// found three things: joining them for a person to read is a decision for
+    /// whoever is rendering, and a reader that has to split them back apart on
+    /// a newline is reading a rendering rather than an answer.
+    pub current_state: Vec<String>,
     /// What the run had already overwritten under `--force` when it stopped.
     /// Empty for every error raised before a run can overwrite anything, which
     /// is all of them except a commit that failed after writing its history.
@@ -179,12 +185,12 @@ pub enum DotsyncError {
     NonUtf8Path { path: PathBuf },
     #[error("{path} is a git submodule; dotsync manages regular files and symlinks only")]
     GitSubmodule { path: PathBuf },
-    #[error("cannot commit {} of the paths you named", rejected.len())]
+    #[error("{}", one_or_many(rejected.len(), "cannot commit the path you named", "cannot commit {n} of the paths you named"))]
     UnusableCommitPaths {
         scope: String,
         rejected: Vec<RejectedCommitPath>,
     },
-    #[error("cannot commit {} of the paths you named, because this machine did not change them", refused.len())]
+    #[error("{}", one_or_many(refused.len(), "cannot commit the path you named, because this machine did not change it", "cannot commit {n} of the paths you named, because this machine did not change them"))]
     StaleCommitPaths {
         scope: String,
         refused: Vec<RefusedCommitPath>,
@@ -277,10 +283,10 @@ impl DotsyncError {
                 code: "drift_detected",
                 message: self.to_string(),
                 drifts: drifts.clone(),
-                current_state: Some(
+                current_state: vec![
                     "managed files in home differ from the repo version for this machine scope"
                         .to_string(),
-                ),
+                ],
                 forced_overwrites: Vec::new(),
             },
             DotsyncError::InvalidScope { .. } => basic_error_report("invalid_scope", self),
@@ -350,50 +356,53 @@ pub(crate) fn basic_error_report(code: &'static str, error: &DotsyncError) -> Er
     }
 }
 
-pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
+/// One message when there is one of something, another when there are several.
+/// `{n}` in the plural form is the count.
+fn one_or_many(count: usize, one: &str, many: &str) -> String {
+    if count == 1 {
+        one.to_string()
+    } else {
+        many.replace("{n}", &count.to_string())
+    }
+}
+
+pub(crate) fn error_current_state(error: &DotsyncError) -> Vec<String> {
     match error {
-        DotsyncError::InvalidScope { scope } => Some(format!("requested scope: {scope}")),
+        DotsyncError::InvalidScope { scope } => vec![format!("requested scope: {scope}")],
         DotsyncError::SyncState { path, .. } => {
-            Some(format!("sync state path: {}", path.display()))
+            vec![format!("sync state path: {}", path.display())]
         }
         DotsyncError::ScopeDiverged {
             scope,
             local_target,
             remote_target,
-        } => Some(format!(
+        } => vec![format!(
             "scope: {scope}; local target: {local_target}; remote target: {remote_target}"
-        )),
-        DotsyncError::CascadePaused { scope, .. } => Some(format!("paused scope: {scope}")),
-        DotsyncError::UnusableCommitPaths { scope, rejected } => Some(
-            rejected
-                .iter()
-                .map(|rejected| rejected.explain(scope))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
-        DotsyncError::StaleCommitPaths { refused, .. } => Some(
-            refused
-                .iter()
-                .map(RefusedCommitPath::explain)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
-        DotsyncError::PausePredatesResolutionCheck { scope } => Some(format!(
+        )],
+        DotsyncError::CascadePaused { scope, .. } => vec![format!("paused scope: {scope}")],
+        DotsyncError::UnusableCommitPaths { scope, rejected } => rejected
+            .iter()
+            .map(|rejected| rejected.explain(scope))
+            .collect(),
+        DotsyncError::StaleCommitPaths { refused, .. } => {
+            refused.iter().map(RefusedCommitPath::explain).collect()
+        }
+        DotsyncError::PausePredatesResolutionCheck { scope } => vec![format!(
             "paused scope: {scope}; the pause holds no record of what the conflicted files contained when it paused."
-        )),
-        DotsyncError::UnresolvedConflict { scope, paths } => Some(format!(
+        )],
+        DotsyncError::UnresolvedConflict { scope, paths } => vec![format!(
             "unchanged since the cascade paused at scope `{scope}`: {}",
             paths
                 .iter()
                 .map(|path| path.display().to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
-        )),
-        DotsyncError::PausedCascadeInProgress { scope } => Some(format!("paused scope: {scope}")),
-        DotsyncError::NotInitialized { path } => Some(format!(
+        )],
+        DotsyncError::PausedCascadeInProgress { scope } => vec![format!("paused scope: {scope}")],
+        DotsyncError::NotInitialized { path } => vec![format!(
             "expected repo path: {}; standard location: ~/.local/share/dotsync/repo",
             path.display()
-        )),
+        )],
         DotsyncError::HomeNotSet
         | DotsyncError::NonUtf8Path { .. }
         | DotsyncError::GitSubmodule { .. }
@@ -408,7 +417,7 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
         | DotsyncError::RepoAlreadyExists { .. }
         | DotsyncError::MissingHostname
         | DotsyncError::RemoteUnreachable { .. }
-        | DotsyncError::Jj { .. } => None,
+        | DotsyncError::Jj { .. } => Vec::new(),
         DotsyncError::PartialInitLeftBehind { original, .. } => error_current_state(original),
     }
 }

@@ -161,6 +161,16 @@ fn drift_side_text(bytes: Option<&[u8]>) -> Option<String> {
     }
 }
 
+/// The facts a stop found, as one block for a person to read. Empty means the
+/// error's own message is all there is to say.
+fn current_state_text(report: &ErrorReport) -> String {
+    if report.current_state.is_empty() {
+        report.message.clone()
+    } else {
+        report.current_state.join("\n")
+    }
+}
+
 pub(crate) fn render_error_human(error: &DotsyncError) -> String {
     let error_report = error.to_error_report();
 
@@ -170,10 +180,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             "Dotsync fetches remote scope bookmarks before syncing or committing so each machine picks up scope history published by the other machines.",
             "This fetch flow fast-forwards a scope when the remote has simply moved ahead, and leaves the scope alone when this machine holds commits it has not pushed yet.",
             "It expects the local and remote positions of a scope to be on one line of history, so that one of them is an ancestor of the other.",
-            error_report
-                .current_state
-                .as_deref()
-                .unwrap_or(&error_report.message),
+            &current_state_text(&error_report),
             "This machine and the remote both have commits on this scope that the other does not, so neither side can be fast-forwarded onto the other.",
             &[
                 "Nothing has been lost or changed: your local commits are intact and still unpushed.",
@@ -197,10 +204,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config.",
             "This commit flow was merging the scoped change through the scope DAG and reached a branch where the same file had incompatible edits.",
             "It expects you to edit the conflicted file in home to the merged contents you want, then run `dotsync continue` to create the merge commit and resume the cascade.",
-            error_report
-                .current_state
-                .as_deref()
-                .unwrap_or(&error_report.message),
+            &current_state_text(&error_report),
             &error_report.message,
             &[
                 "edit each conflicted file at its real path in home so it holds the merged contents you want; the file has to change, because dotsync reads the resolution back out of it.",
@@ -214,10 +218,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config. Where two branches changed one file differently, the cascade pauses and asks you for the merged contents.",
             "This continue flow reads each conflicted file back out of your home directory and records what it finds there as the resolution. To tell a resolution from an untouched file, it compares them against what they held when the cascade paused.",
             "It expects the paused cascade to have recorded those contents.",
-            error_report
-                .current_state
-                .as_deref()
-                .unwrap_or(&error_report.message),
+            &current_state_text(&error_report),
             "This cascade was paused by an older dotsync, which recorded nothing to compare against. Continuing would record whatever is in home as the resolution without being able to tell whether anything was resolved, and that silently discards the other scope's version.",
             &[
                 "run `dotsync abort` to discard the paused cascade; it reverts the conflicted files in home to this machine's scope state.",
@@ -229,10 +230,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config. Where two branches changed one file differently, the cascade pauses and asks you for the merged contents.",
             "This continue flow reads each conflicted file back out of your home directory and records what it finds there as the resolution.",
             "It expects those files to have changed since the cascade paused, because the resolution is the contents you write into them.",
-            error_report
-                .current_state
-                .as_deref()
-                .unwrap_or(&error_report.message),
+            &current_state_text(&error_report),
             "Dotsync does not yet write the two conflicting versions into home, so an unchanged file is not a resolution - it is only the version that happened to already be there. Recording it would silently discard the other scope's version.",
             &[
                 &format!(
@@ -254,10 +252,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config.",
             "This commit flow was about to start a new scoped commit, but a previous cascade is still paused for conflict resolution.",
             "It expects exactly one cascade to be active at a time so commit history, conflict resolution, and home sync state stay aligned.",
-            error_report
-                .current_state
-                .as_deref()
-                .unwrap_or(&error_report.message),
+            &current_state_text(&error_report),
             "Dotsync stopped before fetching, committing, or syncing because starting another commit would hide the real paused-cascade task and may mutate unrelated scope state.",
             &[
                 "edit each conflicted file at its real path in home so it holds the merged contents you want; the file has to change, because dotsync reads the resolution back out of it.",
@@ -316,10 +311,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 "Dotsync records the home files you name onto a scope branch, then cascades that scope so every machine sharing it receives the change. Every file on a scope is written back into home on each of those machines.",
                 "This commit flow resolves each path you name against your home directory, checks that it is a config file dotsync may record, and commits the ones that changed.",
                 "It expects every path you name to be a config file inside your home directory, named relative to it, and to exist either in home or on the target scope already.",
-                error_report
-                    .current_state
-                    .as_deref()
-                    .unwrap_or(&error_report.message),
+                &current_state_text(&error_report),
                 "Dotsync stopped before recording anything. A commit records every path you named or none of them, so fixing the paths above and rerunning the same command is safe.",
                 &steps.iter().map(String::as_str).collect::<Vec<_>>(),
             )
@@ -333,10 +325,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             "Dotsync records the home files you name onto a scope branch and cascades them to every machine sharing it. Plain `dotsync` goes the other way, writing what the scopes hold back into home.",
             "This commit flow reads each path you named across three sides: what dotsync last synced to this machine, what is in home now, and what the scopes hold now.",
             "It expects the paths you name to hold a change you made in home since the last sync.",
-            error_report
-                .current_state
-                .as_deref()
-                .unwrap_or(&error_report.message),
+            &current_state_text(&error_report),
             "Recording these would put older bytes back on the scope and cascade them, silently reverting whoever published the change that is already there.",
             &[
                 "run `dotsync` to bring this machine up to date; the incoming change is written into home, and an incoming deletion removes the file.",
