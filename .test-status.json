@@ -16,7 +16,7 @@
     "dotsync::user_flows$a_machine_joining_keeps_the_comments_already_in_the_config": "passing",
     "dotsync::user_flows$a_machine_that_lost_its_sync_state_still_syncs": "passing",
     "dotsync::user_flows$a_machine_with_no_sync_record_says_so_instead_of_guessing": "passing",
-    "dotsync::user_flows$a_named_path_that_is_not_a_regular_file_is_refused_rather_than_read": "pending",
+    "dotsync::user_flows$a_named_path_that_is_not_a_regular_file_is_refused_rather_than_read": "passing",
     "dotsync::user_flows$a_paused_cascade_is_the_same_answer_whichever_command_meets_it": "passing",
     "dotsync::user_flows$a_remote_advance_is_reported_as_incoming_by_status_diff_and_sync": "passing",
     "dotsync::user_flows$a_run_that_stops_lists_each_thing_it_found_separately": "passing",

@@ -398,6 +398,18 @@ pub(crate) fn render_error_human(error: &DotsyncError, command: Option<&str>) ->
                 "then name one of those. For a commit, pick the root-est appropriate ancestor scope that should own the change.",
             ],
         ),
+        DotsyncError::NotARegularFile { .. } => render_structured_error(
+            "that is not a regular file",
+            "Dotsync records the bytes it finds at a path and writes those same bytes back to that path on every machine sharing the scope.",
+            "This flow read your home directory to see what each managed path holds now.",
+            "It expects every path it reads to be a regular file, or a link to one.",
+            &error_report.message,
+            "There are no bytes to read: a fifo, a socket or a device is a thing to talk to, not a thing to copy. Dotsync stops rather than opening it, because opening one waits forever for something that is never going to write to it.",
+            &[
+                "leave it out of the commit, or move it out of the directory you named. A directory selection steps around one on its own and says so.",
+                "if this path is one dotsync already tracks, put the real file back — or commit the deletion once it is gone.",
+            ],
+        ),
         DotsyncError::FileNotOnScope { .. } => render_structured_error(
             "that file is not on that scope",
             "Dotsync stores dotfiles in a scope DAG, and a file lives on the scope it was committed to. Every scope below that one inherits it through the cascade, so the same file is visible on many scopes and absent from the ones above it.",

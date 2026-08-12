@@ -233,6 +233,11 @@ pub enum DotsyncError {
     NonUtf8Path { path: PathBuf },
     #[error("{path} is a git submodule; dotsync manages regular files and symlinks only")]
     GitSubmodule { path: PathBuf },
+    /// A path in home that exists and is not a regular file: a fifo, a socket,
+    /// a device. Raised before anything opens it, because opening one can
+    /// never return.
+    #[error("{} is not a regular file, so dotsync cannot record what it holds", path.display())]
+    NotARegularFile { path: PathBuf },
     #[error("{}", one_or_many(rejected.len(), "cannot commit the path you named", "cannot commit {n} of the paths you named"))]
     UnusableCommitPaths {
         scope: String,
@@ -362,6 +367,7 @@ impl DotsyncError {
             DotsyncError::HomeNotSet
             | DotsyncError::NonUtf8Path { .. }
             | DotsyncError::GitSubmodule { .. }
+            | DotsyncError::NotARegularFile { .. }
             | DotsyncError::UnusableCommitPaths { .. }
             | DotsyncError::StaleCommitPaths { .. }
             | DotsyncError::Io { .. }
@@ -444,6 +450,9 @@ impl DotsyncError {
             DotsyncError::HomeNotSet => basic_error_report("home_not_set", self),
             DotsyncError::NonUtf8Path { .. } => basic_error_report("non_utf8_path", self),
             DotsyncError::GitSubmodule { .. } => basic_error_report("git_submodule", self),
+            DotsyncError::NotARegularFile { .. } => {
+                basic_error_report("not_a_regular_file", self)
+            }
             DotsyncError::UnusableCommitPaths { .. } => {
                 basic_error_report("unusable_commit_paths", self)
             }
@@ -520,6 +529,7 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Vec<String> {
         DotsyncError::HomeNotSet
         | DotsyncError::NonUtf8Path { .. }
         | DotsyncError::GitSubmodule { .. }
+        | DotsyncError::NotARegularFile { .. }
         | DotsyncError::NoPausedCascade
         | DotsyncError::Io { .. }
         | DotsyncError::ConfigParse { .. }

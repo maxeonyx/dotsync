@@ -362,11 +362,38 @@ pub(crate) async fn read_entry_bytes(
     }
 }
 
+/// What home holds at a path, or `None` when it holds nothing there.
+///
+/// Refuses anything that is not a regular file before opening it, because
+/// opening one can never return: `fs::read` on a fifo blocks until something
+/// writes to the other end, and `dotsync commit -- .pipe` hung forever with
+/// nothing printed. The check is here rather than only in commit's path
+/// validation because this function reads every managed path on every run —
+/// a tracked file can be replaced by a fifo at any time, and then the machine
+/// could not even run `status`.
+///
+/// `metadata` follows links deliberately: a link to a regular file reads as
+/// that file, which is what dotsync has always done for a path it already
+/// tracks. Whether such a path should be *committed* is a separate question,
+/// answered by commit's own selection guards.
 pub(crate) fn read_home_bytes(
     paths: &DotsyncPaths,
     relative: &Path,
 ) -> Result<Option<Vec<u8>>, DotsyncError> {
     let home_path = paths.home_dir.join(relative);
+    match fs::metadata(&home_path) {
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(DotsyncError::NotARegularFile { path: home_path })
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(DotsyncError::Io {
+                path: home_path,
+                source,
+            })
+        }
+    }
     match fs::read(&home_path) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
