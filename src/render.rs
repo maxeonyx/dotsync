@@ -1,5 +1,7 @@
 use crate::UsageError;
-use dotsync::{DotsyncError, ErrorReport, FileDrift, PushReport, UnreachableRemote};
+use dotsync::{
+    DotsyncError, ErrorReport, FileDrift, PushReport, RefusedCommitPath, UnreachableRemote,
+};
 use serde_json::json;
 use similar::TextDiff;
 use std::path::Path;
@@ -359,6 +361,31 @@ pub(crate) fn forced_overwrite_notes(forced_overwrites: &[std::path::PathBuf]) -
         forced_overwrites
             .iter()
             .map(|path| format!("- {}", path.display())),
+    );
+    notes
+}
+
+/// What a named directory matched that the commit left alone.
+///
+/// A bulk selection that recorded less than it matched has to say so: an agent
+/// that names a directory and reads "committed" would otherwise believe a
+/// change reached the scope when another machine's version is still there.
+pub(crate) fn skipped_path_notes(skipped: &[RefusedCommitPath]) -> Vec<String> {
+    if skipped.is_empty() {
+        return Vec::new();
+    }
+    let mut notes = vec![format!(
+        "dotsync: did not record {} file(s) under the paths you named, because this machine has not changed them",
+        skipped.len()
+    )];
+    notes.extend(
+        skipped
+            .iter()
+            .map(|skipped| format!("- {} ({})", skipped.path.display(), skipped.state.reason())),
+    );
+    notes.push(
+        "dotsync: run `dotsync` to bring them up to date, or name one exactly to be told what happened to it."
+            .to_string(),
     );
     notes
 }

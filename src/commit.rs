@@ -75,6 +75,10 @@ struct PausedCascadeStep {
 #[derive(Debug, Clone)]
 pub struct CommitReport {
     pub committed_scope: String,
+    /// Paths a named directory matched that this commit left alone. Empty for
+    /// every other shape of commit: a bare commit selects what changed rather
+    /// than filtering a list, and a path named exactly is refused out loud.
+    pub skipped: Vec<RefusedCommitPath>,
     /// Paths recorded on the authority of `--force` rather than on the
     /// authority of a change made on this machine. Reported because a forced
     /// commit is the one shape of commit that can discard someone else's work,
@@ -88,9 +92,10 @@ impl CommitReport {
     /// A commit that found nothing to add. It creates no history of its own,
     /// but it still names the scope it targeted and reports what it published
     /// on behalf of earlier runs.
-    fn nothing_to_commit(scope: &str, push: PushReport) -> Self {
+    fn nothing_to_commit(scope: &str, skipped: Vec<RefusedCommitPath>, push: PushReport) -> Self {
         Self {
             committed_scope: scope.to_string(),
+            skipped,
             forced_overwrites: Vec::new(),
             sync: SyncReport::default(),
             push,
@@ -177,6 +182,7 @@ pub async fn commit_and_sync(
     .await?;
     let Selection {
         paths: selected_paths,
+        skipped,
         forced_paths,
         forced_overwrites,
     } = selection;
@@ -184,6 +190,7 @@ pub async fn commit_and_sync(
     if selected_paths.is_empty() {
         return Ok(session.finish(CommitReport::nothing_to_commit(
             &options.scope,
+            skipped,
             pending_push,
         )));
     }
@@ -306,6 +313,7 @@ pub async fn commit_and_sync(
     if new_tree.tree_ids() == base_commit.tree().tree_ids() {
         return Ok(session.finish(CommitReport::nothing_to_commit(
             &options.scope,
+            skipped,
             pending_push,
         )));
     }
@@ -408,6 +416,7 @@ pub async fn commit_and_sync(
 
     Ok(session.finish(CommitReport {
         committed_scope: options.scope,
+        skipped,
         forced_overwrites,
         sync,
         push,
@@ -417,6 +426,11 @@ pub async fn commit_and_sync(
 /// What this commit will record, and on whose authority.
 struct Selection {
     paths: Vec<PathBuf>,
+    /// Paths a named directory expanded to that this commit left alone,
+    /// because home holds no change of this machine's own at them. Reported,
+    /// never silent: a bulk selection that quietly recorded less than it
+    /// matched would read to an agent as a complete commit.
+    skipped: Vec<RefusedCommitPath>,
     /// The paths `--force` covers. These skip the merge below entirely: the
     /// point of forcing is that home wins here whatever the repo says.
     forced_paths: Vec<PathBuf>,
@@ -442,7 +456,7 @@ async fn select_changes_to_record(
     target_entries: &BTreeMap<PathBuf, TreeValue>,
     internal_paths: &BTreeSet<PathBuf>,
 ) -> Result<Selection, DotsyncError> {
-    let named_paths = if options.paths.is_empty() {
+    let selection = if options.paths.is_empty() {
         None
     } else {
         Some(expand_selection_paths(
@@ -457,19 +471,44 @@ async fn select_changes_to_record(
         session,
         sync_state,
         machine_scope,
-        &named_paths.iter().flatten().cloned().collect(),
+        &selection
+            .as_ref()
+            .map(SelectedPaths::everything)
+            .unwrap_or_default(),
         &RecordedFromHome::default(),
     )
     .await?;
 
-    let selected_paths = match named_paths {
-        Some(named) => named,
+    // Naming a directory says "commit what changed under here", which is what
+    // a bare commit says about the whole machine — so it selects the same way,
+    // and steps around the files the repo moved on without home instead of
+    // refusing the run over them. Naming a path exactly says something
+    // stronger about that one path, and that claim is argued with below.
+    let mut skipped = Vec::new();
+    let selected_paths: Vec<PathBuf> = match &selection {
         None => classification
             .paths
             .iter()
             .filter(|(_, path)| path.state.is_drift())
             .map(|(relative, _)| relative.clone())
             .collect(),
+        Some(selection) => {
+            let mut selected = selection.named.clone();
+            for relative in &selection.under_directory {
+                let state = classification.state(relative);
+                // `--force` is the explicit claim that home wins for what this
+                // command named, so it reaches under a named directory too.
+                if !options.force && !selection.named.contains(relative) && state.blocks_commit() {
+                    skipped.push(RefusedCommitPath {
+                        path: relative.clone(),
+                        state,
+                    });
+                    continue;
+                }
+                selected.insert(relative.clone());
+            }
+            selected.into_iter().collect()
+        }
     };
     reject_scope_graph_outside_all(session, &options.scope, target_entries, &selected_paths)
         .await?;
@@ -493,6 +532,7 @@ async fn select_changes_to_record(
         }
         return Ok(Selection {
             paths: selected_paths,
+            skipped,
             forced_paths: Vec::new(),
             forced_overwrites: Vec::new(),
         });
@@ -509,6 +549,7 @@ async fn select_changes_to_record(
     Ok(Selection {
         forced_paths: selected_paths.clone(),
         paths: selected_paths,
+        skipped,
         forced_overwrites,
     })
 }
@@ -658,8 +699,8 @@ fn expand_selection_paths(
     selection_paths: &[PathBuf],
     target_entries: &BTreeMap<PathBuf, TreeValue>,
     internal_paths: &BTreeSet<PathBuf>,
-) -> Result<Vec<PathBuf>, DotsyncError> {
-    let mut expanded = BTreeSet::new();
+) -> Result<SelectedPaths, DotsyncError> {
+    let mut selected = SelectedPaths::default();
     // Relative path of the repo root within home — reject anything under it
     let repo_relative = paths
         .repo_root
@@ -720,7 +761,11 @@ fn expand_selection_paths(
             });
             continue;
         }
-        expanded.extend(matched);
+        if is_directory_selection {
+            selected.under_directory.extend(matched);
+        } else {
+            selected.named.extend(matched);
+        }
     }
 
     // Every bad path in one answer: an agent that fixes one and reruns pays a
@@ -732,7 +777,30 @@ fn expand_selection_paths(
         });
     }
 
-    Ok(expanded.into_iter().collect())
+    // A path named both ways — `-- .config/fish/ .config/fish/aliases.fish` —
+    // was named exactly, and that is the stronger claim of the two.
+    selected
+        .under_directory
+        .retain(|path| !selected.named.contains(path));
+    Ok(selected)
+}
+
+/// What the paths a commit named resolved to, kept apart by how they were
+/// named. A directory is a bulk selection and filters; a path named exactly is
+/// a claim about that path, and dotsync argues with it rather than quietly
+/// dropping it.
+#[derive(Debug, Default)]
+struct SelectedPaths {
+    named: BTreeSet<PathBuf>,
+    under_directory: BTreeSet<PathBuf>,
+}
+
+impl SelectedPaths {
+    /// Everything the selection matched, however it was named — the set the
+    /// classification has to cover.
+    fn everything(&self) -> BTreeSet<PathBuf> {
+        self.named.union(&self.under_directory).cloned().collect()
+    }
 }
 
 /// Why dotsync will not record this path, if it will not. Runs before any

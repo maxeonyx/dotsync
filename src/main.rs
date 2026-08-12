@@ -726,6 +726,10 @@ async fn run_commit(
             "machine_scope": report.sync.current_scope,
             "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
             "forced_overwrites": report.forced_overwrites.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
+            "skipped_paths": report.skipped.iter().map(|skipped| json!({
+                "path": render::display_path(&skipped.path),
+                "status": skipped.state.code(),
+            })).collect::<Vec<_>>(),
             "unpushed_scopes": report.push.unpushed_scopes(),
         }),
         human: format!(
@@ -733,8 +737,9 @@ async fn run_commit(
             report.committed_scope,
             report.sync.synced_paths.len()
         ),
-        notes: render::forced_overwrite_notes(&report.forced_overwrites)
+        notes: render::skipped_path_notes(&report.skipped)
             .into_iter()
+            .chain(render::forced_overwrite_notes(&report.forced_overwrites))
             .chain(render::success_notes(
                 &report.sync.drifts,
                 Some(&report.push),
