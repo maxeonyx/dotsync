@@ -2355,6 +2355,65 @@ dotsync: 1 changed managed file(s) for mx-xps-cy
 }
 
 #[test]
+fn force_is_rejected_on_commands_that_never_write_home() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    // `--force` reaches exactly one decision: whether to overwrite drifted
+    // home files. `status`, `diff` and `view` never write home, so accepting
+    // the flag there taught an agent that retrying with `--force` might change
+    // the answer. It never could.
+    for command in [
+        "dotsync status --force",
+        "dotsync diff --force",
+        "dotsync view --force",
+        "dotsync init --force",
+    ] {
+        let output = machine.run(command);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "`{command}` should be a usage error\n{}",
+            render_output(&output)
+        );
+    }
+
+    let before_subcommand = machine.run("dotsync --force status");
+    assert_eq!(
+        before_subcommand.status.code(),
+        Some(2),
+        "{}",
+        render_output(&before_subcommand)
+    );
+    assert_stderr_snapshot(
+        &before_subcommand,
+        "dotsync: `--force` has no meaning for `status`; it only affects commands that write files into your home directory: plain `dotsync`, `commit`, `continue`, and `abort`\n",
+    );
+
+    // The commands that do write home keep it, in both positions.
+    machine.write_file(".apprc", "ui_theme = dark\n");
+    let commit_output = machine.run("dotsync commit all -m 'add apprc' --force -- .apprc");
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
+    let sync_output = machine.run("dotsync --force");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+}
+
+#[test]
 fn output_format_is_accepted_after_the_subcommand() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");

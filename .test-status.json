@@ -34,6 +34,7 @@
     "dotsync::user_flows$drift_detected_json_contract_stays_compatible": "passing",
     "dotsync::user_flows$drift_stop_during_commit_does_not_strand_unpushed_history": "passing",
     "dotsync::user_flows$explicit_commit_command_adds_file_to_scope_and_syncs": "passing",
+    "dotsync::user_flows$force_is_rejected_on_commands_that_never_write_home": "pending",
     "dotsync::user_flows$init_creates_no_visible_git_directory": "passing",
     "dotsync::user_flows$init_without_remote_noninteractive_matches_full_recovery_message": "passing",
     "dotsync::user_flows$interrupted_push_reports_that_scope_updates_were_not_pushed": "passing",
