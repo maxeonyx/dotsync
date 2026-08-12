@@ -5076,3 +5076,73 @@ fn a_directory_selection_records_what_this_machine_changed_and_says_what_it_skip
         "and the sync that follows must bring this machine up to it"
     );
 }
+
+/// A run that stops still has to say which state it stopped against. Drift is
+/// the commonest stop there is, and its advice is `--force` — overwrite home
+/// with the repo — so a reader who is not told the repo snapshot is however
+/// old this machine's last fetch was cannot judge that advice.
+#[test]
+fn a_run_that_stops_offline_still_says_the_remote_was_out_of_reach() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+    machine.write_file(".bashrc", "export DOTSYNC=one\n");
+    let commit_output = machine.run("dotsync commit all -m 'add bashrc' -- .bashrc");
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
+
+    machine.write_file(".bashrc", "export DOTSYNC=edited\n");
+    harness.disconnect_remote();
+
+    let sync_output = machine.run("dotsync --output json");
+    assert_eq!(
+        sync_output.status.code(),
+        Some(1),
+        "drift still stops the run\n{}",
+        render_output(&sync_output)
+    );
+    assert!(
+        String::from_utf8_lossy(&sync_output.stderr).contains("could not reach the remote"),
+        "a stop must say which state it stopped against\n{}",
+        render_output(&sync_output)
+    );
+    assert!(
+        parse_stdout_json(&sync_output)["remote_unreachable"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "the error JSON must carry why the remote was out of reach\n{}",
+        render_output(&sync_output)
+    );
+
+    // Same for a command that stops before it does anything at all: the run
+    // still happened, and it still could not see the remote.
+    let commit_output =
+        machine.run("dotsync --output json commit nosuchscope -m 'nope' -- .bashrc");
+    assert_eq!(
+        commit_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&commit_output)
+    );
+    assert!(
+        String::from_utf8_lossy(&commit_output.stderr).contains("could not reach the remote"),
+        "a refused commit must say it too\n{}",
+        render_output(&commit_output)
+    );
+    assert!(
+        parse_stdout_json(&commit_output)["remote_unreachable"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "{}",
+        render_output(&commit_output)
+    );
+}
