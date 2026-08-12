@@ -104,6 +104,7 @@ pub async fn sync(
 ) -> Run<Result<SyncCommandReport, DotsyncError>> {
     in_session(paths, async |session| {
         session.fetch().await?;
+        session.fetch().await?;
         // Publish before touching home: scope commits left behind by an
         // interrupted run must reach the remote even if the home sync stops.
         // The exception is a paused cascade, whose scopes are only half

@@ -52,6 +52,7 @@ impl TestHarness {
         MachineEnvironment::new(
             self.root_dir.join(name),
             self.remote_dir.clone(),
+            self.root_dir.join("git-shim"),
             os,
             hostname,
         )
@@ -62,12 +63,22 @@ struct MachineEnvironment {
     home_dir: PathBuf,
     repo_dir: PathBuf,
     remote_dir: PathBuf,
+    /// Outside the managed home on purpose: a fixture that lived in home would
+    /// show up in anything that reads home, and one of the things dotsync has
+    /// to get right is what it does with files it finds there.
+    shim_dir: PathBuf,
     os: String,
     hostname: String,
 }
 
 impl MachineEnvironment {
-    fn new(root_dir: PathBuf, remote_dir: PathBuf, os: &str, hostname: &str) -> Self {
+    fn new(
+        root_dir: PathBuf,
+        remote_dir: PathBuf,
+        shim_dir: PathBuf,
+        os: &str,
+        hostname: &str,
+    ) -> Self {
         let home_dir = root_dir.join("home");
         let repo_dir = home_dir.join(".local/share/dotsync/repo");
         fs::create_dir_all(&home_dir).expect("create home dir");
@@ -75,6 +86,7 @@ impl MachineEnvironment {
             home_dir,
             repo_dir,
             remote_dir,
+            shim_dir,
             os: os.to_string(),
             hostname: hostname.to_string(),
         }
@@ -108,13 +120,12 @@ impl MachineEnvironment {
     /// — so counting `git fetch` calls is how many times a run talked to the
     /// network, observed from outside the binary.
     fn run_recording_git(&self, command: &str) -> (Output, Vec<String>) {
-        let shim_dir = self.home_dir.join("git-shim.ignore");
+        let shim_dir = &self.shim_dir;
         let log_path = shim_dir.join("git-calls.log");
         write_file_at(
             &shim_dir.join("git"),
             &format!(
-                "#!/bin/sh\necho \"$@\" >> \"{}\"\nexec {} \"$@\"\n",
-                log_path.display(),
+                "#!/bin/sh\necho \"$@\" >> \"$DOTSYNC_TEST_GIT_LOG\"\nexec {} \"$@\"\n",
                 real_git_path().display()
             ),
         );
@@ -135,6 +146,7 @@ impl MachineEnvironment {
         command.env("HOME", &self.home_dir);
         command.env("DOTSYNC_OS", &self.os);
         command.env("DOTSYNC_HOSTNAME", &self.hostname);
+        command.env("DOTSYNC_TEST_GIT_LOG", &log_path);
         command.env(
             "PATH",
             format!(
@@ -151,6 +163,16 @@ impl MachineEnvironment {
             .map(str::to_string)
             .collect();
         (output, calls)
+    }
+
+    /// How many times a run asked git to talk to the remote.
+    fn fetches_during(&self, command: &str) -> (Output, usize) {
+        let (output, calls) = self.run_recording_git(command);
+        let fetches = calls
+            .iter()
+            .filter(|call| call.split_whitespace().any(|word| word == "fetch"))
+            .count();
+        (output, fetches)
     }
 
     /// Runs dotsync with no `HOME` in the environment, which is how dotsync
@@ -5332,4 +5354,44 @@ fn a_trailing_separator_on_a_named_file_is_just_a_trailing_separator() {
         read_bookmark_file_contents(&machine, "all", ".bashrc"),
         "export DOTSYNC=three\n"
     );
+}
+
+/// One fetch per run is a property of having a session, not a habit of the
+/// code that happens to hold today. `view` grew an N+1 fetch without anyone
+/// noticing because nothing counted, and every command is one refactor away
+/// from the same thing.
+#[test]
+fn status_diff_sync_and_commit_each_reach_the_remote_once() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+    add_hyprland_scope(&machine);
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+    machine.write_file(".bashrc", "export DOTSYNC=1\n");
+
+    for command in [
+        "dotsync status",
+        "dotsync diff",
+        "dotsync",
+        "dotsync commit all -m 'add bashrc' -- .bashrc",
+    ] {
+        let (output, fetches) = machine.fetches_during(command);
+        assert_eq!(
+            fetches,
+            1,
+            "`{command}` must reach the remote exactly once\n{}",
+            render_output(&output)
+        );
+    }
 }
