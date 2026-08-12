@@ -163,7 +163,6 @@ async fn commit_in_session(
     reject_commit_if_cascade_paused(paths)?;
 
     session.fetch().await?;
-    session.fetch().await?;
     // Publish what earlier runs left behind before looking at this commit at
     // all: this commit may turn out to add nothing, and a machine with an
     // interrupted push behind it must still heal. Anything this run goes on to

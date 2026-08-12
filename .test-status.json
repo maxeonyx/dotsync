@@ -83,7 +83,7 @@
     "dotsync::user_flows$status_before_init_json_matches_recovery_message": "passing",
     "dotsync::user_flows$status_before_init_matches_full_recovery_message": "passing",
     "dotsync::user_flows$status_clean_shows_no_changes": "passing",
-    "dotsync::user_flows$status_diff_sync_and_commit_each_reach_the_remote_once": "pending",
+    "dotsync::user_flows$status_diff_sync_and_commit_each_reach_the_remote_once": "passing",
     "dotsync::user_flows$status_ignores_unmanaged_files": "passing",
     "dotsync::user_flows$status_json_contract": "passing",
     "dotsync::user_flows$status_shows_deleted_file": "passing",
