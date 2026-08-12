@@ -150,20 +150,17 @@ pub async fn commit_and_sync(
     paths: &DotsyncPaths,
     options: CommitOptions,
 ) -> Run<Result<CommitReport, CommitFailure>> {
-    in_session(paths, async |session| {
-        commit_in_session(session, options).await
+    in_session(paths, async |session, paths| {
+        commit_in_session(session, paths, options).await
     })
     .await
 }
 
 async fn commit_in_session(
     session: &mut Session,
+    paths: &DotsyncPaths,
     options: CommitOptions,
 ) -> Result<CommitReport, CommitFailure> {
-    // Two `PathBuf`s, cloned so that reading where home is does not hold a
-    // borrow of the session across the places that advance it.
-    let paths = session.paths().clone();
-    let paths = &paths;
     reject_commit_if_cascade_paused(paths)?;
 
     session.fetch().await?;
@@ -867,10 +864,9 @@ fn unusable_commit_path(
     // everything — including the files that are on this machine precisely
     // because they are not shared. Checked before the absolute-path rule so
     // that both ways of saying it get the same answer.
-    let names_home_root = selection_path
-        .components()
-        .all(|component| matches!(component, Component::CurDir))
-        || selection_path == paths.home_dir;
+    // Normalisation has already dropped the `.` components, so naming home
+    // relatively arrives here as the empty path.
+    let names_home_root = selection_path.as_os_str().is_empty() || selection_path == paths.home_dir;
     if names_home_root {
         return Some(CommitPathProblem::HomeRoot);
     }
@@ -1089,20 +1085,17 @@ pub async fn continue_after_conflict(
     paths: &DotsyncPaths,
     force: ForceScope,
 ) -> Run<Result<ContinueReport, DotsyncError>> {
-    in_session(paths, async |session| {
-        continue_in_session(session, force).await
+    in_session(paths, async |session, paths| {
+        continue_in_session(session, paths, force).await
     })
     .await
 }
 
 async fn continue_in_session(
     session: &mut Session,
+    paths: &DotsyncPaths,
     force: ForceScope,
 ) -> Result<ContinueReport, DotsyncError> {
-    // Two `PathBuf`s, cloned so that reading where home is does not hold a
-    // borrow of the session across the places that advance it.
-    let paths = session.paths().clone();
-    let paths = &paths;
     let state = load_paused_cascade_state(paths)?;
     // A cascade pauses because at least one file conflicted, so an empty
     // record means the pause was written before this check existed rather than
@@ -1256,14 +1249,16 @@ async fn continue_in_session(
 }
 
 pub async fn abort_paused_cascade(paths: &DotsyncPaths) -> Run<Result<AbortReport, DotsyncError>> {
-    in_session(paths, async |session| abort_in_session(session).await).await
+    in_session(paths, async |session, paths| {
+        abort_in_session(session, paths).await
+    })
+    .await
 }
 
-async fn abort_in_session(session: &mut Session) -> Result<AbortReport, DotsyncError> {
-    // Two `PathBuf`s, cloned so that reading where home is does not hold a
-    // borrow of the session across the places that advance it.
-    let paths = session.paths().clone();
-    let paths = &paths;
+async fn abort_in_session(
+    session: &mut Session,
+    paths: &DotsyncPaths,
+) -> Result<AbortReport, DotsyncError> {
     let state = load_paused_cascade_state(paths)?;
     if state.original_scope_commit_ids.is_empty() {
         return Err(DotsyncError::Jj {

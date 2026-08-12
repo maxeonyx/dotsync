@@ -102,7 +102,7 @@ pub async fn sync(
     paths: &DotsyncPaths,
     force: ForceScope,
 ) -> Run<Result<SyncCommandReport, DotsyncError>> {
-    in_session(paths, async |session| {
+    in_session(paths, async |session, _paths| {
         session.fetch().await?;
         // Publish before touching home: scope commits left behind by an
         // interrupted run must reach the remote even if the home sync stops.

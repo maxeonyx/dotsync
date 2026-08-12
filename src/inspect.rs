@@ -53,7 +53,7 @@ pub async fn view(
     scope: Option<&str>,
     file: Option<&Path>,
 ) -> Run<Result<ViewReport, DotsyncError>> {
-    in_session(paths, async |session| {
+    in_session(paths, async |session, _paths| {
         session.fetch().await?;
 
         Ok(match (scope, file) {
@@ -164,7 +164,7 @@ async fn scope_file_contents(
 }
 
 pub async fn diff_home(paths: &DotsyncPaths) -> Run<Result<DiffReport, DotsyncError>> {
-    in_session(paths, async |session| {
+    in_session(paths, async |session, _paths| {
         session.fetch().await?;
         let sync_state = load_sync_state(session.paths(), session.config())?;
         let machine_scope = resolve_current_scope(session.config(), sync_state.as_ref(), None)?;

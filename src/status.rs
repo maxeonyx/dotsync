@@ -29,7 +29,7 @@ pub struct FileChange {
 }
 
 pub async fn status(paths: &DotsyncPaths) -> Run<Result<StatusReport, DotsyncError>> {
-    in_session(paths, async |session| {
+    in_session(paths, async |session, _paths| {
         session.fetch().await?;
         let sync_state = load_sync_state(session.paths(), session.config())?;
         let machine_scope = resolve_current_scope(session.config(), sync_state.as_ref(), None)?;

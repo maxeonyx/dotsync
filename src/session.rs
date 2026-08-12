@@ -111,7 +111,7 @@ impl Session {
 /// happened when each command wrapped its own successful report.
 pub(crate) async fn in_session<T, E>(
     paths: &DotsyncPaths,
-    command: impl AsyncFnOnce(&mut Session) -> Result<T, E>,
+    command: impl AsyncFnOnce(&mut Session, &DotsyncPaths) -> Result<T, E>,
 ) -> Run<Result<T, E>>
 where
     E: From<DotsyncError>,
@@ -127,7 +127,10 @@ where
             }
         }
     };
-    let report = command(&mut session).await;
+    // Home's location is handed in beside the session rather than read out of
+    // it, because a command that is advancing the session cannot also hold a
+    // borrow of it — and every command needs to know where home is throughout.
+    let report = command(&mut session, paths).await;
     session.finish(report)
 }
 
