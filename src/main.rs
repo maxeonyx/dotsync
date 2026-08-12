@@ -775,10 +775,7 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
             success.exit_code
         }
         CliOutput::Error(error) => {
-            let exit_code = if matches!(
-                error,
-                DotsyncError::CascadePaused { .. } | DotsyncError::ConcurrentScopeConflict { .. }
-            ) {
+            let exit_code = if matches!(error, DotsyncError::CascadePaused { .. }) {
                 3
             } else {
                 1
