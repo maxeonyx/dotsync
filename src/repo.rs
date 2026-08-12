@@ -101,6 +101,15 @@ pub(crate) async fn fetch_origin(
         .map_err(|err| jj_error(format!("commit fetch operation: {err}")))
 }
 
+/// Reconciles every local scope bookmark against the remote bookmark it
+/// tracks. Per DESIGN.md "The convergence model" there are exactly four cases:
+///
+/// - local == remote: nothing to do
+/// - local behind remote: fast-forward the local bookmark
+/// - local ahead of remote: unpushed local work — keep it, the caller publishes
+///   it when it pushes
+/// - diverged: both sides have commits the other lacks, which dotsync cannot
+///   merge yet
 pub(crate) fn sync_local_bookmarks_from_remote(
     mut_repo: &mut MutableRepo,
     remote_name: &jj_lib::ref_name::RemoteName,
@@ -116,38 +125,54 @@ pub(crate) fn sync_local_bookmarks_from_remote(
         })
         .collect();
 
-    for (name, remote_id) in &updates {
-        let Some(local_id) = mut_repo
-            .view()
-            .get_local_bookmark(name.as_ref())
-            .as_normal()
-        else {
+    for (name, remote_id) in updates {
+        let local_target = mut_repo.view().get_local_bookmark(name.as_ref()).clone();
+        if local_target.is_absent() {
+            // A scope this machine does not have yet, published by another
+            // machine.
+            mut_repo.set_local_bookmark_target(name.as_ref(), RefTarget::normal(remote_id));
             continue;
+        }
+        let Some(local_id) = local_target.as_normal().cloned() else {
+            // A conflicted bookmark is jj's own record that the fetched remote
+            // position could not be reconciled with the local one. Its sides
+            // are the local and the remote head; report only the local one.
+            return Err(DotsyncError::ScopeDiverged {
+                scope: name.as_str().to_string(),
+                local_target: local_target
+                    .added_ids()
+                    .filter(|id| **id != remote_id)
+                    .map(|id| id.hex())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                remote_target: remote_id.hex(),
+            });
         };
         if local_id == remote_id {
             continue;
         }
-        let local_is_ancestor =
-            mut_repo
-                .index()
-                .is_ancestor(local_id, remote_id)
-                .map_err(|err| {
-                    jj_error(format!(
-                        "check bookmark ancestry for {}: {err}",
-                        name.as_str()
-                    ))
-                })?;
-        if !local_is_ancestor {
-            return Err(DotsyncError::FetchWouldOverwriteLocalBookmark {
-                bookmark: name.as_str().to_string(),
-                local_target: local_id.hex(),
-                remote_target: remote_id.hex(),
-            });
-        }
-    }
 
-    for (name, id) in updates {
-        mut_repo.set_local_bookmark_target(name.as_ref(), RefTarget::normal(id));
+        let ancestry = |from: &CommitId, to: &CommitId| {
+            mut_repo.index().is_ancestor(from, to).map_err(|err| {
+                jj_error(format!(
+                    "check bookmark ancestry for {}: {err}",
+                    name.as_str()
+                ))
+            })
+        };
+        if ancestry(&local_id, &remote_id)? {
+            mut_repo.set_local_bookmark_target(name.as_ref(), RefTarget::normal(remote_id));
+            continue;
+        }
+        if ancestry(&remote_id, &local_id)? {
+            continue;
+        }
+
+        return Err(DotsyncError::ScopeDiverged {
+            scope: name.as_str().to_string(),
+            local_target: local_id.hex(),
+            remote_target: remote_id.hex(),
+        });
     }
 
     Ok(())

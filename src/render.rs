@@ -33,19 +33,19 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
     let error_report = error.to_error_report();
 
     match error {
-        DotsyncError::FetchWouldOverwriteLocalBookmark { .. } => render_structured_error(
-            "fetch would overwrite local bookmark",
-            "Dotsync fetches remote scope bookmarks before syncing or preparing a scoped commit so each machine sees published scope history from the shared repo.",
-            "This fetch flow may fast-forward a local bookmark when the remote simply advances it, but it must not rewrite local bookmark history.",
-            "It expects every remote bookmark update to either match the local bookmark or move it forward; dotsync must not move a local bookmark backward or sideways or lose unpublished local state.",
+        DotsyncError::ScopeDiverged { scope, .. } => render_structured_error(
+            &format!("scope `{scope}` has diverged from the remote"),
+            "Dotsync fetches remote scope bookmarks before syncing or committing so each machine picks up scope history published by the other machines.",
+            "This fetch flow fast-forwards a scope when the remote has simply moved ahead, and leaves the scope alone when this machine holds commits it has not pushed yet.",
+            "It expects the local and remote positions of a scope to be on one line of history, so that one of them is an ancestor of the other.",
             error_report
                 .current_state
                 .as_deref()
                 .unwrap_or(&error_report.message),
-            "Dotsync stopped because this remote update would move a local bookmark backward or sideways, which would discard or bypass unpublished local state.",
+            "This machine and the remote both have commits on this scope that the other does not, so neither side can be fast-forwarded onto the other.",
             &[
-                "Publish or intentionally discard the local-only bookmark state before syncing.",
-                "If the remote bookmark was rewritten intentionally, reconcile that history explicitly instead of letting dotsync reset the local bookmark.",
+                "Nothing has been lost or changed: your local commits are intact and still unpushed.",
+                "Dotsync cannot merge diverged scopes yet — that is https://github.com/maxeonyx/dotsync/issues/17. Report this state rather than repairing the repo by hand.",
             ],
         ),
         DotsyncError::DriftDetected { .. } => render_structured_error(
