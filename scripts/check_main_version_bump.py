@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -8,6 +9,7 @@ import tomllib
 from dataclasses import dataclass
 
 ZERO_OID = "0" * 40
+DOCS_VERSION_PATH = "docs/version.json"
 
 
 @dataclass(frozen=True)
@@ -105,13 +107,35 @@ def load_lock_version(ref: str, package_name: str) -> str:
     raise VersionCheckError(f"Cargo.lock at {ref} does not contain package {package_name}")
 
 
-def ensure_lock_matches_manifest(ref: str) -> PackageVersion:
+def load_docs_version(ref: str) -> str:
+    document = json.loads(git_show(ref, DOCS_VERSION_PATH).decode("utf-8"))
+    if not isinstance(document, dict):
+        raise VersionCheckError(f"{DOCS_VERSION_PATH} at {ref} is not a JSON object")
+    version = document.get("version")
+    if not isinstance(version, str):
+        raise VersionCheckError(f"{DOCS_VERSION_PATH} at {ref} is missing a string \"version\" field")
+    return version
+
+
+def ensure_versions_consistent(ref: str) -> PackageVersion:
+    """Every place the released version is written must agree with Cargo.toml."""
     package = load_package_version(ref)
+    mismatches = []
+
     lock_version = load_lock_version(ref, package.name)
     if lock_version != package.version:
+        mismatches.append(f"Cargo.lock has {package.name} at {lock_version}")
+
+    docs_version = load_docs_version(ref)
+    if docs_version != package.version:
+        mismatches.append(f"{DOCS_VERSION_PATH} has version {docs_version}")
+
+    if mismatches:
         raise VersionCheckError(
-            f"Cargo.lock package version for {package.name} is {lock_version} at {ref}, "
-            f"but Cargo.toml is {package.version}"
+            f"version files disagree at {ref}: Cargo.toml has {package.name} at {package.version}, but "
+            + "; ".join(mismatches)
+            + f". Set the same version in all of Cargo.toml, Cargo.lock and {DOCS_VERSION_PATH} "
+            "(run `cargo check` to refresh Cargo.lock), then commit them together."
         )
     return package
 
@@ -127,7 +151,7 @@ def ensure_release_tag_unused(package: PackageVersion, head_ref: str) -> None:
 
 def ensure_main_version_bumped(base_ref: str, head_ref: str) -> None:
     base_package = load_package_version(base_ref)
-    head_package = ensure_lock_matches_manifest(head_ref)
+    head_package = ensure_versions_consistent(head_ref)
     if base_package.name != head_package.name:
         raise VersionCheckError(
             f"package name changed from {base_package.name} to {head_package.name}; "
@@ -136,7 +160,8 @@ def ensure_main_version_bumped(base_ref: str, head_ref: str) -> None:
     if base_package.version == head_package.version:
         raise VersionCheckError(
             f"main push would keep {head_package.name} at version {head_package.version}. "
-            "Every push to main must bump Cargo.toml and Cargo.lock first so CI publishes the new changes as a new release."
+            f"Every push to main must bump Cargo.toml, Cargo.lock and {DOCS_VERSION_PATH} first "
+            "so CI publishes the new changes as a new release."
         )
 
 
@@ -153,7 +178,7 @@ def load_fallback_baseline(head_ref: str) -> VersionBaseline | None:
 
 
 def handle_range(base_ref: str, head_ref: str) -> None:
-    head_package = ensure_lock_matches_manifest(head_ref)
+    head_package = ensure_versions_consistent(head_ref)
     ensure_release_tag_unused(head_package, head_ref)
     if base_ref == ZERO_OID:
         return
@@ -177,8 +202,8 @@ def handle_range(base_ref: str, head_ref: str) -> None:
     if fallback.package.version == head_package.version:
         raise VersionCheckError(
             f"cannot read rewritten main base {base_ref}; fallback baseline {fallback.ref} still has "
-            f"{head_package.name} at version {head_package.version}. Every push to main must bump Cargo.toml "
-            "and Cargo.lock first so CI publishes the new changes as a new release."
+            f"{head_package.name} at version {head_package.version}. Every push to main must bump Cargo.toml, "
+            f"Cargo.lock and {DOCS_VERSION_PATH} first so CI publishes the new changes as a new release."
         )
 
 

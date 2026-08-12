@@ -1,12 +1,12 @@
 # dotsync — Plan
 
-## Where things stand (2026-08-11)
+## Where things stand (2026-08-12)
 
-- v0.3.12 released and installed on mc-wsl-fd. Development happens in the agent-tools workspace (`tools/dotsync`); the standalone `~/dotsync` clone is retired.
-- Command surface on main: `dotsync` (sync), `init`, `commit <scope>`, `status`, `diff`, `view`, `continue`, `abort`. `--output json` everywhere. ~69 black-box tests, ratchet clean.
+- Development happens in the agent-tools workspace (`tools/dotsync`); the standalone `~/dotsync` clone is retired. Current released version: check `gh release list --repo maxeonyx/dotsync` or `dotsync --version` — don't record it here, it rots.
+- Command surface on main: `dotsync` (sync), `init`, `commit <scope>`, `status`, `diff`, `view`, `continue`, `abort`. `--output json` everywhere. Black-box tests via the TDD ratchet, clean.
 - The edit-in-place v0.3 model shipped: no visible staging area, bare repo at `~/.local/share/dotsync/repo/`, agents edit real files in `~/` and commit selected paths to scopes.
 - Live dotfiles instance: remote `git@github.com:maxeonyx/dotfiles.git`, scope graph `all` → `home`/`work`/`linux`/`windows` → intersections (`home-linux`, `work-linux`, `home-windows`) → machines (`mc-wsl-fd`, `mx-vps-fd`, `mx-xps-cy`, `maxeonyx-pc-windows`).
-- mc-wsl-fd has been wedged since 2026-07-27 by the failure described below ([#19](https://github.com/maxeonyx/dotsync/issues/19)).
+- Work item 1 below shipped in v0.3.13 ([PR #20](https://github.com/maxeonyx/dotsync/pull/20)): mc-wsl-fd, wedged since 2026-07-27 ([#19](https://github.com/maxeonyx/dotsync/issues/19)), was unwedged on 2026-08-12 by plain `dotsync` with zero repo surgery. Follow-up on that machine: 11 drifted files accumulated while wedged still need `dotsync commit <scope>` decisions.
 
 ## The recurring failure, told once properly
 
@@ -45,11 +45,11 @@ Concretely:
 
 The 2026-08-12 design review (with Max) rewrote DESIGN.md to specify the convergence model, conflicts-as-commits, the resolution surface, the failure/offline model, and the minimum-state principle. The work below implements that design.
 
-### 1. Recovery release (#19) — do this first
+### 1. Recovery release (#19) — ✅ shipped in v0.3.13 ([PR #20](https://github.com/maxeonyx/dotsync/pull/20))
 
-Fix the four-case fetch reconciliation (local-ahead is normal, never an error), make mutating commands push pending local-ahead bookmarks, and reorder push before the home sync in the commit flow. Black-box tests: simulate a failed push (e.g. remote temporarily unwritable), assert the machine is not wedged (status works, next plain `dotsync` pushes and converges).
+Four-case fetch reconciliation (local-ahead is normal), mutating commands publish pending bookmarks (even no-op commits), push before the home sync, honest push reporting (`PushReport` enum + `unpushed_scopes` JSON), a publish guard while a cascade is paused, and an honest `scope_diverged` error in place of the old wedge (divergence-as-merge itself is item 2). Also fixed en route: true divergence used to silently reset the local bookmark and delete home files with exit 0.
 
-This is a targeted unwedge, not the full convergence pass — small, releasable, and verification is unusually good: mc-wsl-fd is live-wedged in exactly this state. After releasing and installing, plain `dotsync` on this machine should push the July 27 dev-certs cascade, sync, and leave `dotsync status` clean — with zero manual repo surgery. That's the acceptance test.
+Live acceptance passed: plain `dotsync` pushed the July 27 dev-certs cascade from mc-wsl-fd and stopped honestly on the 16 days of accumulated home drift without stranding anything. Item numbering below is stable — items 2–6 keep their numbers because reviews, commit messages, and DESIGN notes refer to them.
 
 ### 2. The convergence pass (#17 and the heart of the design)
 
