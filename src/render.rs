@@ -281,6 +281,17 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 "then run `dotsync init <remote-url>` again.",
             ],
         ),
+        // The original failure is what there is to fix, so it renders in full;
+        // the leftover directory is the extra step the retry now needs.
+        DotsyncError::PartialInitLeftBehind {
+            path,
+            source,
+            original,
+        } => format!(
+            "{}\n\nAlso:\nDotsync could not remove the partly created repo at {}: {source}. Delete that directory before running `dotsync init` again.",
+            render_error_human(original),
+            path.display()
+        ),
         DotsyncError::NotInitialized { path } => format!(
             "dotsync: not initialized\n\nWhat happened:\nDotsync could not find its hidden repo at {}.\n\nWhat to do:\n- Run `dotsync init <remote-url>` from this home directory.\n- Then rerun `dotsync status`.\n\nThe remote URL is the git remote that stores your dotsync repo.",
             path.display()

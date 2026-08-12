@@ -49,16 +49,24 @@ async fn init_repo(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport,
 
     match create_repo_and_join(paths, remote_url).await {
         Ok(report) => Ok(report),
-        Err(error) => {
-            // Everything under the repo root was made by this run — init
-            // refuses to start when it already exists — so an init that
-            // stopped part-way takes its own leavings with it. Otherwise the
-            // remedy for the commonest failure there is, a remote this machine
-            // cannot reach yet, would be deleting a directory by hand before
-            // the retry is even allowed to start.
-            let _ = std::fs::remove_dir_all(&paths.repo_root);
-            Err(error)
-        }
+        // Everything under the repo root was made by this run — init refuses
+        // to start when it already exists — so an init that stopped part-way
+        // takes its own leavings with it. Otherwise the remedy for the
+        // commonest failure there is, a remote this machine cannot reach yet,
+        // would be deleting a directory by hand before the retry is even
+        // allowed to start.
+        Err(error) => Err(match std::fs::remove_dir_all(&paths.repo_root) {
+            Ok(()) => error,
+            // Nothing was created yet, so there is nothing to say.
+            Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => error,
+            // A cleanup that failed silently would be the worst of both: the
+            // retry refuses to start and nothing ever said why.
+            Err(source) => DotsyncError::PartialInitLeftBehind {
+                path: paths.repo_root.clone(),
+                source,
+                original: Box::new(error),
+            },
+        }),
     }
 }
 

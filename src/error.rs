@@ -222,6 +222,18 @@ pub enum DotsyncError {
     /// fetch and says so — see `Session::fetch`.
     #[error("could not reach the remote: {reason}")]
     RemoteUnreachable { reason: String },
+    /// An `init` that stopped and could not take its own leavings with it.
+    /// Carries the failure that stopped it, because that is still the thing to
+    /// fix; the half-made repo is what stops the retry from starting.
+    #[error(
+        "{original}\n\nDotsync could also not remove the partly created repo at {path}: {source}. Delete that directory before running `dotsync init` again."
+    )]
+    PartialInitLeftBehind {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+        original: Box<DotsyncError>,
+    },
     #[error("jj operation failed: {message}")]
     Jj { message: String },
 }
@@ -269,6 +281,12 @@ impl DotsyncError {
             DotsyncError::RemoteUnreachable { .. } => {
                 basic_error_report("remote_unreachable", self)
             }
+            // Classified as whatever stopped the init, because that is what
+            // the reader has to act on; the message carries both halves.
+            DotsyncError::PartialInitLeftBehind { original, .. } => ErrorReport {
+                message: self.to_string(),
+                ..original.to_error_report()
+            },
             DotsyncError::Io { .. } => basic_error_report("io", self),
             DotsyncError::Jj { .. } => basic_error_report("jj", self),
             DotsyncError::HomeNotSet => basic_error_report("home_not_set", self),
@@ -359,6 +377,7 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
         | DotsyncError::MissingHostname
         | DotsyncError::RemoteUnreachable { .. }
         | DotsyncError::Jj { .. } => None,
+        DotsyncError::PartialInitLeftBehind { original, .. } => error_current_state(original),
     }
 }
 
