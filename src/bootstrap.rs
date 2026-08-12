@@ -36,6 +36,26 @@ pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<Run<InitRepo
             path: paths.repo_root.clone(),
         });
     }
+
+    match create_repo_and_join(paths, remote_url).await {
+        Ok(report) => Ok(report),
+        Err(error) => {
+            // Everything under the repo root was made by this run — init
+            // refuses to start when it already exists — so an init that
+            // stopped part-way takes its own leavings with it. Otherwise the
+            // remedy for the commonest failure there is, a remote this machine
+            // cannot reach yet, would be deleting a directory by hand before
+            // the retry is even allowed to start.
+            let _ = std::fs::remove_dir_all(&paths.repo_root);
+            Err(error)
+        }
+    }
+}
+
+async fn create_repo_and_join(
+    paths: &DotsyncPaths,
+    remote_url: &str,
+) -> Result<Run<InitReport>, DotsyncError> {
     if let Some(parent) = paths.repo_root.parent() {
         std::fs::create_dir_all(parent).map_err(|source| DotsyncError::Io {
             path: parent.to_path_buf(),
