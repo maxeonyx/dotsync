@@ -6469,3 +6469,111 @@ fn view_says_when_no_scope_holds_a_file() {
         "an empty answer has to say it is an answer\n{stdout}"
     );
 }
+
+/// Every command a stop tells you to rerun has to be a command dotsync knows.
+///
+/// The advice was built from the identifier the JSON payload uses for the
+/// command, and for plain sync those are not the same string: the payload says
+/// `"sync"`, but bare `dotsync` *is* the sync command and `dotsync sync` is not
+/// a subcommand at all. So a fresh machine's very first interaction ended by
+/// naming an invocation that exits 2 — the same defect this advice exists to
+/// fix, inverted, on the reflex command.
+#[test]
+fn every_command_the_advice_names_is_a_command_dotsync_knows() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let sync = machine.run("dotsync");
+    assert_eq!(sync.status.code(), Some(1), "{}", render_output(&sync));
+    let sync_stderr = String::from_utf8_lossy(&sync.stderr).into_owned();
+    assert!(
+        sync_stderr.contains("then rerun `dotsync`."),
+        "bare `dotsync` is how you run a sync; there is nothing to add to it\n{sync_stderr}"
+    );
+
+    let commit = machine.run("dotsync commit all -m 'add bashrc' -- .bashrc");
+    let commit_stderr = String::from_utf8_lossy(&commit.stderr).into_owned();
+
+    for stderr in [&sync_stderr, &commit_stderr] {
+        let advice = stderr
+            .split_once("Correct flow:")
+            .expect("the stop teaches a correct flow")
+            .1;
+        let invocations = quoted_dotsync_invocations(advice);
+        assert!(
+            !invocations.is_empty(),
+            "the advice has to name something to run\n{stderr}"
+        );
+        for invocation in invocations {
+            let attempt = machine.run(&invocation);
+            let attempt_stderr = String::from_utf8_lossy(&attempt.stderr).into_owned();
+            assert!(
+                !attempt_stderr.contains("unknown command"),
+                "the advice named `{invocation}`, which dotsync does not recognise\n{attempt_stderr}"
+            );
+        }
+    }
+}
+
+/// The dotsync invocations a message quotes in backticks, skipping the ones
+/// holding a `<placeholder>` for the reader to fill in.
+fn quoted_dotsync_invocations(text: &str) -> Vec<String> {
+    text.split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|quoted| quoted.starts_with("dotsync") && !quoted.contains('<'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// `view` is the third read-only diagnostic, and the only one that stayed
+/// silent about a paused cascade — so an agent that reached for the command
+/// whose whole job is orientation was the one agent not told that this machine
+/// cannot commit anything.
+#[test]
+fn view_says_a_cascade_is_paused() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
+    let base = machine_a.run("dotsync commit all -m 'add base' -- .config/app.conf");
+    assert!(base.status.success(), "{}", render_output(&base));
+    machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
+    let linux = machine_a.run("dotsync commit linux -m 'linux flavour' -- .config/app.conf");
+    assert!(linux.status.success(), "{}", render_output(&linux));
+
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
+    let conflict = machine_b.run("dotsync commit all -m 'shared change' -- .config/app.conf");
+    assert_eq!(
+        conflict.status.code(),
+        Some(3),
+        "{}",
+        render_output(&conflict)
+    );
+
+    // Every shape `view` answers in, because the pause is true of the machine
+    // rather than of the question asked.
+    for command in [
+        "dotsync view",
+        "dotsync view --scope all",
+        "dotsync view --file .config/app.conf",
+    ] {
+        let output = machine_b.run(command);
+        assert!(output.status.success(), "{}", render_output(&output));
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            stderr.contains("paused") && stderr.contains("linux"),
+            "`{command}` must say a cascade is paused, and where\n{stderr}"
+        );
+
+        let json_output = machine_b.run(&format!("{command} --output json"));
+        assert_eq!(
+            parse_stdout_json(&json_output)["paused_cascade"],
+            "linux",
+            "`{command}` must report the pause in the payload too\n{}",
+            render_output(&json_output)
+        );
+    }
+}
