@@ -552,6 +552,16 @@ fn clone_remote_branch_to(path: &Path, remote_dir: &Path, branch: &str) {
     );
 }
 
+/// Unix-only, like the `pre-receive` hook fixtures: dotsync's Windows story
+/// has its own open questions and no test here pretends to cover them.
+#[cfg(unix)]
+fn symlink_at(target: &Path, link: &Path) {
+    if let Some(parent) = link.parent() {
+        fs::create_dir_all(parent).expect("create parent dir");
+    }
+    std::os::unix::fs::symlink(target, link).expect("create symlink");
+}
+
 fn write_file_at(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create parent dir");
@@ -5397,4 +5407,105 @@ fn status_diff_sync_and_commit_each_reach_the_remote_once() {
             render_output(&output)
         );
     }
+}
+
+/// The home-root refusal is a check on the path you typed, and a symlink is a
+/// way of typing a different path. `selflink -> $HOME` walks all of home under
+/// an aliased prefix, which also slips past the repo-root and sync-state
+/// guards, because those are prefix tests on the path as written.
+#[test]
+fn a_symlink_pointing_at_home_cannot_be_used_to_sweep_it() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_file(".ssh/id_ed25519", "PRIVATE KEY\n");
+    machine.write_file(".netrc", "machine example.com login me password hunter2\n");
+    symlink_at(&machine.home_dir, &machine.home_dir.join("selflink"));
+
+    let output = machine.run("dotsync commit all -m 'sweep' -- selflink/");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a symlink to home must not be a way to commit all of home\n{}",
+        render_output(&output)
+    );
+
+    let tracked = machine.run("dotsync view --scope all");
+    assert!(tracked.status.success(), "{}", render_output(&tracked));
+    let tracked = String::from_utf8_lossy(&tracked.stdout).into_owned();
+    for forbidden in ["selflink", "id_ed25519", ".netrc", ".jj", "sync-state"] {
+        assert!(
+            !tracked.contains(forbidden),
+            "`{forbidden}` must never reach a scope\n{tracked}"
+        );
+    }
+}
+
+/// Dotsync records the content at the path you name, and every machine on the
+/// scope writes that content back to the same path. A symlink names something
+/// else — which may live outside home entirely — so until dotsync has an
+/// answer for what that should mean, naming one is refused rather than
+/// guessed at. See PLAN.md §1.5.
+#[test]
+fn a_symlinked_selection_path_is_refused_whether_it_is_a_file_or_a_directory() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    // Config kept outside home and linked into place, which is a real pattern.
+    let outside = machine
+        .home_dir
+        .parent()
+        .expect("home has a parent")
+        .join("elsewhere");
+    write_file_at(&outside.join("nvim/init.lua"), "vim.opt.number = true\n");
+    write_file_at(&outside.join("vimrc"), "set number\n");
+    symlink_at(
+        &outside.join("nvim"),
+        &machine.home_dir.join(".config/nvim"),
+    );
+    symlink_at(&outside.join("vimrc"), &machine.home_dir.join(".vimrc"));
+
+    for selection in [".config/nvim/", ".vimrc"] {
+        let output = machine.run(&format!("dotsync commit all -m 'link' -- {selection}"));
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "`{selection}` is a symlink and must be refused\n{}",
+            render_output(&output)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            stderr.contains("symlink"),
+            "the refusal must say what it found\n{stderr}"
+        );
+    }
+
+    // A path that reaches a real file through a symlinked parent is the same
+    // claim wearing a different hat.
+    let through = machine.run("dotsync commit all -m 'link' -- .config/nvim/init.lua");
+    assert_eq!(
+        through.status.code(),
+        Some(1),
+        "a path that resolves through a symlink must be refused too\n{}",
+        render_output(&through)
+    );
+
+    // Real files next to them are unaffected.
+    machine.write_file(".bashrc", "export DOTSYNC=1\n");
+    let real = machine.run("dotsync commit all -m 'real file' -- .bashrc");
+    assert!(real.status.success(), "{}", render_output(&real));
 }
