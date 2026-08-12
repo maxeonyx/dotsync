@@ -11,6 +11,10 @@ pub struct ErrorReport {
     pub message: String,
     pub drifts: Vec<FileDrift>,
     pub current_state: Option<String>,
+    /// What the run had already overwritten under `--force` when it stopped.
+    /// Empty for every error raised before a run can overwrite anything, which
+    /// is all of them except a commit that failed after writing its history.
+    pub forced_overwrites: Vec<PathBuf>,
 }
 
 /// One path a commit named that dotsync will not record, and why. Kept
@@ -218,6 +222,7 @@ impl DotsyncError {
                     "managed files in home differ from the repo version for this machine scope"
                         .to_string(),
                 ),
+                forced_overwrites: Vec::new(),
             },
             DotsyncError::InvalidScope { .. } => basic_error_report("invalid_scope", self),
             DotsyncError::ScopeDiverged { .. } => basic_error_report("scope_diverged", self),
@@ -243,6 +248,7 @@ impl DotsyncError {
                 ),
                 drifts: Vec::new(),
                 current_state: error_current_state(self),
+                forced_overwrites: Vec::new(),
             },
             DotsyncError::MissingHostname => basic_error_report("missing_hostname", self),
             DotsyncError::Io { .. } => basic_error_report("io", self),
@@ -272,6 +278,7 @@ pub(crate) fn basic_error_report(code: &'static str, error: &DotsyncError) -> Er
         message: error.to_string(),
         drifts: Vec::new(),
         current_state: error_current_state(error),
+        forced_overwrites: Vec::new(),
     }
 }
 

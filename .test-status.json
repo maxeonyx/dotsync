@@ -7,7 +7,7 @@
     "dotsync::help_text$init_help_explains_remote_url_and_setup": "passing",
     "dotsync::help_text$top_level_help_explains_scope_and_basic_workflow": "passing",
     "dotsync::user_flows$a_concurrent_merge_leaves_no_drift_behind": "passing",
-    "dotsync::user_flows$a_forced_overwrite_is_reported_even_when_the_run_then_fails": "pending",
+    "dotsync::user_flows$a_forced_overwrite_is_reported_even_when_the_run_then_fails": "passing",
     "dotsync::user_flows$a_machine_that_lost_its_sync_state_still_syncs": "passing",
     "dotsync::user_flows$a_machine_with_no_sync_record_says_so_instead_of_guessing": "passing",
     "dotsync::user_flows$a_remote_advance_is_reported_as_incoming_by_status_diff_and_sync": "passing",

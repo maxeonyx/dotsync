@@ -99,6 +99,28 @@ impl CommitReport {
     }
 }
 
+/// A commit that stopped part-way, and what it had already done when it did.
+///
+/// A forced overwrite is finished the moment the history carrying it is
+/// written and pushed: nothing later in the run can take it back. Returning a
+/// bare error would drop that fact exactly when it matters most — a run that
+/// reverted another machine's change and then failed.
+#[derive(Debug)]
+pub struct CommitFailure {
+    pub forced_overwrites: Vec<PathBuf>,
+    pub error: DotsyncError,
+}
+
+impl From<DotsyncError> for CommitFailure {
+    /// Everything that can go wrong before any history exists.
+    fn from(error: DotsyncError) -> Self {
+        Self {
+            forced_overwrites: Vec::new(),
+            error,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ContinueReport {
     pub sync: SyncReport,
@@ -114,7 +136,7 @@ pub struct AbortReport {
 pub async fn commit_and_sync(
     paths: &DotsyncPaths,
     options: CommitOptions,
-) -> Result<CommitReport, DotsyncError> {
+) -> Result<CommitReport, CommitFailure> {
     reject_commit_if_cascade_paused(paths)?;
 
     let repo = load_repo_direct(paths).await?;
@@ -133,7 +155,8 @@ pub async fn commit_and_sync(
     if !graph.parents.contains_key(&options.scope) {
         return Err(DotsyncError::InvalidScope {
             scope: options.scope.clone(),
-        });
+        }
+        .into());
     }
 
     let internal_paths = internal_repo_paths(&config);
@@ -271,7 +294,8 @@ pub async fn commit_and_sync(
         return Err(DotsyncError::CascadePaused {
             scope: options.scope,
             conflicted_files: conflicted_files.join(", "),
-        });
+        }
+        .into());
     }
 
     if new_tree.tree_ids() == base_commit.tree().tree_ids() {
@@ -339,7 +363,8 @@ pub async fn commit_and_sync(
             return Err(DotsyncError::CascadePaused {
                 scope,
                 conflicted_files: conflicted_files.join(", "),
-            });
+            }
+            .into());
         }
     }
 
@@ -351,7 +376,14 @@ pub async fn commit_and_sync(
 
     // Push as soon as the history exists: the home sync below can legitimately
     // stop on drift, and a stop must never strand committed scope history.
-    let push = push_scope_updates(paths).await?;
+    let push = push_scope_updates(paths).await;
+    // From here the forced history exists and is published, so every exit has
+    // to carry what it overwrote.
+    let stopped = |error: DotsyncError| CommitFailure {
+        forced_overwrites: forced_overwrites.clone(),
+        error,
+    };
+    let push = push.map_err(stopped)?;
     // The commit just read these paths out of home and wrote them into the
     // repo, so for this sync those bytes are the last-synced side: home is
     // behind whatever the cascade merged them into, not drifted from it.
@@ -361,7 +393,8 @@ pub async fn commit_and_sync(
         &recorded_from_home,
         Some(&machine_scope),
     )
-    .await?;
+    .await
+    .map_err(stopped)?;
 
     Ok(CommitReport {
         committed_scope: options.scope,

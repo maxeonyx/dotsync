@@ -185,8 +185,25 @@ struct UsageError {
 #[derive(Debug)]
 enum CliOutput {
     Success(SuccessOutput),
-    Error(DotsyncError),
+    Error(ErrorOutput),
     Usage(UsageError),
+}
+
+/// A run that stopped, plus anything it had already done that the error alone
+/// would not say.
+#[derive(Debug)]
+struct ErrorOutput {
+    error: DotsyncError,
+    forced_overwrites: Vec<PathBuf>,
+}
+
+impl From<DotsyncError> for ErrorOutput {
+    fn from(error: DotsyncError) -> Self {
+        Self {
+            error,
+            forced_overwrites: Vec::new(),
+        }
+    }
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -207,7 +224,7 @@ async fn main() {
 
     let exit_code = match outcome {
         Ok(output) => emit_output(&output_format, output),
-        Err(error) => emit_output(&output_format, CliOutput::Error(error)),
+        Err(error) => emit_output(&output_format, CliOutput::Error(error.into())),
     };
     std::process::exit(exit_code);
 }
@@ -612,7 +629,7 @@ async fn run_commit(
     commit_paths: Vec<PathBuf>,
 ) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let report = commit_and_sync(
+    let report = match commit_and_sync(
         &paths,
         CommitOptions {
             scope,
@@ -621,7 +638,16 @@ async fn run_commit(
             paths: commit_paths,
         },
     )
-    .await?;
+    .await
+    {
+        Ok(report) => report,
+        Err(failure) => {
+            return Ok(CliOutput::Error(ErrorOutput {
+                error: failure.error,
+                forced_overwrites: failure.forced_overwrites,
+            }))
+        }
+    };
     Ok(CliOutput::Success(SuccessOutput {
         json: json!({
             "status": "ok",
@@ -869,14 +895,21 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
             }
             success.exit_code
         }
-        CliOutput::Error(error) => {
+        CliOutput::Error(ErrorOutput {
+            error,
+            forced_overwrites,
+        }) => {
             let exit_code = if matches!(error, DotsyncError::CascadePaused { .. }) {
                 3
             } else {
                 1
             };
+            for note in render::forced_overwrite_notes(&forced_overwrites) {
+                eprintln!("{note}");
+            }
             eprintln!("{}", render::render_error_human(&error));
-            let error_report = error.to_error_report();
+            let mut error_report = error.to_error_report();
+            error_report.forced_overwrites = forced_overwrites;
             if !error_report.drifts.is_empty() {
                 print_drifts(&error_report.drifts);
             }

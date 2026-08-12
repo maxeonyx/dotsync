@@ -10,6 +10,7 @@ pub(crate) fn render_error_json(error: &ErrorReport) -> serde_json::Value {
         "error": error.code,
         "message": error.message,
         "drifts": error.drifts.iter().map(render_drift_json).collect::<Vec<_>>(),
+        "forced_overwrites": error.forced_overwrites.iter().map(|path| display_path(path)).collect::<Vec<_>>(),
         "current_state": error.current_state,
     })
 }
@@ -295,6 +296,25 @@ pub(crate) fn render_structured_error(
     format!(
         "dotsync: {summary}\n\nWhat dotsync does:\n{what_dotsync_does}\n\nThis flow:\n{this_flow}\n\nExpected:\n{expected}\n\nCurrent state found:\n{current_state}\n\nWhy dotsync stopped:\n{why_stopped}\n\nCorrect flow:\n{correct_flow}"
     )
+}
+
+/// What a run overwrote under `--force`, said out loud. A forced overwrite is
+/// the one thing a run can do that discards somebody else's work, so it is
+/// reported whether the run went on to succeed or to stop.
+pub(crate) fn forced_overwrite_notes(forced_overwrites: &[std::path::PathBuf]) -> Vec<String> {
+    if forced_overwrites.is_empty() {
+        return Vec::new();
+    }
+    let mut notes = vec![format!(
+        "dotsync: recorded {} file(s) over an incoming change, because you passed `--force`",
+        forced_overwrites.len()
+    )];
+    notes.extend(
+        forced_overwrites
+            .iter()
+            .map(|path| format!("- {}", path.display())),
+    );
+    notes
 }
 
 /// Notes printed to stderr alongside a successful run: what was overwritten,
