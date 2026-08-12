@@ -1456,6 +1456,67 @@ fn commit_path_that_escapes_home_is_an_error() {
 }
 
 #[test]
+fn committing_the_scope_graph_outside_all_is_an_error() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    let config_path = ".config/dotsync/config.toml";
+    let original = machine.read_file(config_path);
+    machine.write_file(
+        config_path,
+        &format!("{original}\n# hyprland: wayland compositor config\n"),
+    );
+    let linux_before = bookmark_revision(&machine, "linux");
+
+    // Dotsync only ever reads the scope graph from `all`. A copy recorded on
+    // another scope configures nothing, but it still syncs into home on that
+    // scope's machines, where it overwrites the real one.
+    let wrong_scope = machine.run(&format!(
+        "dotsync commit linux -m 'describe hyprland' -- {config_path}"
+    ));
+    assert_eq!(
+        wrong_scope.status.code(),
+        Some(1),
+        "committing the scope graph to a non-all scope should be refused\n{}",
+        render_output(&wrong_scope)
+    );
+    assert_eq!(
+        bookmark_revision(&machine, "linux"),
+        linux_before,
+        "the refused commit must not move the scope"
+    );
+
+    let stderr = String::from_utf8_lossy(&wrong_scope.stderr).into_owned();
+    assert!(
+        stderr.contains("dotsync only reads it from `all`"),
+        "the refusal must teach where the scope graph lives\n{}",
+        render_output(&wrong_scope)
+    );
+
+    // The same change is fine on `all`, which is the only place it is read.
+    let right_scope = machine.run(&format!(
+        "dotsync commit all -m 'describe hyprland' -- {config_path}"
+    ));
+    assert!(
+        right_scope.status.success(),
+        "{}",
+        render_output(&right_scope)
+    );
+    assert!(
+        read_bookmark_file_contents(&machine, "all", config_path)
+            .contains("# hyprland: wayland compositor config"),
+        "the scope graph change should land on all"
+    );
+}
+
+#[test]
 fn commit_reports_every_unusable_path_at_once() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
