@@ -4388,3 +4388,53 @@ fn sync_does_not_rewrite_files_that_already_match() {
         "a sync that changes nothing must not rewrite the file"
     );
 }
+
+#[test]
+fn init_reports_no_drift() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    // A machine with no sync state has no record of putting anything in home,
+    // so it cannot claim a file missing from home was deleted there. On a fresh
+    // init that is every file the scope holds.
+    let init_output = machine.init();
+    assert_stderr_snapshot(
+        &init_output,
+        "dotsync: initialized mx-xps-cy and synced 1 file(s)\n",
+    );
+}
+
+#[test]
+fn a_machine_that_lost_its_sync_state_still_syncs() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    machine.delete_sync_state();
+    machine.delete_file(".bashrc");
+
+    // Deleting a managed file from home is drift only when dotsync can show it
+    // put the file there. Without sync state it cannot, so this is an ordinary
+    // incoming file and the machine converges rather than needing `--force`.
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "a machine with no sync state must still be able to sync\n{}",
+        render_output(&sync_output)
+    );
+    assert_eq!(machine.read_file(".bashrc"), "export DOTSYNC=repo\n");
+}
