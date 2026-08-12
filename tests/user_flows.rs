@@ -5146,3 +5146,72 @@ fn a_run_that_stops_offline_still_says_the_remote_was_out_of_reach() {
         render_output(&commit_output)
     );
 }
+
+/// Naming a directory is how new files get onto a scope in bulk, and adding a
+/// file to a shared scope is the one thing in a commit that every other
+/// machine will then have written into its home. A run that does it silently
+/// reads exactly like a run that changed one line.
+#[test]
+fn a_commit_says_which_files_it_started_tracking() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_file(".config/fish/config.fish", "set -g fish_greeting off\n");
+    machine.write_file(".config/fish/aliases.fish", "alias ll 'ls -l'\n");
+    let commit_output =
+        machine.run("dotsync --output json commit all -m 'add fish config' -- .config/fish/");
+    assert_eq!(
+        commit_output.status.code(),
+        Some(0),
+        "{}",
+        render_output(&commit_output)
+    );
+
+    let newly_tracked = parse_stdout_json(&commit_output)["newly_tracked"]
+        .as_array()
+        .expect("newly_tracked should be an array")
+        .iter()
+        .filter_map(|path| path.as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        newly_tracked,
+        vec![
+            ".config/fish/aliases.fish".to_string(),
+            ".config/fish/config.fish".to_string()
+        ],
+        "a commit must report the files it put on the scope for the first time\n{}",
+        render_output(&commit_output)
+    );
+    let stderr = String::from_utf8_lossy(&commit_output.stderr).into_owned();
+    assert!(
+        stderr.contains(".config/fish/aliases.fish"),
+        "and say so in words too\n{stderr}"
+    );
+
+    // Editing a file that is already on the scope is not starting to track it.
+    machine.write_file(".config/fish/config.fish", "set -g fish_greeting on\n");
+    let edit_output =
+        machine.run("dotsync --output json commit all -m 'flip greeting' -- .config/fish/");
+    assert_eq!(
+        edit_output.status.code(),
+        Some(0),
+        "{}",
+        render_output(&edit_output)
+    );
+    assert_eq!(
+        parse_stdout_json(&edit_output)["newly_tracked"]
+            .as_array()
+            .expect("newly_tracked should be an array")
+            .len(),
+        0,
+        "an edit to a tracked file is not a new file\n{}",
+        render_output(&edit_output)
+    );
+}
