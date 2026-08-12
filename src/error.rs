@@ -32,6 +32,8 @@ pub enum DotsyncError {
     },
     #[error("commit path `{path}` is absolute")]
     AbsoluteCommitPath { path: PathBuf },
+    #[error("{} conflicted file(s) are unchanged since the cascade paused at scope `{scope}`", paths.len())]
+    UnresolvedConflict { scope: String, paths: Vec<PathBuf> },
     #[error("failed to read {path}: {source}")]
     Io {
         path: PathBuf,
@@ -137,6 +139,9 @@ impl DotsyncError {
             DotsyncError::AbsoluteCommitPath { .. } => {
                 basic_error_report("absolute_commit_path", self)
             }
+            DotsyncError::UnresolvedConflict { .. } => {
+                basic_error_report("unresolved_conflict", self)
+            }
         }
     }
 }
@@ -173,6 +178,14 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
             path.display(),
             home_path.display(),
             path.display()
+        )),
+        DotsyncError::UnresolvedConflict { scope, paths } => Some(format!(
+            "unchanged since the cascade paused at scope `{scope}`: {}",
+            paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         )),
         DotsyncError::AbsoluteCommitPath { path } => Some(format!(
             "`{}` is an absolute path, and dotsync resolves every commit path against your home directory.",

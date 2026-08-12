@@ -54,6 +54,13 @@ struct PausedCascadeState {
     original_scope_commit_ids: BTreeMap<String, String>,
     #[serde(default)]
     abort_restore_paths: Vec<PathBuf>,
+    /// Home contents of each conflicted file as they stood when the cascade
+    /// paused. `continue` refuses when they have not changed — see
+    /// `unresolved_conflicted_files`. Deleted with this whole file when
+    /// conflicts become commits (PLAN item 3), like the
+    /// `WithheldPausedCascade` publish guard.
+    #[serde(default)]
+    paused_home_contents: BTreeMap<PathBuf, Option<Vec<u8>>>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -220,13 +227,17 @@ pub async fn commit_and_sync(
                         options.scope
                     ),
                 })?;
+            let conflicted_paths = conflicted_files
+                .iter()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>();
             save_paused_cascade_state(
                 paths,
                 &PausedCascadeState {
                     machine_scope,
                     paused_scope: options.scope.clone(),
                     parent_commit_ids: vec![base_commit.id().hex(), local_commit.id().hex()],
-                    conflicted_files: conflicted_files.iter().map(PathBuf::from).collect(),
+                    conflicted_files: conflicted_paths.clone(),
                     remaining_steps: plan
                         .iter()
                         .map(|step| PausedCascadeStep {
@@ -237,6 +248,7 @@ pub async fn commit_and_sync(
                     description: options.message,
                     original_scope_commit_ids: original_scope_commit_ids.clone(),
                     abort_restore_paths: selected_paths.clone(),
+                    paused_home_contents: read_home_contents(paths, &conflicted_paths)?,
                 },
             )?;
             return Err(DotsyncError::CascadePaused {
@@ -290,17 +302,22 @@ pub async fn commit_and_sync(
                 .map_err(|err| DotsyncError::Jj {
                     message: format!("commit paused cascade state for {}: {err}", options.scope),
                 })?;
+            let conflicted_paths = conflicted_files
+                .iter()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>();
             save_paused_cascade_state(
                 paths,
                 &PausedCascadeState {
                     machine_scope,
                     paused_scope: scope.clone(),
                     parent_commit_ids,
-                    conflicted_files: conflicted_files.iter().map(PathBuf::from).collect(),
+                    conflicted_files: conflicted_paths.clone(),
                     remaining_steps,
                     description: cascade_command.description,
                     original_scope_commit_ids,
                     abort_restore_paths: selected_paths.clone(),
+                    paused_home_contents: read_home_contents(paths, &conflicted_paths)?,
                 },
             )?;
             return Err(DotsyncError::CascadePaused {
@@ -684,11 +701,57 @@ async fn expected_machine_changes(
     Ok(changed)
 }
 
+/// Home contents of the conflicted files, recorded when a cascade pauses so
+/// `continue` can tell a resolution from an untouched file.
+fn read_home_contents(
+    paths: &DotsyncPaths,
+    relatives: &[PathBuf],
+) -> Result<BTreeMap<PathBuf, Option<Vec<u8>>>, DotsyncError> {
+    relatives
+        .iter()
+        .map(|relative| Ok((relative.clone(), read_home_bytes(paths, relative)?)))
+        .collect()
+}
+
+/// Conflicted files that hold exactly what they held when the cascade paused.
+///
+/// Today's pause never materializes conflict markers into home, so DESIGN's
+/// "`continue` verifies the markers are gone" is vacuously true and `continue`
+/// takes home's untouched content as the resolution — silently deleting the
+/// losing side and reporting success. Until conflicts become commits and the
+/// two sides really are written into home (PLAN item 3), an unchanged file is
+/// proof that no resolution was made. Deleted with the pause file.
+fn unresolved_conflicted_files(
+    paths: &DotsyncPaths,
+    state: &PausedCascadeState,
+) -> Result<Vec<PathBuf>, DotsyncError> {
+    let mut unresolved = Vec::new();
+    for relative in &state.conflicted_files {
+        // A pause written before this guard existed has nothing to compare
+        // against. Refusing on that would wedge a machine mid-pause, which is
+        // the failure mode this project exists to remove.
+        let Some(paused_contents) = state.paused_home_contents.get(relative) else {
+            continue;
+        };
+        if read_home_bytes(paths, relative)? == *paused_contents {
+            unresolved.push(relative.clone());
+        }
+    }
+    Ok(unresolved)
+}
+
 pub async fn continue_after_conflict(
     paths: &DotsyncPaths,
     options: SyncOptions,
 ) -> Result<ContinueReport, DotsyncError> {
     let state = load_paused_cascade_state(paths)?;
+    let unresolved = unresolved_conflicted_files(paths, &state)?;
+    if !unresolved.is_empty() {
+        return Err(DotsyncError::UnresolvedConflict {
+            scope: state.paused_scope,
+            paths: unresolved,
+        });
+    }
     let repo = load_repo_direct(paths).await?;
     let config = load_config(paths).await?;
     let internal_paths = internal_repo_paths(&config);
@@ -775,17 +838,22 @@ pub async fn continue_after_conflict(
                 .map_err(|err| DotsyncError::Jj {
                     message: format!("commit repeated paused cascade state: {err}"),
                 })?;
+            let conflicted_paths = conflicted_files
+                .iter()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>();
             save_paused_cascade_state(
                 paths,
                 &PausedCascadeState {
                     machine_scope: state.machine_scope,
                     paused_scope: scope.clone(),
                     parent_commit_ids,
-                    conflicted_files: conflicted_files.iter().map(PathBuf::from).collect(),
+                    conflicted_files: conflicted_paths.clone(),
                     remaining_steps,
                     description: state.description,
                     original_scope_commit_ids: state.original_scope_commit_ids,
                     abort_restore_paths: state.abort_restore_paths,
+                    paused_home_contents: read_home_contents(paths, &conflicted_paths)?,
                 },
             )?;
             return Err(DotsyncError::CascadePaused {

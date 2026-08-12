@@ -77,6 +77,30 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 "do not run another dotsync commit while the cascade is paused.",
             ],
         ),
+        DotsyncError::UnresolvedConflict { scope, paths } => render_structured_error(
+            "conflict not resolved",
+            "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config. Where two branches changed one file differently, the cascade pauses and asks you for the merged contents.",
+            "This continue flow reads each conflicted file back out of your home directory and records what it finds there as the resolution.",
+            "It expects those files to have changed since the cascade paused, because the resolution is the contents you write into them.",
+            error_report
+                .current_state
+                .as_deref()
+                .unwrap_or(&error_report.message),
+            "Dotsync does not yet write the two conflicting versions into home, so an unchanged file is not a resolution - it is only the version that happened to already be there. Recording it would silently discard the other scope's version.",
+            &[
+                &format!(
+                    "read the version dotsync would discard with `dotsync view --scope {scope} --file {}`, and compare it against the file in home.",
+                    paths
+                        .first()
+                        .map(|path| display_path(path))
+                        .unwrap_or_default()
+                ),
+                "write the merged contents into the file in home, then run `dotsync continue`.",
+                &format!(
+                    "if home already holds exactly the contents you want, run `dotsync abort`, commit those contents to `{scope}` directly, then redo the original commit."
+                ),
+            ],
+        ),
         DotsyncError::PausedCascadeInProgress { .. } => render_structured_error(
             "paused cascade in progress",
             "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config.",
