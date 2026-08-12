@@ -1329,6 +1329,89 @@ fn unknown_command_is_not_treated_as_scope_commit() {
 }
 
 #[test]
+fn commit_path_that_matches_nothing_is_an_error() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_file(".apprc", "ui_theme = dark\n");
+    fs::create_dir_all(machine.home_dir.join("empty-dir")).expect("create empty dir");
+    let revision_before = bookmark_revision(&machine, "all");
+
+    // A typo, a `~/`-prefixed path, an absolute path, and a directory holding
+    // nothing at all. Each of these used to commit nothing and report success,
+    // which tells an agent its config was saved when it was not.
+    let absolute = machine.home_dir.join(".apprc");
+    let absolute = absolute.to_str().expect("home path should be UTF-8");
+    for command in [
+        "dotsync commit all -m typo -- nonexistent-file".to_string(),
+        "dotsync commit all -m tilde -- '~/.apprc'".to_string(),
+        format!("dotsync commit all -m absolute -- {absolute}"),
+        "dotsync commit all -m empty-dir -- empty-dir".to_string(),
+    ] {
+        let output = machine.run(&command);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "`{command}` should fail rather than report a successful empty commit\n{}",
+            render_output(&output)
+        );
+        assert_eq!(
+            bookmark_revision(&machine, "all"),
+            revision_before,
+            "`{command}` must not move the scope"
+        );
+    }
+
+    let typo_output = machine.run("dotsync commit all -m typo -- nonexistent-file");
+    assert_stderr_snapshot(
+        &typo_output,
+        &format!(
+            "\
+dotsync: cannot commit that path
+
+What dotsync does:
+Dotsync records the home files you name onto a scope branch, then cascades that scope so every machine sharing it receives the change.
+
+This flow:
+This commit flow resolves each path you name against your home directory and against the files already tracked on the target scope.
+
+Expected:
+It expects every path you name to be relative to your home directory, such as `.bashrc`, `.config/fish/config.fish`, or `.config/fish/`.
+
+Current state found:
+`nonexistent-file` matched nothing: no file exists at or under {}/nonexistent-file, and scope `all` tracks no file at or under `nonexistent-file`.
+
+Why dotsync stopped:
+Committing a path dotsync cannot resolve would record no change while reporting success, so you would believe the config was saved when it was not.
+
+Correct flow:
+- name paths relative to your home directory: `dotsync commit <scope> -m \"message\" -- .config/fish/config.fish`.
+- do not use `~/` or absolute paths; dotsync resolves every path against your home directory already.
+- run `dotsync status` to see which managed files changed.
+",
+            machine.home_dir.display()
+        ),
+    );
+
+    let absolute_output = machine.run(&format!("dotsync commit all -m absolute -- {absolute}"));
+    let absolute_stderr = String::from_utf8_lossy(&absolute_output.stderr);
+    assert!(
+        absolute_stderr.contains(&format!(
+            "`{absolute}` is an absolute path, and dotsync resolves every commit path against your home directory."
+        )),
+        "{}",
+        render_output(&absolute_output)
+    );
+}
+
+#[test]
 fn commit_explicit_path_adds_file_to_scope_and_syncs() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
