@@ -1,9 +1,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
     abort_paused_cascade, commit_and_sync, continue_after_conflict, diff_home, init,
-    list_scope_tree, list_scopes, read_scope_file, status, sync, ChangeStatus, CommandOutcome,
-    CommitOptions, CommitSelection, DiffReport, DotsyncError, DotsyncPaths, FileDrift,
-    ScopeListReport, SyncOptions, TreeReport,
+    list_scope_tree, list_scopes, read_scope_file, status, sync, ChangeStatus, CommitOptions,
+    CommitSelection, DiffReport, DotsyncError, DotsyncPaths, FileDrift, ScopeListReport,
+    SyncOptions, TreeReport,
 };
 mod render;
 use serde_json::json;
@@ -381,49 +381,47 @@ fn prompt_init_remote_url() -> Result<String, UsageError> {
 
 async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    match continue_after_conflict(&paths, SyncOptions { force }).await? {
-        CommandOutcome::Success(report) => Ok(CliOutput::Success(SuccessOutput {
-            json: json!({
-                "status": "ok",
-                "command": "continue",
-                "scope": report.sync.current_scope,
-                "machine_scope": report.sync.current_scope,
-                "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
-                "unpushed_scopes": report.push.unpushed_scopes(),
-            }),
-            human: format!(
-                "dotsync: resumed cascade and synced {} file(s)",
-                report.sync.synced_paths.len()
-            ),
-            notes: render::success_notes(&report.sync.drifts, Some(&report.push)),
-            stdout: None,
-            exit_code: 0,
-        })),
-    }
+    let report = continue_after_conflict(&paths, SyncOptions { force }).await?;
+    Ok(CliOutput::Success(SuccessOutput {
+        json: json!({
+            "status": "ok",
+            "command": "continue",
+            "scope": report.sync.current_scope,
+            "machine_scope": report.sync.current_scope,
+            "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
+            "unpushed_scopes": report.push.unpushed_scopes(),
+        }),
+        human: format!(
+            "dotsync: resumed cascade and synced {} file(s)",
+            report.sync.synced_paths.len()
+        ),
+        notes: render::success_notes(&report.sync.drifts, Some(&report.push)),
+        stdout: None,
+        exit_code: 0,
+    }))
 }
 
 async fn run_abort(force: bool) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    match abort_paused_cascade(&paths, SyncOptions { force }).await? {
-        CommandOutcome::Success(report) => Ok(CliOutput::Success(SuccessOutput {
-            json: json!({
-                "status": "ok",
-                "command": "abort",
-                "aborted_scope": report.aborted_scope,
-                "scope": report.sync.current_scope,
-                "machine_scope": report.sync.current_scope,
-                "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>()
-            }),
-            human: format!(
-                "dotsync: aborted cascade at {} and synced {} file(s)",
-                report.aborted_scope,
-                report.sync.synced_paths.len()
-            ),
-            notes: render::success_notes(&report.sync.drifts, None),
-            stdout: None,
-            exit_code: 0,
-        })),
-    }
+    let report = abort_paused_cascade(&paths, SyncOptions { force }).await?;
+    Ok(CliOutput::Success(SuccessOutput {
+        json: json!({
+            "status": "ok",
+            "command": "abort",
+            "aborted_scope": report.aborted_scope,
+            "scope": report.sync.current_scope,
+            "machine_scope": report.sync.current_scope,
+            "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>()
+        }),
+        human: format!(
+            "dotsync: aborted cascade at {} and synced {} file(s)",
+            report.aborted_scope,
+            report.sync.synced_paths.len()
+        ),
+        notes: render::success_notes(&report.sync.drifts, None),
+        stdout: None,
+        exit_code: 0,
+    }))
 }
 
 async fn run_sync(force: bool) -> Result<CliOutput, DotsyncError> {
@@ -546,7 +544,7 @@ async fn run_commit(
     selection: CommitSelection,
 ) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    match commit_and_sync(
+    let report = commit_and_sync(
         &paths,
         CommitOptions {
             scope,
@@ -555,27 +553,25 @@ async fn run_commit(
             selection,
         },
     )
-    .await?
-    {
-        CommandOutcome::Success(report) => Ok(CliOutput::Success(SuccessOutput {
-            json: json!({
-                "status": "ok",
-                "command": "commit",
-                "scope": report.committed_scope,
-                "machine_scope": report.sync.current_scope,
-                "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
-                "unpushed_scopes": report.push.unpushed_scopes(),
-            }),
-            human: format!(
-                "dotsync: committed {} and synced {} file(s)",
-                report.committed_scope,
-                report.sync.synced_paths.len()
-            ),
-            notes: render::success_notes(&report.sync.drifts, Some(&report.push)),
-            stdout: None,
-            exit_code: 0,
-        })),
-    }
+    .await?;
+    Ok(CliOutput::Success(SuccessOutput {
+        json: json!({
+            "status": "ok",
+            "command": "commit",
+            "scope": report.committed_scope,
+            "machine_scope": report.sync.current_scope,
+            "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
+            "unpushed_scopes": report.push.unpushed_scopes(),
+        }),
+        human: format!(
+            "dotsync: committed {} and synced {} file(s)",
+            report.committed_scope,
+            report.sync.synced_paths.len()
+        ),
+        notes: render::success_notes(&report.sync.drifts, Some(&report.push)),
+        stdout: None,
+        exit_code: 0,
+    }))
 }
 
 fn discover_paths() -> Result<DotsyncPaths, DotsyncError> {

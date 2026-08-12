@@ -16,7 +16,7 @@ use jj_lib::repo_path::RepoPathBuf;
 use jj_lib::rewrite::merge_commit_trees;
 
 use crate::cascade::{
-    build_cascade_plan, execute_cascade_plan, CascadeCommand, CascadeOutcome, CascadeStep,
+    build_cascade_plan, execute_cascade_steps, CascadeCommand, CascadeOutcome, CascadeStep,
     ScopeHeads,
 };
 use crate::config::{internal_repo_paths, load_config, DotsyncPaths};
@@ -65,7 +65,6 @@ struct PausedCascadeStep {
 #[derive(Debug, Clone)]
 pub struct CommitReport {
     pub committed_scope: String,
-    pub cascaded_scopes: Vec<String>,
     pub sync: SyncReport,
     pub push: PushReport,
 }
@@ -76,7 +75,6 @@ impl CommitReport {
     fn nothing_to_commit(push: PushReport) -> Self {
         Self {
             committed_scope: String::new(),
-            cascaded_scopes: Vec::new(),
             sync: SyncReport::default(),
             push,
         }
@@ -85,7 +83,6 @@ impl CommitReport {
 
 #[derive(Debug, Clone)]
 pub struct ContinueReport {
-    pub cascaded_scopes: Vec<String>,
     pub sync: SyncReport,
     pub push: PushReport,
 }
@@ -96,15 +93,10 @@ pub struct AbortReport {
     pub sync: SyncReport,
 }
 
-#[derive(Debug, Clone)]
-pub enum CommandOutcome<T> {
-    Success(T),
-}
-
 pub async fn commit_and_sync(
     paths: &DotsyncPaths,
     options: CommitOptions,
-) -> Result<CommandOutcome<CommitReport>, DotsyncError> {
+) -> Result<CommitReport, DotsyncError> {
     reject_commit_if_cascade_paused(paths)?;
 
     let pre_fetch_repo = load_repo_direct(paths).await?;
@@ -162,9 +154,7 @@ pub async fn commit_and_sync(
                 "scoped commit is not available until home-diff commit flow lands",
             ));
         }
-        return Ok(CommandOutcome::Success(CommitReport::nothing_to_commit(
-            pending_push,
-        )));
+        return Ok(CommitReport::nothing_to_commit(pending_push));
     }
 
     let mut tx = repo.start_transaction();
@@ -184,9 +174,7 @@ pub async fn commit_and_sync(
         })?;
 
         if new_tree.tree_ids() == base_tree.tree_ids() {
-            return Ok(CommandOutcome::Success(CommitReport::nothing_to_commit(
-                pending_push,
-            )));
+            return Ok(CommitReport::nothing_to_commit(pending_push));
         }
 
         tx.repo_mut()
@@ -248,7 +236,6 @@ pub async fn commit_and_sync(
                     parent_commit_ids: vec![base_commit.id().hex(), local_commit.id().hex()],
                     conflicted_files: conflicted_files.iter().map(PathBuf::from).collect(),
                     remaining_steps: plan
-                        .remaining_steps()
                         .iter()
                         .map(|step| PausedCascadeStep {
                             scope: step.scope.clone(),
@@ -292,50 +279,44 @@ pub async fn commit_and_sync(
         description: format!("dotsync: cascade from {}", options.scope),
     };
     let plan = build_cascade_plan(&graph, &scope_heads, &cascade_command);
-    let cascaded_scopes =
-        match execute_cascade_plan(tx.repo_mut(), &mut scope_heads, &plan, &cascade_command).await?
-        {
-            CascadeOutcome::Completed(success) => success.progress.completed_scopes,
-            CascadeOutcome::Paused {
+    match execute_cascade_steps(tx.repo_mut(), &mut scope_heads, &plan, &cascade_command).await? {
+        CascadeOutcome::Completed => {}
+        CascadeOutcome::Paused {
+            scope,
+            conflicted_files,
+        } => {
+            let paused_step = plan
+                .iter()
+                .find(|step| step.scope == scope)
+                .ok_or_else(|| DotsyncError::Jj {
+                    message: format!("paused cascade step `{scope}` was not in plan"),
+                })?;
+            let parent_commit_ids = parent_commit_ids_for_step(&scope_heads, paused_step)?;
+            let remaining_steps = remaining_steps_after_pause(&plan, &scope);
+            tx.commit("dotsync: pause cascade")
+                .await
+                .map_err(|err| DotsyncError::Jj {
+                    message: format!("commit paused cascade state for {}: {err}", options.scope),
+                })?;
+            save_paused_cascade_state(
+                paths,
+                &PausedCascadeState {
+                    machine_scope,
+                    paused_scope: scope.clone(),
+                    parent_commit_ids,
+                    conflicted_files: conflicted_files.iter().map(PathBuf::from).collect(),
+                    remaining_steps,
+                    description: cascade_command.description,
+                    original_scope_commit_ids,
+                    abort_restore_paths: selected_paths.clone(),
+                },
+            )?;
+            return Err(DotsyncError::CascadePaused {
                 scope,
-                conflicted_files,
-            } => {
-                let paused_step = plan
-                    .remaining_steps()
-                    .iter()
-                    .find(|step| step.scope == scope)
-                    .ok_or_else(|| DotsyncError::Jj {
-                        message: format!("paused cascade step `{scope}` was not in plan"),
-                    })?;
-                let parent_commit_ids = parent_commit_ids_for_step(&scope_heads, paused_step)?;
-                let remaining_steps = remaining_steps_after_pause(plan.remaining_steps(), &scope);
-                tx.commit("dotsync: pause cascade")
-                    .await
-                    .map_err(|err| DotsyncError::Jj {
-                        message: format!(
-                            "commit paused cascade state for {}: {err}",
-                            options.scope
-                        ),
-                    })?;
-                save_paused_cascade_state(
-                    paths,
-                    &PausedCascadeState {
-                        machine_scope,
-                        paused_scope: scope.clone(),
-                        parent_commit_ids,
-                        conflicted_files: conflicted_files.iter().map(PathBuf::from).collect(),
-                        remaining_steps,
-                        description: cascade_command.description,
-                        original_scope_commit_ids,
-                        abort_restore_paths: selected_paths.clone(),
-                    },
-                )?;
-                return Err(DotsyncError::CascadePaused {
-                    scope,
-                    conflicted_files: conflicted_files.join(", "),
-                });
-            }
-        };
+                conflicted_files: conflicted_files.join(", "),
+            });
+        }
+    }
 
     let expected_changes = expected_machine_changes(
         tx.repo_mut(),
@@ -364,12 +345,11 @@ pub async fn commit_and_sync(
     )
     .await?;
 
-    Ok(CommandOutcome::Success(CommitReport {
+    Ok(CommitReport {
         committed_scope: options.scope,
-        cascaded_scopes,
         sync,
         push,
-    }))
+    })
 }
 
 async fn stale_selected_scope_paths(
@@ -776,7 +756,7 @@ fn home_dir_has_unmanaged_files(
 pub async fn continue_after_conflict(
     paths: &DotsyncPaths,
     options: SyncOptions,
-) -> Result<CommandOutcome<ContinueReport>, DotsyncError> {
+) -> Result<ContinueReport, DotsyncError> {
     let state = load_paused_cascade_state(paths)?;
     let repo = load_repo_direct(paths).await?;
     let config = load_config(paths).await?;
@@ -837,35 +817,28 @@ pub async fn continue_after_conflict(
         root_scope: state.paused_scope.clone(),
         description: state.description.clone(),
     };
-    let remaining_plan = crate::cascade::CascadePlan::from_steps(
-        state
-            .remaining_steps
-            .iter()
-            .map(|step| CascadeStep {
-                scope: step.scope.clone(),
-                parent_scopes: step.parent_scopes.clone(),
-            })
-            .collect(),
-    );
-    let mut cascaded_scopes = vec![state.paused_scope.clone()];
-    match execute_cascade_plan(tx.repo_mut(), &mut scope_heads, &remaining_plan, &command).await? {
-        CascadeOutcome::Completed(success) => {
-            cascaded_scopes.extend(success.progress.completed_scopes);
-        }
+    let remaining_plan = state
+        .remaining_steps
+        .iter()
+        .map(|step| CascadeStep {
+            scope: step.scope.clone(),
+            parent_scopes: step.parent_scopes.clone(),
+        })
+        .collect::<Vec<_>>();
+    match execute_cascade_steps(tx.repo_mut(), &mut scope_heads, &remaining_plan, &command).await? {
+        CascadeOutcome::Completed => {}
         CascadeOutcome::Paused {
             scope,
             conflicted_files,
         } => {
             let paused_step = remaining_plan
-                .remaining_steps()
                 .iter()
                 .find(|step| step.scope == scope)
                 .ok_or_else(|| DotsyncError::Jj {
                     message: format!("paused cascade step `{scope}` was not in remaining plan"),
                 })?;
             let parent_commit_ids = parent_commit_ids_for_step(&scope_heads, paused_step)?;
-            let remaining_steps =
-                remaining_steps_after_pause(remaining_plan.remaining_steps(), &scope);
+            let remaining_steps = remaining_steps_after_pause(&remaining_plan, &scope);
             tx.commit("dotsync: pause cascade again")
                 .await
                 .map_err(|err| DotsyncError::Jj {
@@ -912,17 +885,13 @@ pub async fn continue_after_conflict(
         Some(&state.machine_scope),
     )
     .await?;
-    Ok(CommandOutcome::Success(ContinueReport {
-        cascaded_scopes,
-        sync,
-        push,
-    }))
+    Ok(ContinueReport { sync, push })
 }
 
 pub async fn abort_paused_cascade(
     paths: &DotsyncPaths,
     options: SyncOptions,
-) -> Result<CommandOutcome<AbortReport>, DotsyncError> {
+) -> Result<AbortReport, DotsyncError> {
     let state = load_paused_cascade_state(paths)?;
     if state.original_scope_commit_ids.is_empty() {
         return Err(DotsyncError::Jj {
@@ -956,10 +925,10 @@ pub async fn abort_paused_cascade(
         crate::sync::sync_repo_to_home(paths, options, restore_paths, Some(&state.machine_scope))
             .await?;
 
-    Ok(CommandOutcome::Success(AbortReport {
+    Ok(AbortReport {
         aborted_scope: state.paused_scope,
         sync,
-    }))
+    })
 }
 
 fn paused_cascade_state_path(paths: &DotsyncPaths) -> PathBuf {

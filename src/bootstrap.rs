@@ -6,7 +6,7 @@ use jj_lib::repo::Repo as _;
 use jj_lib::workspace::Workspace;
 
 use crate::cascade::{
-    build_cascade_plan, execute_cascade_plan, CascadeCommand, CascadeOutcome, ScopeHeads,
+    build_cascade_plan, execute_cascade_steps, CascadeCommand, CascadeOutcome, ScopeHeads,
 };
 use crate::config::{
     default_sync_state_relative_path, load_config, render_config, write_config, DotsyncConfig,
@@ -23,7 +23,6 @@ use crate::sync::{sync_repo_to_home, SyncOptions, SyncReport};
 
 #[derive(Debug, Clone)]
 pub struct InitReport {
-    pub created_scopes: Vec<String>,
     /// Includes the machine scope this init settled on, as `sync.current_scope`.
     pub sync: SyncReport,
     pub push: PushReport,
@@ -56,7 +55,7 @@ pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, 
     let identity = detect_machine()?;
 
     let remote_empty = repo.view().all_remote_bookmarks().next().is_none();
-    let (created_scopes, current_scope) = if remote_empty {
+    let current_scope = if remote_empty {
         bootstrap_empty_remote(paths, &identity).await?
     } else {
         join_existing_remote(paths, repo, &identity).await?
@@ -71,17 +70,13 @@ pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, 
     )
     .await?;
 
-    Ok(InitReport {
-        created_scopes,
-        sync,
-        push,
-    })
+    Ok(InitReport { sync, push })
 }
 
 pub(crate) async fn bootstrap_empty_remote(
     paths: &DotsyncPaths,
     identity: &MachineIdentity,
-) -> Result<(Vec<String>, String), DotsyncError> {
+) -> Result<String, DotsyncError> {
     let graph = ScopeGraph::new(HashMap::from([
         ("all".to_string(), vec![]),
         (identity.os_scope.clone(), vec!["all".to_string()]),
@@ -137,40 +132,33 @@ pub(crate) async fn bootstrap_empty_remote(
         .await
         .map_err(|err| jj_error(format!("commit init scopes: {err}")))?;
 
-    Ok((
-        vec![
-            "all".to_string(),
-            identity.os_scope.clone(),
-            identity.machine_scope.clone(),
-        ],
-        identity.machine_scope.clone(),
-    ))
+    Ok(identity.machine_scope.clone())
 }
 
 pub(crate) async fn join_existing_remote(
     paths: &DotsyncPaths,
     _repo: std::sync::Arc<jj_lib::repo::ReadonlyRepo>,
     identity: &MachineIdentity,
-) -> Result<(Vec<String>, String), DotsyncError> {
+) -> Result<String, DotsyncError> {
     let config = load_config(paths).await?;
     let graph = config.graph.clone();
 
     let mut parents = graph.parents.clone();
-    let mut created_scopes = Vec::new();
+    let mut scopes_to_create = 0;
     if !parents.contains_key(&identity.os_scope) {
         parents.insert(identity.os_scope.clone(), vec!["all".to_string()]);
-        created_scopes.push(identity.os_scope.clone());
+        scopes_to_create += 1;
     }
     if !parents.contains_key(&identity.machine_scope) {
         parents.insert(
             identity.machine_scope.clone(),
             vec![identity.os_scope.clone()],
         );
-        created_scopes.push(identity.machine_scope.clone());
+        scopes_to_create += 1;
     }
 
-    if created_scopes.is_empty() {
-        return Ok((created_scopes, identity.machine_scope.clone()));
+    if scopes_to_create == 0 {
+        return Ok(identity.machine_scope.clone());
     }
 
     let updated_graph = ScopeGraph::new(parents)?;
@@ -208,7 +196,7 @@ pub(crate) async fn join_existing_remote(
         description: "dotsync: cascade init config".to_string(),
     };
     let cascade_plan = build_cascade_plan(&updated_graph, &scope_heads, &cascade_command);
-    let descendant_scopes = match execute_cascade_plan(
+    match execute_cascade_steps(
         tx.repo_mut(),
         &mut scope_heads,
         &cascade_plan,
@@ -216,7 +204,7 @@ pub(crate) async fn join_existing_remote(
     )
     .await?
     {
-        CascadeOutcome::Completed(success) => success.progress.completed_scopes,
+        CascadeOutcome::Completed => {}
         CascadeOutcome::Paused {
             scope,
             conflicted_files,
@@ -228,7 +216,7 @@ pub(crate) async fn join_existing_remote(
                 ),
             })
         }
-    };
+    }
 
     if !scope_heads.contains(&identity.os_scope) {
         let parent = scope_heads.require("all")?;
@@ -267,9 +255,5 @@ pub(crate) async fn join_existing_remote(
         .await
         .map_err(|err| jj_error(format!("commit join scope changes: {err}")))?;
 
-    let mut created = descendant_scopes;
-    created.extend(created_scopes);
-    created.sort();
-    created.dedup();
-    Ok((created, identity.machine_scope.clone()))
+    Ok(identity.machine_scope.clone())
 }

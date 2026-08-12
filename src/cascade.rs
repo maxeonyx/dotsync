@@ -17,29 +17,14 @@ pub(crate) struct CascadeCommand {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct CascadePlan {
-    steps: Vec<CascadeStep>,
-}
-
-#[derive(Debug, Clone)]
 pub(crate) struct CascadeStep {
     pub(crate) scope: String,
     pub(crate) parent_scopes: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct CascadeProgress {
-    pub(crate) completed_scopes: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct CascadeSuccess {
-    pub(crate) progress: CascadeProgress,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) enum CascadeOutcome {
-    Completed(CascadeSuccess),
+    Completed,
     Paused {
         scope: String,
         conflicted_files: Vec<String>,
@@ -97,21 +82,11 @@ impl ScopeHeads {
     }
 }
 
-impl CascadePlan {
-    pub(crate) fn from_steps(steps: Vec<CascadeStep>) -> Self {
-        Self { steps }
-    }
-
-    pub(crate) fn remaining_steps(&self) -> &[CascadeStep] {
-        &self.steps
-    }
-}
-
 pub(crate) fn build_cascade_plan(
     graph: &ScopeGraph,
     scope_heads: &ScopeHeads,
     command: &CascadeCommand,
-) -> CascadePlan {
+) -> Vec<CascadeStep> {
     let mut steps = Vec::new();
     for scope in descendants_in_topological_order(graph, &command.root_scope) {
         if !scope_heads.contains(&scope) {
@@ -130,31 +105,14 @@ pub(crate) fn build_cascade_plan(
             parent_scopes,
         });
     }
-    CascadePlan { steps }
+    steps
 }
 
-pub(crate) async fn execute_cascade_plan(
-    mut_repo: &mut MutableRepo,
-    scope_heads: &mut ScopeHeads,
-    plan: &CascadePlan,
-    command: &CascadeCommand,
-) -> Result<CascadeOutcome, DotsyncError> {
-    execute_cascade_steps(
-        mut_repo,
-        scope_heads,
-        plan.remaining_steps(),
-        command,
-        CascadeProgress::default(),
-    )
-    .await
-}
-
-async fn execute_cascade_steps(
+pub(crate) async fn execute_cascade_steps(
     mut_repo: &mut MutableRepo,
     scope_heads: &mut ScopeHeads,
     steps: &[CascadeStep],
     command: &CascadeCommand,
-    mut progress: CascadeProgress,
 ) -> Result<CascadeOutcome, DotsyncError> {
     for step in steps {
         let existing_head = scope_heads.require(&step.scope)?;
@@ -201,9 +159,8 @@ async fn execute_cascade_steps(
             RefTarget::normal(new_commit.id().clone()),
         );
         scope_heads.update(step.scope.clone(), new_commit);
-        progress.completed_scopes.push(step.scope.clone());
     }
-    Ok(CascadeOutcome::Completed(CascadeSuccess { progress }))
+    Ok(CascadeOutcome::Completed)
 }
 
 fn descendants_in_topological_order(graph: &ScopeGraph, scope: &str) -> Vec<String> {
