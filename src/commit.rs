@@ -738,7 +738,17 @@ fn expand_selection_paths(
         .map(|p| p.to_path_buf());
 
     let mut rejected = Vec::new();
-    for selection_path in selection_paths {
+    for named in selection_paths {
+        // `.config/fish/` and `.config/fish` name the same directory, and
+        // `./x` names `x` — but dotsync records the path it is given verbatim,
+        // as a repo path, which accepts neither trailing separators nor `.`
+        // components. Normalising here rather than at the repo layer keeps it
+        // a question about the selection, answered where the teaching messages
+        // are; what gets quoted back to the user is still what they typed.
+        let selection_path = &named
+            .components()
+            .filter(|component| !matches!(component, Component::CurDir))
+            .collect::<PathBuf>();
         if let Some(problem) = unusable_commit_path(
             paths,
             selection_path,
@@ -746,7 +756,7 @@ fn expand_selection_paths(
             repo_relative.as_deref(),
         ) {
             rejected.push(RejectedCommitPath {
-                path: selection_path.clone(),
+                path: named.clone(),
                 problem,
             });
             continue;
@@ -785,7 +795,7 @@ fn expand_selection_paths(
         // which is how a typo reads to an agent as a saved config change.
         if matched.is_empty() {
             rejected.push(RejectedCommitPath {
-                path: selection_path.clone(),
+                path: named.clone(),
                 problem: CommitPathProblem::Unmatched { home_path },
             });
             continue;

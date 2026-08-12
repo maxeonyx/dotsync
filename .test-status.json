@@ -18,7 +18,7 @@
     "dotsync::user_flows$a_stale_home_file_cannot_be_committed_over_another_machines_change": "passing",
     "dotsync::user_flows$a_successful_forced_commit_says_what_it_overwrote": "passing",
     "dotsync::user_flows$a_sync_interrupted_before_saving_state_is_not_drift_on_the_next_run": "passing",
-    "dotsync::user_flows$a_trailing_separator_on_a_named_file_is_just_a_trailing_separator": "pending",
+    "dotsync::user_flows$a_trailing_separator_on_a_named_file_is_just_a_trailing_separator": "passing",
     "dotsync::user_flows$abort_paused_cascade_restores_non_conflicting_selected_paths": "passing",
     "dotsync::user_flows$abort_paused_cascade_restores_pre_pause_state_and_clears_pause": "passing",
     "dotsync::user_flows$abort_restores_a_drifted_file_outside_the_paused_selection": "passing",
