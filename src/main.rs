@@ -49,7 +49,9 @@ const COMMIT_ABOUT: &str = "Commit selected home changes to a scope, cascade, sy
 
 const COMMIT_LONG_ABOUT: &str = "PATHS are home-relative files or directories to record on SCOPE. Omit them to record every managed file this machine has changed, which is exactly the set `dotsync status` lists as changes.
 
-dotsync compares three sides of every path: what it last synced to this machine, what is in home now, and what the scopes hold now. A path whose home content is simply older than the repo has not been changed here, so `commit` refuses it and points at plain `dotsync` instead — committing it would revert whoever published the change that is already there.
+dotsync compares three sides of every path: what it last synced to this machine, what is in home now, and what the scopes hold now. A path whose home content is simply older than the repo has not been changed here, so naming it is refused and pointed at plain `dotsync` instead — committing it would revert whoever published the change that is already there.
+
+Naming a directory means \"commit what changed under here\", the same thing omitting the paths means about the whole machine. So it records what this machine changed under that directory, leaves the rest alone, and lists what it left alone.
 
 `--force` means \"home wins anyway\", and on `commit` it applies only to the paths you name. That is deliberately different from `--force` on plain `dotsync` and on `continue`, which name no paths and so overwrite every drifted file. So `dotsync commit linux -m msg --force -- .bashrc` overwrites `.bashrc` and nothing else, while `dotsync --force` overwrites everything that drifted.
 

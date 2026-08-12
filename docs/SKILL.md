@@ -24,7 +24,9 @@ Always choose the **highest (most general) scope** that makes sense. If a change
 
 - dotsync is repo-first: the repo is the source of truth.
 - After committing, dotsync cascades the change through all descendant scopes and syncs the result back to `~/`.
-- `dotsync status` separates two things. Files it lists as **changed** were changed here and need a decision from you. Files it lists as **incoming** were changed on another machine and home has not caught up — plain `dotsync` applies those, and `dotsync commit` refuses them, because committing one would revert whoever published it.
+- `dotsync status` separates two things. Files it lists as **changed** were changed here and need a decision from you. Files it lists as **incoming** were changed on another machine and home has not caught up — plain `dotsync` applies those, and `dotsync commit` refuses one you name, because committing it would revert whoever published it.
+- Naming a directory (`-- .config/fish/`) means "commit what changed under here", exactly as naming no paths at all means it for the whole machine. It records what this machine changed under that directory, leaves incoming files alone, and lists what it left alone. Only a path you name exactly is refused.
+- When the remote cannot be reached, every command still works against the state this machine last fetched and says so; commits stay local until a run that reaches the remote publishes them. Only `dotsync init` needs the remote to be up.
 - If live system files have drifted from what the repo expects, `dotsync` (sync) will show the diff and stop. Inspect the diff before re-running with `--force`.
 - `--force` has two shapes. On plain `dotsync` and `continue` it overwrites every drifted file. On `commit` it applies only to the paths you name, and the run reports them as `forced_overwrites`.
 - There is no `~/dotfiles/` directory. The repo is hidden at `~/.local/share/dotsync/repo/`. Never interact with it directly.
