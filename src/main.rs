@@ -925,14 +925,26 @@ fn render_view_scope_stdout(scope: &str, files: &[PathBuf]) -> String {
     )
 }
 
+/// Which scopes hold a file — including none of them, which used to print two
+/// headings with nothing between them. That is the answer to the commonest
+/// reason for asking, a typo, and it read like a bug instead.
+///
+/// Still exit 0: "no scope holds this" is an answer to the question asked.
+/// Asking for the *contents* of a file on a named scope is a different
+/// question, and having none to print is a stop.
 fn render_view_file_scopes_stdout(path: &std::path::Path, scopes: &[String]) -> String {
+    let path = render::display_path(path);
+    if scopes.is_empty() {
+        return render_lines([
+            format!("File {path}"),
+            format!("No scope holds {path}."),
+            "Run `dotsync view` to see every file the scopes do hold.".to_string(),
+        ]);
+    }
     render_lines(
-        [
-            format!("File {}", render::display_path(path)),
-            "Scopes".to_string(),
-        ]
-        .into_iter()
-        .chain(scopes.iter().cloned()),
+        [format!("File {path}"), "Scopes".to_string()]
+            .into_iter()
+            .chain(scopes.iter().cloned()),
     )
 }
 

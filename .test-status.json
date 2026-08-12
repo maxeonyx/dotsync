@@ -118,7 +118,7 @@
     "dotsync::user_flows$v03_plain_sync_ignores_unrelated_home_changes": "passing",
     "dotsync::user_flows$view_file_shows_scopes_and_scoped_file_content": "passing",
     "dotsync::user_flows$view_reaches_the_remote_once": "passing",
-    "dotsync::user_flows$view_says_when_no_scope_holds_a_file": "pending",
+    "dotsync::user_flows$view_says_when_no_scope_holds_a_file": "passing",
     "dotsync::user_flows$view_scope_shows_checked_in_file_tree": "passing",
     "dotsync::user_flows$view_summarizes_checked_in_scopes_and_files": "passing",
     "dotsync::user_flows$view_works_while_local_scopes_are_ahead_of_remote": "passing",
