@@ -1,5 +1,5 @@
 use crate::UsageError;
-use dotsync::{DotsyncError, ErrorReport, FileDrift, PushReport};
+use dotsync::{DotsyncError, ErrorReport, FileDrift, PushReport, UnreachableRemote};
 use serde_json::json;
 use similar::TextDiff;
 use std::path::Path;
@@ -258,6 +258,21 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 "After that, let dotsync recreate valid sync state from a successful sync.",
             ],
         ),
+        // Every other command carries on against the last state it fetched
+        // and says so in a note. `init` is the one whose whole job is to reach
+        // the remote, so for it this really is a stop.
+        DotsyncError::RemoteUnreachable { reason } => render_structured_error(
+            "could not reach the remote",
+            "Dotsync keeps your config in a hidden repo and shares it between your machines through a git remote, so every machine starts from what the others have already published.",
+            "This init flow clones that remote into the hidden repo, works out which scopes this machine belongs to, and syncs them into home.",
+            "It expects the remote URL you gave it to be reachable from this machine now.",
+            reason,
+            "Dotsync stopped rather than starting from an empty history: scopes created here would collide with the ones already on the remote the first time this machine reached it.",
+            &[
+                "check the remote URL, this machine's network, and your credentials for that remote.",
+                "then run `dotsync init <remote-url>` again.",
+            ],
+        ),
         DotsyncError::NotInitialized { path } => format!(
             "dotsync: not initialized\n\nWhat happened:\nDotsync could not find its hidden repo at {}.\n\nWhat to do:\n- Run `dotsync init <remote-url>` from this home directory.\n- Then rerun `dotsync status`.\n\nThe remote URL is the git remote that stores your dotsync repo.",
             path.display()
@@ -296,6 +311,36 @@ pub(crate) fn render_structured_error(
     format!(
         "dotsync: {summary}\n\nWhat dotsync does:\n{what_dotsync_does}\n\nThis flow:\n{this_flow}\n\nExpected:\n{expected}\n\nCurrent state found:\n{current_state}\n\nWhy dotsync stopped:\n{why_stopped}\n\nCorrect flow:\n{correct_flow}"
     )
+}
+
+/// Which state a run is reporting against, when it is not the remote's.
+///
+/// Printed by every command that could not fetch, before anything else it has
+/// to say, because it is the frame for all of it: the drift, the scope list
+/// and the commit that follows are all against the state this machine last
+/// fetched rather than against the state the remote is in now.
+pub(crate) fn unreachable_remote_notes(unreachable: Option<&UnreachableRemote>) -> Vec<String> {
+    let Some(unreachable) = unreachable else {
+        return Vec::new();
+    };
+    vec![
+        "dotsync: could not reach the remote; reporting against the last-fetched state".to_string(),
+        format!("dotsync: {}", unreachable.reason),
+    ]
+}
+
+/// The machine-readable half of the same fact. Added at the one place every
+/// command's JSON passes through, so no command can forget it — and only when
+/// there is something to say, because a run that reached the remote and a run
+/// that never needed it are the same answer to a reader of this field.
+pub(crate) fn with_remote_state(
+    mut json: serde_json::Value,
+    unreachable: Option<&UnreachableRemote>,
+) -> serde_json::Value {
+    if let Some(unreachable) = unreachable {
+        json["remote_unreachable"] = json!(unreachable.reason);
+    }
+    json
 }
 
 /// What a run overwrote under `--force`, said out loud. A forced overwrite is
@@ -342,6 +387,13 @@ fn notes_for_push(push: &PushReport) -> Vec<String> {
                 "dotsync: those scopes are committed here but not published, so the remote does not have this change yet. The next run will try again.".to_string(),
             ]
         }
+        PushReport::Unreachable { scopes, reason } => vec![
+            format!(
+                "dotsync: could not publish {} ({reason})",
+                scopes.join(", ")
+            ),
+            "dotsync: those scopes are committed here and will be published by the next run that reaches the remote.".to_string(),
+        ],
         PushReport::WithheldPausedCascade {
             scopes,
             paused_scope,

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::config::DotsyncPaths;
 use crate::drift::{classify_home_against_scope, FileState, RecordedFromHome};
 use crate::error::DotsyncError;
-use crate::session::Session;
+use crate::session::{Run, Session};
 use crate::sync::{load_sync_state, resolve_current_scope};
 
 /// What `status` found, split by whether anyone has to decide anything.
@@ -28,7 +28,7 @@ pub struct FileChange {
     pub state: FileState,
 }
 
-pub async fn status(paths: &DotsyncPaths) -> Result<StatusReport, DotsyncError> {
+pub async fn status(paths: &DotsyncPaths) -> Result<Run<StatusReport>, DotsyncError> {
     let mut session = Session::open(paths).await?;
     session.fetch().await?;
     let sync_state = load_sync_state(session.paths(), session.config())?;
@@ -54,9 +54,9 @@ pub async fn status(paths: &DotsyncPaths) -> Result<StatusReport, DotsyncError> 
             .collect::<Vec<_>>()
     };
 
-    Ok(StatusReport {
+    Ok(session.finish(StatusReport {
         machine_scope,
         changes: file_changes(FileState::is_drift),
         incoming: file_changes(FileState::is_incoming),
-    })
+    }))
 }

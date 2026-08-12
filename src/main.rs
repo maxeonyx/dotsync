@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
     abort_paused_cascade, commit_and_sync, continue_after_conflict, diff_home, init, status, sync,
     view, CommitOptions, DiffReport, DotsyncError, DotsyncPaths, FileChange, FileDrift, FileState,
-    ForceScope, ViewReport,
+    ForceScope, Run, UnreachableRemote, ViewReport,
 };
 mod render;
 use serde_json::json;
@@ -173,6 +173,9 @@ struct SuccessOutput {
     notes: Vec<String>,
     stdout: Option<String>,
     exit_code: i32,
+    /// Set when the run could not reach the remote, so every command says
+    /// which state it is reporting against without each one remembering to.
+    unreachable_remote: Option<UnreachableRemote>,
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +196,7 @@ enum CliOutput {
 struct ErrorOutput {
     error: DotsyncError,
     forced_overwrites: Vec<PathBuf>,
+    unreachable_remote: Option<UnreachableRemote>,
 }
 
 impl From<DotsyncError> for ErrorOutput {
@@ -200,6 +204,7 @@ impl From<DotsyncError> for ErrorOutput {
         Self {
             error,
             forced_overwrites: Vec::new(),
+            unreachable_remote: None,
         }
     }
 }
@@ -422,7 +427,10 @@ async fn run_init(remote_url: InitRemote) -> Result<CliOutput, DotsyncError> {
         },
     };
     let paths = discover_paths()?;
-    let report = init(&paths, &remote_url).await?;
+    let Run {
+        report,
+        unreachable_remote,
+    } = init(&paths, &remote_url).await?;
     Ok(CliOutput::Success(SuccessOutput {
         json: json!({
             "status": "ok",
@@ -440,6 +448,7 @@ async fn run_init(remote_url: InitRemote) -> Result<CliOutput, DotsyncError> {
         notes: render::success_notes(&report.sync.drifts, Some(&report.push)),
         stdout: None,
         exit_code: 0,
+        unreachable_remote,
     }))
 }
 
@@ -462,7 +471,10 @@ fn prompt_init_remote_url() -> Result<String, UsageError> {
 
 async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let report = continue_after_conflict(&paths, blanket_force(force)).await?;
+    let Run {
+        report,
+        unreachable_remote,
+    } = continue_after_conflict(&paths, blanket_force(force)).await?;
     Ok(CliOutput::Success(SuccessOutput {
         json: json!({
             "status": "ok",
@@ -479,12 +491,16 @@ async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
         notes: render::success_notes(&report.sync.drifts, Some(&report.push)),
         stdout: None,
         exit_code: 0,
+        unreachable_remote,
     }))
 }
 
 async fn run_abort() -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let report = abort_paused_cascade(&paths).await?;
+    let Run {
+        report,
+        unreachable_remote,
+    } = abort_paused_cascade(&paths).await?;
     Ok(CliOutput::Success(SuccessOutput {
         json: json!({
             "status": "ok",
@@ -502,12 +518,16 @@ async fn run_abort() -> Result<CliOutput, DotsyncError> {
         notes: render::success_notes(&report.sync.drifts, None),
         stdout: None,
         exit_code: 0,
+        unreachable_remote,
     }))
 }
 
 async fn run_sync(force: bool) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let report = sync(&paths, blanket_force(force)).await?;
+    let Run {
+        report,
+        unreachable_remote,
+    } = sync(&paths, blanket_force(force)).await?;
     Ok(CliOutput::Success(SuccessOutput {
         json: json!({
             "status": "ok",
@@ -525,12 +545,16 @@ async fn run_sync(force: bool) -> Result<CliOutput, DotsyncError> {
         notes: render::success_notes(&report.sync.drifts, Some(&report.push)),
         stdout: None,
         exit_code: 0,
+        unreachable_remote,
     }))
 }
 
 async fn run_status() -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let report = status(&paths).await?;
+    let Run {
+        report,
+        unreachable_remote,
+    } = status(&paths).await?;
     let files = report
         .changes
         .iter()
@@ -559,12 +583,16 @@ async fn run_status() -> Result<CliOutput, DotsyncError> {
         notes: Vec::new(),
         stdout: None,
         exit_code: 0,
+        unreachable_remote,
     }))
 }
 
 async fn run_diff() -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let report = diff_home(&paths).await?;
+    let Run {
+        report,
+        unreachable_remote,
+    } = diff_home(&paths).await?;
     let changed_count = report.drifts.len();
     let drifts = report
         .drifts
@@ -585,12 +613,16 @@ async fn run_diff() -> Result<CliOutput, DotsyncError> {
         notes: Vec::new(),
         stdout: None,
         exit_code,
+        unreachable_remote,
     }))
 }
 
 async fn run_view(scope: Option<String>, file: Option<PathBuf>) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let report = view(&paths, scope.as_deref(), file.as_deref()).await?;
+    let Run {
+        report,
+        unreachable_remote,
+    } = view(&paths, scope.as_deref(), file.as_deref()).await?;
     Ok(CliOutput::Success(match report {
         ViewReport::FileContents {
             scope,
@@ -608,6 +640,7 @@ async fn run_view(scope: Option<String>, file: Option<PathBuf>) -> Result<CliOut
             notes: Vec::new(),
             stdout: Some(String::from_utf8_lossy(&contents).into_owned()),
             exit_code: 0,
+            unreachable_remote,
         },
         ViewReport::Scope { scope, files } => SuccessOutput {
             json: json!({
@@ -620,6 +653,7 @@ async fn run_view(scope: Option<String>, file: Option<PathBuf>) -> Result<CliOut
             notes: Vec::new(),
             stdout: Some(render_view_scope_stdout(&scope, &files)),
             exit_code: 0,
+            unreachable_remote,
         },
         ViewReport::FileScopes { file, scopes } => SuccessOutput {
             json: json!({
@@ -632,6 +666,7 @@ async fn run_view(scope: Option<String>, file: Option<PathBuf>) -> Result<CliOut
             notes: Vec::new(),
             stdout: Some(render_view_file_scopes_stdout(&file, &scopes)),
             exit_code: 0,
+            unreachable_remote,
         },
         ViewReport::Overview { scopes, files } => SuccessOutput {
             json: json!({
@@ -647,6 +682,7 @@ async fn run_view(scope: Option<String>, file: Option<PathBuf>) -> Result<CliOut
             notes: Vec::new(),
             stdout: Some(render_view_overview_stdout(&scopes, &files)),
             exit_code: 0,
+            unreachable_remote,
         },
     }))
 }
@@ -658,7 +694,7 @@ async fn run_commit(
     commit_paths: Vec<PathBuf>,
 ) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let report = match commit_and_sync(
+    let run = match commit_and_sync(
         &paths,
         CommitOptions {
             scope,
@@ -669,14 +705,19 @@ async fn run_commit(
     )
     .await
     {
-        Ok(report) => report,
+        Ok(run) => run,
         Err(failure) => {
             return Ok(CliOutput::Error(ErrorOutput {
                 error: failure.error,
                 forced_overwrites: failure.forced_overwrites,
+                unreachable_remote: failure.unreachable_remote,
             }))
         }
     };
+    let Run {
+        report,
+        unreachable_remote,
+    } = run;
     Ok(CliOutput::Success(SuccessOutput {
         json: json!({
             "status": "ok",
@@ -701,6 +742,7 @@ async fn run_commit(
             .collect(),
         stdout: None,
         exit_code: 0,
+        unreachable_remote,
     }))
 }
 
@@ -844,11 +886,17 @@ fn change_marker(state: FileState) -> &'static str {
 fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
     match output {
         CliOutput::Success(success) => {
+            for note in render::unreachable_remote_notes(success.unreachable_remote.as_ref()) {
+                eprintln!("{note}");
+            }
             for note in success.notes {
                 eprintln!("{note}");
             }
             if matches!(output_format, OutputFormat::Json) {
-                println!("{}", success.json);
+                println!(
+                    "{}",
+                    render::with_remote_state(success.json, success.unreachable_remote.as_ref())
+                );
             } else if let Some(stdout) = success.stdout {
                 print!("{stdout}");
             } else {
@@ -859,12 +907,16 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
         CliOutput::Error(ErrorOutput {
             error,
             forced_overwrites,
+            unreachable_remote,
         }) => {
             let exit_code = if matches!(error, DotsyncError::CascadePaused { .. }) {
                 3
             } else {
                 1
             };
+            for note in render::unreachable_remote_notes(unreachable_remote.as_ref()) {
+                eprintln!("{note}");
+            }
             for note in render::forced_overwrite_notes(&forced_overwrites) {
                 eprintln!("{note}");
             }
@@ -875,7 +927,13 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
                 print_drifts(&error_report.drifts);
             }
             if matches!(output_format, OutputFormat::Json) {
-                println!("{}", render::render_error_json(&error_report));
+                println!(
+                    "{}",
+                    render::with_remote_state(
+                        render::render_error_json(&error_report),
+                        unreachable_remote.as_ref()
+                    )
+                );
             }
             exit_code
         }

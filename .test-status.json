@@ -71,7 +71,7 @@
     "dotsync::user_flows$output_format_is_accepted_after_the_subcommand": "passing",
     "dotsync::user_flows$paused_cascade_withholds_publishing_until_it_is_resolved": "passing",
     "dotsync::user_flows$plain_sync_pushes_scopes_left_unpushed_by_an_interrupted_commit": "passing",
-    "dotsync::user_flows$read_only_commands_report_against_the_last_fetched_state_when_the_remote_is_unreachable": "pending",
+    "dotsync::user_flows$read_only_commands_report_against_the_last_fetched_state_when_the_remote_is_unreachable": "passing",
     "dotsync::user_flows$selected_add_modify_and_delete_are_applied_without_touching_unselected_changes": "passing",
     "dotsync::user_flows$shared_scope_conflict_pauses_and_continue_applies_resolution_to_machine_homes": "passing",
     "dotsync::user_flows$status_before_init_json_matches_recovery_message": "passing",
@@ -93,7 +93,7 @@
     "dotsync::user_flows$view_scope_shows_checked_in_file_tree": "passing",
     "dotsync::user_flows$view_summarizes_checked_in_scopes_and_files": "passing",
     "dotsync::user_flows$view_works_while_local_scopes_are_ahead_of_remote": "passing",
-    "dotsync::user_flows$work_done_offline_reaches_the_remote_on_the_next_online_run": "pending",
+    "dotsync::user_flows$work_done_offline_reaches_the_remote_on_the_next_online_run": "passing",
     "dotsync::version_json$version_json_flag_prints_machine_readable_version": "passing"
   }
 }

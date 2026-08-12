@@ -20,6 +20,7 @@ pub(crate) struct Session {
     paths: DotsyncPaths,
     repo: Arc<ReadonlyRepo>,
     config: DotsyncConfig,
+    unreachable_remote: Option<UnreachableRemote>,
 }
 
 impl Session {
@@ -30,6 +31,7 @@ impl Session {
             paths: paths.clone(),
             repo,
             config,
+            unreachable_remote: None,
         })
     }
 
@@ -46,9 +48,26 @@ impl Session {
     }
 
     /// The one fetch a run makes.
+    ///
+    /// A remote out of reach is not a dead end. DESIGN's "offline is just
+    /// deferred convergence" says to carry on against the last state we did
+    /// fetch and let the next run that reaches the remote converge — so
+    /// read-only commands report against that state, and mutating commands
+    /// build local-ahead history on it, which is what they would do anyway
+    /// against a remote that had not moved.
+    ///
+    /// Recording it here rather than at each caller is the point of having a
+    /// session: one decision per run instead of one per helper, and one place
+    /// for every command to read the fact back out of.
     pub(crate) async fn fetch(&mut self) -> Result<(), DotsyncError> {
-        let repo = fetch_origin(self.repo.clone()).await?;
-        self.advance_to(repo).await
+        match fetch_origin(self.repo.clone()).await {
+            Ok(repo) => self.advance_to(repo).await,
+            Err(DotsyncError::RemoteUnreachable { reason }) => {
+                self.unreachable_remote = Some(UnreachableRemote { reason });
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Adopts the repo left behind by a committed transaction, so the rest of
@@ -62,4 +81,38 @@ impl Session {
         self.repo = repo;
         Ok(())
     }
+
+    /// Hands a report back together with what the run it came from could not
+    /// do.
+    pub(crate) fn finish<T>(&self, report: T) -> Run<T> {
+        Run {
+            report,
+            unreachable_remote: self.unreachable_remote.clone(),
+        }
+    }
+
+    pub(crate) fn unreachable_remote(&self) -> Option<UnreachableRemote> {
+        self.unreachable_remote.clone()
+    }
+}
+
+/// What a command reports, plus what the run it happened in could not do.
+///
+/// The remote being out of reach is a fact about the run rather than about
+/// anything the run found, so it rides alongside the report instead of being
+/// threaded into all eight of them.
+#[derive(Debug, Clone)]
+pub struct Run<T> {
+    pub report: T,
+    /// `Some` when this run could not reach the remote and worked from the
+    /// last state it did fetch. Not a mode: there is no offline mode and no
+    /// queue, only local history that is ahead until a run that reaches the
+    /// remote converges it.
+    pub unreachable_remote: Option<UnreachableRemote>,
+}
+
+/// The remote could not be reached, in git's own words.
+#[derive(Debug, Clone)]
+pub struct UnreachableRemote {
+    pub reason: String,
 }

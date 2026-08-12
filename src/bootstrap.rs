@@ -20,7 +20,7 @@ use crate::repo::{
     PushReport,
 };
 use crate::scope_graph::ScopeGraph;
-use crate::session::Session;
+use crate::session::{Run, Session};
 use crate::sync::{sync_repo_to_home, ForceScope, SyncReport};
 
 #[derive(Debug, Clone)]
@@ -30,7 +30,7 @@ pub struct InitReport {
     pub push: PushReport,
 }
 
-pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, DotsyncError> {
+pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<Run<InitReport>, DotsyncError> {
     if paths.repo_root.exists() {
         return Err(DotsyncError::RepoAlreadyExists {
             path: paths.repo_root.clone(),
@@ -79,7 +79,7 @@ pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, 
     )
     .await?;
 
-    Ok(InitReport { sync, push })
+    Ok(session.finish(InitReport { sync, push }))
 }
 
 pub(crate) async fn bootstrap_empty_remote(

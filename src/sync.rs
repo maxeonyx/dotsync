@@ -12,7 +12,7 @@ use crate::drift::{classify_home_against_scope, ClassifiedPath, FileState, Recor
 use crate::error::DotsyncError;
 use crate::machine::detect_machine;
 use crate::repo::{pending_push_scopes, push_scope_updates, PushReport};
-use crate::session::Session;
+use crate::session::{Run, Session};
 
 /// Which drifted home files a run may overwrite.
 ///
@@ -101,7 +101,7 @@ pub(crate) struct SyncState {
 pub async fn sync(
     paths: &DotsyncPaths,
     force: ForceScope,
-) -> Result<SyncCommandReport, DotsyncError> {
+) -> Result<Run<SyncCommandReport>, DotsyncError> {
     let mut session = Session::open(paths).await?;
     session.fetch().await?;
     // Publish before touching home: scope commits left behind by an
@@ -115,7 +115,7 @@ pub async fn sync(
         None => push_scope_updates(&mut session).await?,
     };
     let sync = sync_repo_to_home(&session, force, &RecordedFromHome::default(), None).await?;
-    Ok(SyncCommandReport { sync, push })
+    Ok(session.finish(SyncCommandReport { sync, push }))
 }
 
 pub(crate) fn resolve_current_scope(

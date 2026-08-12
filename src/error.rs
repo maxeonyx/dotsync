@@ -207,6 +207,11 @@ pub enum DotsyncError {
     NotInitialized { path: PathBuf },
     #[error("unable to determine machine hostname")]
     MissingHostname,
+    /// Reaching the remote failed. Raised only where reaching it is the point
+    /// of the command: everywhere else a run degrades to the last state it did
+    /// fetch and says so — see `Session::fetch`.
+    #[error("could not reach the remote: {reason}")]
+    RemoteUnreachable { reason: String },
     #[error("jj operation failed: {message}")]
     Jj { message: String },
 }
@@ -251,6 +256,9 @@ impl DotsyncError {
                 forced_overwrites: Vec::new(),
             },
             DotsyncError::MissingHostname => basic_error_report("missing_hostname", self),
+            DotsyncError::RemoteUnreachable { .. } => {
+                basic_error_report("remote_unreachable", self)
+            }
             DotsyncError::Io { .. } => basic_error_report("io", self),
             DotsyncError::Jj { .. } => basic_error_report("jj", self),
             DotsyncError::HomeNotSet => basic_error_report("home_not_set", self),
@@ -339,6 +347,7 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
         | DotsyncError::DriftDetected { .. }
         | DotsyncError::RepoAlreadyExists { .. }
         | DotsyncError::MissingHostname
+        | DotsyncError::RemoteUnreachable { .. }
         | DotsyncError::Jj { .. } => None,
     }
 }

@@ -28,7 +28,7 @@ use crate::repo::{
     PushReport,
 };
 use crate::scope_graph::ScopeGraph;
-use crate::session::Session;
+use crate::session::{Run, Session, UnreachableRemote};
 use crate::sync::{ForceScope, SyncReport};
 
 #[derive(Debug, Clone)]
@@ -107,6 +107,10 @@ impl CommitReport {
 #[derive(Debug)]
 pub struct CommitFailure {
     pub forced_overwrites: Vec<PathBuf>,
+    /// Carried for the same reason as on a successful run: a commit built on
+    /// the last-fetched state has to say so, and stopping later does not make
+    /// that less true.
+    pub unreachable_remote: Option<UnreachableRemote>,
     pub error: DotsyncError,
 }
 
@@ -115,6 +119,7 @@ impl From<DotsyncError> for CommitFailure {
     fn from(error: DotsyncError) -> Self {
         Self {
             forced_overwrites: Vec::new(),
+            unreachable_remote: None,
             error,
         }
     }
@@ -135,7 +140,7 @@ pub struct AbortReport {
 pub async fn commit_and_sync(
     paths: &DotsyncPaths,
     options: CommitOptions,
-) -> Result<CommitReport, CommitFailure> {
+) -> Result<Run<CommitReport>, CommitFailure> {
     reject_commit_if_cascade_paused(paths)?;
 
     let mut session = Session::open(paths).await?;
@@ -177,10 +182,10 @@ pub async fn commit_and_sync(
     } = selection;
 
     if selected_paths.is_empty() {
-        return Ok(CommitReport::nothing_to_commit(
+        return Ok(session.finish(CommitReport::nothing_to_commit(
             &options.scope,
             pending_push,
-        ));
+        )));
     }
 
     let last_synced_commit = sync_state.as_ref().and_then(|state| {
@@ -299,10 +304,10 @@ pub async fn commit_and_sync(
     }
 
     if new_tree.tree_ids() == base_commit.tree().tree_ids() {
-        return Ok(CommitReport::nothing_to_commit(
+        return Ok(session.finish(CommitReport::nothing_to_commit(
             &options.scope,
             pending_push,
-        ));
+        )));
     }
 
     let new_commit = tx
@@ -385,6 +390,7 @@ pub async fn commit_and_sync(
     // to carry what it overwrote.
     let stopped = |error: DotsyncError| CommitFailure {
         forced_overwrites: forced_overwrites.clone(),
+        unreachable_remote: session.unreachable_remote(),
         error,
     };
     let push = push.map_err(stopped)?;
@@ -400,12 +406,12 @@ pub async fn commit_and_sync(
     .await
     .map_err(stopped)?;
 
-    Ok(CommitReport {
+    Ok(session.finish(CommitReport {
         committed_scope: options.scope,
         forced_overwrites,
         sync,
         push,
-    })
+    }))
 }
 
 /// What this commit will record, and on whose authority.
@@ -907,7 +913,7 @@ fn unresolved_conflicted_files(
 pub async fn continue_after_conflict(
     paths: &DotsyncPaths,
     force: ForceScope,
-) -> Result<ContinueReport, DotsyncError> {
+) -> Result<Run<ContinueReport>, DotsyncError> {
     let state = load_paused_cascade_state(paths)?;
     // A cascade pauses because at least one file conflicted, so an empty
     // record means the pause was written before this check existed rather than
@@ -1058,10 +1064,10 @@ pub async fn continue_after_conflict(
         Some(&state.machine_scope),
     )
     .await?;
-    Ok(ContinueReport { sync, push })
+    Ok(session.finish(ContinueReport { sync, push }))
 }
 
-pub async fn abort_paused_cascade(paths: &DotsyncPaths) -> Result<AbortReport, DotsyncError> {
+pub async fn abort_paused_cascade(paths: &DotsyncPaths) -> Result<Run<AbortReport>, DotsyncError> {
     let state = load_paused_cascade_state(paths)?;
     if state.original_scope_commit_ids.is_empty() {
         return Err(DotsyncError::Jj {
@@ -1104,10 +1110,10 @@ pub async fn abort_paused_cascade(paths: &DotsyncPaths) -> Result<AbortReport, D
     )
     .await?;
 
-    Ok(AbortReport {
+    Ok(session.finish(AbortReport {
         aborted_scope: state.paused_scope,
         sync,
-    })
+    }))
 }
 
 fn paused_cascade_state_path(paths: &DotsyncPaths) -> PathBuf {

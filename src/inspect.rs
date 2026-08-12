@@ -8,7 +8,7 @@ use crate::drift::{classify_home_against_scope, RecordedFromHome};
 use crate::error::{jj_error, DotsyncError};
 use crate::repo::{collect_managed_tree_entries, load_scope_commit, read_tree_entry_bytes};
 use crate::scope_graph::scope_depth;
-use crate::session::Session;
+use crate::session::{Run, Session};
 use crate::sync::{load_sync_state, resolve_current_scope, FileDrift};
 
 #[derive(Debug, Clone)]
@@ -52,20 +52,20 @@ pub async fn view(
     paths: &DotsyncPaths,
     scope: Option<&str>,
     file: Option<&Path>,
-) -> Result<ViewReport, DotsyncError> {
+) -> Result<Run<ViewReport>, DotsyncError> {
     let mut session = Session::open(paths).await?;
     session.fetch().await?;
 
-    match (scope, file) {
-        (Some(scope), Some(file)) => Ok(ViewReport::FileContents {
+    let report = match (scope, file) {
+        (Some(scope), Some(file)) => ViewReport::FileContents {
             scope: scope.to_string(),
             file: file.to_path_buf(),
             contents: scope_file_contents(&session, scope, file).await?,
-        }),
-        (Some(scope), None) => Ok(ViewReport::Scope {
+        },
+        (Some(scope), None) => ViewReport::Scope {
             scope: scope.to_string(),
             files: scope_files(&session, scope)?,
-        }),
+        },
         (None, Some(file)) => {
             let mut scopes = Vec::new();
             for scope in scope_list(&session)? {
@@ -76,10 +76,10 @@ pub async fn view(
                     scopes.push(scope.name);
                 }
             }
-            Ok(ViewReport::FileScopes {
+            ViewReport::FileScopes {
                 file: file.to_path_buf(),
                 scopes,
-            })
+            }
         }
         (None, None) => {
             let scopes = scope_list(&session)?;
@@ -87,12 +87,13 @@ pub async fn view(
             for scope in &scopes {
                 files.extend(scope_files(&session, &scope.name)?);
             }
-            Ok(ViewReport::Overview {
+            ViewReport::Overview {
                 scopes,
                 files: files.into_iter().collect(),
-            })
+            }
         }
-    }
+    };
+    Ok(session.finish(report))
 }
 
 /// The scope graph, root scopes first and alphabetical within a depth, which
@@ -161,7 +162,7 @@ async fn scope_file_contents(
     read_tree_entry_bytes(session.repo().store(), relative, &value).await
 }
 
-pub async fn diff_home(paths: &DotsyncPaths) -> Result<DiffReport, DotsyncError> {
+pub async fn diff_home(paths: &DotsyncPaths) -> Result<Run<DiffReport>, DotsyncError> {
     let mut session = Session::open(paths).await?;
     session.fetch().await?;
     let sync_state = load_sync_state(session.paths(), session.config())?;
@@ -191,8 +192,8 @@ pub async fn diff_home(paths: &DotsyncPaths) -> Result<DiffReport, DotsyncError>
         })
         .collect();
 
-    Ok(DiffReport {
+    Ok(session.finish(DiffReport {
         machine_scope,
         drifts,
-    })
+    }))
 }
