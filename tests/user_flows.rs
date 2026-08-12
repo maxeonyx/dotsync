@@ -1044,7 +1044,7 @@ fn v03_plain_sync_ignores_unrelated_home_changes() {
 }
 
 #[test]
-fn v03_commit_returns_not_implemented() {
+fn commit_with_no_paths_ignores_unmanaged_home_files() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
@@ -1055,19 +1055,27 @@ fn v03_commit_returns_not_implemented() {
         render_output(&init_output)
     );
 
+    // An unmanaged file in home. `dotsync commit <scope> -m ...` with no paths
+    // means "every managed file that changed", and nothing managed changed, so
+    // this is an ordinary no-op commit — not a reason to refuse the command.
     machine.write_file(".gitconfig", "[user]\nname = \"Max\"\n");
 
-    let commit_output = machine.run("dotsync commit all -m 'not implemented yet'");
+    let revision_before = bookmark_revision(&machine, "all");
+
+    let commit_output = machine.run("dotsync commit all -m 'nothing changed'");
     assert_eq!(
         commit_output.status.code(),
-        Some(1),
-        "scoped commit should return a normal not-implemented error in v0.3 task 1\n{}",
+        Some(0),
+        "a no-paths commit with nothing to commit should succeed\n{}",
         render_output(&commit_output)
     );
-    assert_stderr_snapshot(
-        &commit_output,
-        "dotsync: not implemented: scoped commit is not available until home-diff commit flow lands\n"
+
+    assert_eq!(bookmark_revision(&machine, "all"), revision_before);
+    assert!(
+        !bookmark_has_file(&machine, "all", ".gitconfig"),
+        "an unmanaged home file must not be swept into the scope"
     );
+    assert_eq!(machine.read_file(".gitconfig"), "[user]\nname = \"Max\"\n");
 }
 
 #[test]
