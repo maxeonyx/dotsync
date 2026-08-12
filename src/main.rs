@@ -195,7 +195,7 @@ enum CliOutput {
     Usage(UsageError),
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     if try_handle_version_json_request() {
         return;
