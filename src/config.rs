@@ -11,7 +11,7 @@ use jj_lib::repo_path::RepoPathBuf;
 use serde::Deserialize;
 
 use crate::error::{jj_error, DotsyncError};
-use crate::repo::{load_repo_direct, load_scope_commit, read_tree_entry_bytes};
+use crate::repo::{load_scope_commit, read_tree_entry_bytes};
 use crate::scope_graph::{scope_depth, ScopeGraph};
 
 pub(crate) const DOTSYNC_CONFIG_RELATIVE_PATH: &str = ".config/dotsync/config.toml";
@@ -121,9 +121,16 @@ pub(crate) async fn write_config(
         .map_err(|err| jj_error(format!("write config tree: {err}")))
 }
 
-pub(crate) async fn load_config(paths: &DotsyncPaths) -> Result<DotsyncConfig, DotsyncError> {
-    let repo = load_repo_direct(paths).await?;
-    let all_commit = load_scope_commit(repo.as_ref(), "all")?;
+/// Parses the scope graph out of a repo already in hand.
+///
+/// The repo is a parameter rather than something this function opens, because
+/// it used to open one: "load the config" silently meant "re-open the repo",
+/// and `load_config` is called from everywhere.
+pub(crate) async fn load_config(
+    paths: &DotsyncPaths,
+    repo: &dyn jj_lib::repo::Repo,
+) -> Result<DotsyncConfig, DotsyncError> {
+    let all_commit = load_scope_commit(repo, ALL_SCOPE)?;
     let repo_path = jj_lib::repo_path::RepoPath::from_internal_string(DOTSYNC_CONFIG_RELATIVE_PATH)
         .map_err(|err| jj_error(format!("invalid config repo path: {err}")))?;
     let value = all_commit

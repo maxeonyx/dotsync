@@ -20,6 +20,7 @@ use jj_lib::str_util::StringExpression;
 
 use crate::config::DotsyncPaths;
 use crate::error::{jj_error, DotsyncError};
+use crate::session::Session;
 
 pub(crate) fn default_settings() -> Result<UserSettings, DotsyncError> {
     let config = StackedConfig::with_defaults();
@@ -248,16 +249,15 @@ fn pending_bookmark_updates(repo: &ReadonlyRepo) -> Vec<(RefNameBuf, BookmarkPus
 }
 
 /// The scopes a push would offer the remote right now.
-pub(crate) async fn pending_push_scopes(paths: &DotsyncPaths) -> Result<Vec<String>, DotsyncError> {
-    let repo = load_repo_direct(paths).await?;
-    Ok(pending_bookmark_updates(&repo)
+pub(crate) fn pending_push_scopes(session: &Session) -> Vec<String> {
+    pending_bookmark_updates(session.repo())
         .into_iter()
         .map(|(name, _)| name.as_str().to_string())
-        .collect())
+        .collect()
 }
 
-pub(crate) async fn push_scope_updates(paths: &DotsyncPaths) -> Result<PushReport, DotsyncError> {
-    let repo = load_repo_direct(paths).await?;
+pub(crate) async fn push_scope_updates(session: &mut Session) -> Result<PushReport, DotsyncError> {
+    let repo = session.repo().clone();
     let settings = default_settings()?;
     let subprocess_options = GitSubprocessOptions::from_settings(&settings)
         .map_err(|err| jj_error(format!("load git subprocess settings: {err}")))?;
@@ -284,9 +284,13 @@ pub(crate) async fn push_scope_updates(paths: &DotsyncPaths) -> Result<PushRepor
         &GitPushOptions::default(),
     )
     .map_err(|err| jj_error(format!("push branches: {err}")))?;
-    tx.commit("dotsync: push scope updates")
-        .await
-        .map_err(|err| jj_error(format!("commit push operation: {err}")))?;
+    session
+        .advance_to(
+            tx.commit("dotsync: push scope updates")
+                .await
+                .map_err(|err| jj_error(format!("commit push operation: {err}")))?,
+        )
+        .await?;
 
     let pushed: Vec<&str> = stats
         .pushed

@@ -3,14 +3,12 @@ use std::path::{Path, PathBuf};
 
 use jj_lib::repo::Repo as _;
 
-use crate::config::{internal_repo_paths, load_config, DotsyncPaths};
+use crate::config::{internal_repo_paths, DotsyncPaths};
 use crate::drift::{classify_home_against_scope, RecordedFromHome};
 use crate::error::{jj_error, DotsyncError};
-use crate::repo::{
-    collect_managed_tree_entries, fetch_origin, load_repo_direct, load_scope_commit,
-    read_tree_entry_bytes,
-};
+use crate::repo::{collect_managed_tree_entries, load_scope_commit, read_tree_entry_bytes};
 use crate::scope_graph::scope_depth;
+use crate::session::Session;
 use crate::sync::{load_sync_state, resolve_current_scope, FileDrift};
 
 #[derive(Debug, Clone)]
@@ -44,9 +42,9 @@ pub struct DiffReport {
 }
 
 pub async fn list_scopes(paths: &DotsyncPaths) -> Result<ScopeListReport, DotsyncError> {
-    let repo = load_repo_direct(paths).await?;
-    let _repo = fetch_origin(repo).await?;
-    let config = load_config(paths).await?;
+    let mut session = Session::open(paths).await?;
+    session.fetch().await?;
+    let config = session.config();
     let mut memo = HashMap::new();
     let mut scopes = config
         .graph
@@ -77,11 +75,11 @@ pub async fn list_scope_tree(
     paths: &DotsyncPaths,
     scope: &str,
 ) -> Result<TreeReport, DotsyncError> {
-    let repo = load_repo_direct(paths).await?;
-    let repo = fetch_origin(repo).await?;
-    let config = load_config(paths).await?;
-    let commit = load_scope_commit(repo.as_ref(), scope)?;
-    let entries = collect_managed_tree_entries(&commit.tree(), &internal_repo_paths(&config))?;
+    let mut session = Session::open(paths).await?;
+    session.fetch().await?;
+    let commit = load_scope_commit(session.repo().as_ref(), scope)?;
+    let entries =
+        collect_managed_tree_entries(&commit.tree(), &internal_repo_paths(session.config()))?;
 
     Ok(TreeReport {
         scope: scope.to_string(),
@@ -94,9 +92,9 @@ pub async fn read_scope_file(
     scope: &str,
     relative: &Path,
 ) -> Result<FileReport, DotsyncError> {
-    let repo = load_repo_direct(paths).await?;
-    let repo = fetch_origin(repo).await?;
-    let commit = load_scope_commit(repo.as_ref(), scope)?;
+    let mut session = Session::open(paths).await?;
+    session.fetch().await?;
+    let commit = load_scope_commit(session.repo().as_ref(), scope)?;
     let relative_str = relative.to_str().ok_or_else(|| DotsyncError::NonUtf8Path {
         path: relative.to_path_buf(),
     })?;
@@ -120,7 +118,7 @@ pub async fn read_scope_file(
                 relative.display()
             ))
         })?;
-    let contents = read_tree_entry_bytes(repo.store(), relative, &value).await?;
+    let contents = read_tree_entry_bytes(session.repo().store(), relative, &value).await?;
 
     Ok(FileReport {
         scope: scope.to_string(),
@@ -130,15 +128,12 @@ pub async fn read_scope_file(
 }
 
 pub async fn diff_home(paths: &DotsyncPaths) -> Result<DiffReport, DotsyncError> {
-    let config = load_config(paths).await?;
-    let repo = load_repo_direct(paths).await?;
-    let repo = fetch_origin(repo).await?;
-    let sync_state = load_sync_state(paths, &config)?;
-    let machine_scope = resolve_current_scope(&config, sync_state.as_ref(), None)?;
+    let mut session = Session::open(paths).await?;
+    session.fetch().await?;
+    let sync_state = load_sync_state(session.paths(), session.config())?;
+    let machine_scope = resolve_current_scope(session.config(), sync_state.as_ref(), None)?;
     let classification = classify_home_against_scope(
-        paths,
-        repo.as_ref(),
-        &config,
+        &session,
         sync_state.as_ref(),
         &machine_scope,
         &BTreeSet::new(),
@@ -155,7 +150,7 @@ pub async fn diff_home(paths: &DotsyncPaths) -> Result<DiffReport, DotsyncError>
         .filter(|(_, path)| path.state.is_drift())
         .map(|(relative, path)| FileDrift {
             repo_path: relative.clone(),
-            system_path: paths.home_dir.join(relative),
+            system_path: session.paths().home_dir.join(relative),
             state: path.state,
             repo_bytes: path.tip_bytes.clone(),
             home_bytes: path.home_bytes.clone(),

@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 
 use jj_lib::backend::TreeValue;
 
-use crate::config::{internal_repo_paths, DotsyncConfig, DotsyncPaths};
+use crate::config::{internal_repo_paths, DotsyncPaths};
 use crate::error::DotsyncError;
 use crate::repo::{collect_managed_tree_entries, load_scope_commit, read_tree_entry_bytes};
+use crate::session::Session;
 use crate::sync::SyncState;
 
 /// Where one managed path stands across the three sides dotsync knows about:
@@ -404,15 +405,14 @@ impl HomeClassification {
 /// `extra_paths` widens the classified set beyond the managed domain, for
 /// callers that name paths dotsync has never seen — a commit adding a new file.
 pub(crate) async fn classify_home_against_scope(
-    paths: &DotsyncPaths,
-    repo: &dyn jj_lib::repo::Repo,
-    config: &DotsyncConfig,
+    session: &Session,
     sync_state: Option<&SyncState>,
     scope: &str,
     extra_paths: &BTreeSet<PathBuf>,
     recorded_from_home: &RecordedFromHome,
 ) -> Result<HomeClassification, DotsyncError> {
-    let internal_paths = internal_repo_paths(config);
+    let repo: &dyn jj_lib::repo::Repo = session.repo().as_ref();
+    let internal_paths = internal_repo_paths(session.config());
     let tip = load_scope_commit(repo, scope)?;
     let tip_entries = collect_managed_tree_entries(&tip.tree(), &internal_paths)?;
     let last_synced_entries = last_synced_entries(repo, sync_state, &internal_paths)?;
@@ -421,7 +421,7 @@ pub(crate) async fn classify_home_against_scope(
     domain.extend(extra_paths.iter().cloned());
     domain.extend(recorded_from_home.paths().cloned());
     let paths = classify_paths(
-        paths,
+        session.paths(),
         repo,
         last_synced_entries.as_ref(),
         &tip_entries,

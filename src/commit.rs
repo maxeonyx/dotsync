@@ -20,16 +20,15 @@ use crate::cascade::{
     build_cascade_plan, execute_cascade_steps, CascadeCommand, CascadeOutcome, CascadeStep,
     ScopeHeads,
 };
-use crate::config::{
-    internal_repo_paths, load_config, DotsyncPaths, ALL_SCOPE, DOTSYNC_CONFIG_RELATIVE_PATH,
-};
+use crate::config::{internal_repo_paths, DotsyncPaths, ALL_SCOPE, DOTSYNC_CONFIG_RELATIVE_PATH};
 use crate::drift::{classify_home_against_scope, read_home_bytes, FileState, RecordedFromHome};
 use crate::error::{CommitPathProblem, DotsyncError, RefusedCommitPath, RejectedCommitPath};
 use crate::repo::{
-    collect_managed_tree_entries, fetch_origin, load_repo_direct, load_scope_commit,
-    push_scope_updates, read_tree_entry_bytes, PushReport,
+    collect_managed_tree_entries, load_scope_commit, push_scope_updates, read_tree_entry_bytes,
+    PushReport,
 };
 use crate::scope_graph::ScopeGraph;
+use crate::session::Session;
 use crate::sync::{ForceScope, SyncReport};
 
 #[derive(Debug, Clone)]
@@ -139,18 +138,14 @@ pub async fn commit_and_sync(
 ) -> Result<CommitReport, CommitFailure> {
     reject_commit_if_cascade_paused(paths)?;
 
-    let repo = load_repo_direct(paths).await?;
-    let _fetched_repo = fetch_origin(repo).await?;
+    let mut session = Session::open(paths).await?;
+    session.fetch().await?;
     // Publish what earlier runs left behind before looking at this commit at
     // all: this commit may turn out to add nothing, and a machine with an
     // interrupted push behind it must still heal. Anything this run goes on to
     // create is published by the push after the cascade.
-    let pending_push = push_scope_updates(paths).await?;
-    // The push may have written an operation of its own, so build this commit
-    // on the repo state it left behind rather than on the fetched snapshot.
-    let repo = load_repo_direct(paths).await?;
-    let config = load_config(paths).await?;
-    let graph = config.graph.clone();
+    let pending_push = push_scope_updates(&mut session).await?;
+    let graph = session.config().graph.clone();
 
     if !graph.parents.contains_key(&options.scope) {
         return Err(DotsyncError::InvalidScope {
@@ -159,15 +154,15 @@ pub async fn commit_and_sync(
         .into());
     }
 
-    let internal_paths = internal_repo_paths(&config);
-    let sync_state = crate::sync::load_sync_state(paths, &config)?;
-    let machine_scope = crate::sync::resolve_current_scope(&config, sync_state.as_ref(), None)?;
-    let target_entries = load_scope_entries(repo.as_ref(), &options.scope, &internal_paths)?;
+    let internal_paths = internal_repo_paths(session.config());
+    let sync_state = crate::sync::load_sync_state(session.paths(), session.config())?;
+    let machine_scope =
+        crate::sync::resolve_current_scope(session.config(), sync_state.as_ref(), None)?;
+    let target_entries =
+        load_scope_entries(session.repo().as_ref(), &options.scope, &internal_paths)?;
 
     let selection = select_changes_to_record(
-        paths,
-        repo.as_ref(),
-        &config,
+        &session,
         sync_state.as_ref(),
         &machine_scope,
         &options,
@@ -188,9 +183,13 @@ pub async fn commit_and_sync(
         ));
     }
 
-    let last_synced_commit = sync_state
-        .as_ref()
-        .and_then(|state| repo.store().get_commit(&state.last_synced_revision).ok());
+    let last_synced_commit = sync_state.as_ref().and_then(|state| {
+        session
+            .repo()
+            .store()
+            .get_commit(&state.last_synced_revision)
+            .ok()
+    });
 
     // Whether this commit's bytes reach this machine at all. When the target
     // scope is an ancestor of the machine scope the cascade carries them down
@@ -202,6 +201,7 @@ pub async fn commit_and_sync(
     // explicit per-path force is still open (PLAN.md §1.5, D6).
     let cascades_into_home = scope_is_ancestor_or_self(&graph, &options.scope, &machine_scope);
 
+    let repo = session.repo().clone();
     let mut tx = repo.start_transaction();
     let mut scope_heads = ScopeHeads::load_existing(tx.repo_mut().base_repo(), &graph)?;
     let original_scope_commit_ids = scope_heads.commit_ids_by_scope();
@@ -368,15 +368,19 @@ pub async fn commit_and_sync(
         }
     }
 
-    tx.commit("dotsync: commit and cascade")
-        .await
-        .map_err(|err| DotsyncError::Jj {
-            message: format!("commit scoped change for {}: {err}", options.scope),
-        })?;
+    session
+        .advance_to(
+            tx.commit("dotsync: commit and cascade")
+                .await
+                .map_err(|err| DotsyncError::Jj {
+                    message: format!("commit scoped change for {}: {err}", options.scope),
+                })?,
+        )
+        .await?;
 
     // Push as soon as the history exists: the home sync below can legitimately
     // stop on drift, and a stop must never strand committed scope history.
-    let push = push_scope_updates(paths).await;
+    let push = push_scope_updates(&mut session).await;
     // From here the forced history exists and is published, so every exit has
     // to carry what it overwrote.
     let stopped = |error: DotsyncError| CommitFailure {
@@ -388,7 +392,7 @@ pub async fn commit_and_sync(
     // repo, so for this sync those bytes are the last-synced side: home is
     // behind whatever the cascade merged them into, not drifted from it.
     let sync = crate::sync::sync_repo_to_home(
-        paths,
+        &session,
         ForceScope::from_paths(&forced_paths),
         &recorded_from_home,
         Some(&machine_scope),
@@ -424,11 +428,8 @@ struct Selection {
 /// bare `dotsync commit` and `dotsync status` can no longer disagree about
 /// what changed. Which tree the bytes are then written into is a separate
 /// question, answered by the caller.
-#[allow(clippy::too_many_arguments)]
 async fn select_changes_to_record(
-    paths: &DotsyncPaths,
-    repo: &dyn jj_lib::repo::Repo,
-    config: &crate::config::DotsyncConfig,
+    session: &Session,
     sync_state: Option<&crate::sync::SyncState>,
     machine_scope: &str,
     options: &CommitOptions,
@@ -439,7 +440,7 @@ async fn select_changes_to_record(
         None
     } else {
         Some(expand_selection_paths(
-            paths,
+            session.paths(),
             &options.scope,
             &options.paths,
             target_entries,
@@ -447,9 +448,7 @@ async fn select_changes_to_record(
         )?)
     };
     let classification = classify_home_against_scope(
-        paths,
-        repo,
-        config,
+        session,
         sync_state,
         machine_scope,
         &named_paths.iter().flatten().cloned().collect(),
@@ -466,7 +465,7 @@ async fn select_changes_to_record(
             .map(|(relative, _)| relative.clone())
             .collect(),
     };
-    reject_scope_graph_outside_all(paths, repo, &options.scope, target_entries, &selected_paths)
+    reject_scope_graph_outside_all(session, &options.scope, target_entries, &selected_paths)
         .await?;
 
     if !options.force {
@@ -617,8 +616,7 @@ fn load_scope_entries(
 /// the selection expanded to, because a directory selection reaches the scope
 /// graph too.
 async fn reject_scope_graph_outside_all(
-    paths: &DotsyncPaths,
-    repo: &dyn jj_lib::repo::Repo,
+    session: &Session,
     scope: &str,
     target_entries: &BTreeMap<PathBuf, TreeValue>,
     selected_paths: &[PathBuf],
@@ -631,10 +629,12 @@ async fn reject_scope_graph_outside_all(
         return Ok(());
     }
     let repo_bytes = match target_entries.get(&config_path) {
-        Some(value) => Some(read_tree_entry_bytes(repo.store(), &config_path, value).await?),
+        Some(value) => {
+            Some(read_tree_entry_bytes(session.repo().store(), &config_path, value).await?)
+        }
         None => None,
     };
-    if read_home_bytes(paths, &config_path)? == repo_bytes {
+    if read_home_bytes(session.paths(), &config_path)? == repo_bytes {
         return Ok(());
     }
     Err(DotsyncError::UnusableCommitPaths {
@@ -926,10 +926,11 @@ pub async fn continue_after_conflict(
             paths: unresolved,
         });
     }
-    let repo = load_repo_direct(paths).await?;
-    let config = load_config(paths).await?;
+    let mut session = Session::open(paths).await?;
+    let graph = session.config().graph.clone();
+    let repo = session.repo().clone();
     let mut tx = repo.start_transaction();
-    let mut scope_heads = ScopeHeads::load_existing(tx.repo_mut().base_repo(), &config.graph)?;
+    let mut scope_heads = ScopeHeads::load_existing(tx.repo_mut().base_repo(), &graph)?;
     let parent_commits = state
         .parent_commit_ids
         .iter()
@@ -949,7 +950,7 @@ pub async fn continue_after_conflict(
             ),
         })?;
     let cascades_into_home =
-        scope_is_ancestor_or_self(&config.graph, &state.paused_scope, &state.machine_scope);
+        scope_is_ancestor_or_self(&graph, &state.paused_scope, &state.machine_scope);
     let mut recorded_from_home = RecordedFromHome::default();
     let mut builder = MergedTreeBuilder::new(merged_tree);
     for relative in state.paused_home_contents.keys() {
@@ -1039,15 +1040,19 @@ pub async fn continue_after_conflict(
         }
     }
 
-    tx.commit("dotsync: continue cascade")
-        .await
-        .map_err(|err| DotsyncError::Jj {
-            message: format!("commit continued cascade: {err}"),
-        })?;
+    session
+        .advance_to(
+            tx.commit("dotsync: continue cascade")
+                .await
+                .map_err(|err| DotsyncError::Jj {
+                    message: format!("commit continued cascade: {err}"),
+                })?,
+        )
+        .await?;
     remove_paused_cascade_state(paths)?;
-    let push = push_scope_updates(paths).await?;
+    let push = push_scope_updates(&mut session).await?;
     let sync = crate::sync::sync_repo_to_home(
-        paths,
+        &session,
         force,
         &recorded_from_home,
         Some(&state.machine_scope),
@@ -1064,7 +1069,8 @@ pub async fn abort_paused_cascade(paths: &DotsyncPaths) -> Result<AbortReport, D
         });
     }
 
-    let repo = load_repo_direct(paths).await?;
+    let mut session = Session::open(paths).await?;
+    let repo = session.repo().clone();
     let mut tx = repo.start_transaction();
     for (scope, commit_id) in &state.original_scope_commit_ids {
         let commit = load_commit_by_hex(tx.repo_mut(), commit_id)?;
@@ -1073,11 +1079,15 @@ pub async fn abort_paused_cascade(paths: &DotsyncPaths) -> Result<AbortReport, D
             RefTarget::normal(commit.id().clone()),
         );
     }
-    tx.commit("dotsync: abort cascade")
-        .await
-        .map_err(|err| DotsyncError::Jj {
-            message: format!("commit aborted cascade: {err}"),
-        })?;
+    session
+        .advance_to(
+            tx.commit("dotsync: abort cascade")
+                .await
+                .map_err(|err| DotsyncError::Jj {
+                    message: format!("commit aborted cascade: {err}"),
+                })?,
+        )
+        .await?;
     remove_paused_cascade_state(paths)?;
 
     // Abort is a full sync of home back to the machine scope's pre-pause tip,
@@ -1087,7 +1097,7 @@ pub async fn abort_paused_cascade(paths: &DotsyncPaths) -> Result<AbortReport, D
     // what DESIGN.md's "reverts all the config files" says and what the old
     // selective restore quietly did not do.
     let sync = crate::sync::sync_repo_to_home(
-        paths,
+        &session,
         ForceScope::Everything,
         &RecordedFromHome::default(),
         Some(&state.machine_scope),

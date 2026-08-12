@@ -8,6 +8,7 @@ mod inspect;
 mod machine;
 mod repo;
 mod scope_graph;
+mod session;
 mod status;
 mod sync;
 
