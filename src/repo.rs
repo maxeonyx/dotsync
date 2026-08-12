@@ -189,7 +189,7 @@ pub(crate) fn sync_local_bookmarks_from_remote(
         let ancestry = |from: &CommitId, to: &CommitId| {
             mut_repo.index().is_ancestor(from, to).map_err(|err| {
                 jj_error(format!(
-                    "check bookmark ancestry for {}: {err}",
+                    "compare local and published history for scope {}: {err}",
                     name.as_str()
                 ))
             })

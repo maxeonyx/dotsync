@@ -95,14 +95,25 @@ Original statement of the wave: `&DotsyncPaths` is passed everywhere and every h
 
 Original statement of N-B (found reviewing Wave 1): **the two bulk selections do not behave alike.** `dotsync commit <scope> -m msg` with no paths filters to the files this machine changed, so it steps around anything the repo moved on without home. `dotsync commit <scope> -m msg -- .config/fish/` expands the directory and then refuses the whole commit if any file under it is, say, one another machine deleted. Both are "commit what changed under here"; a directory selection should filter the same way a bare commit does, and reserve refusal for paths named individually — naming one path exactly is the claim that deserves an argument. Deferred rather than done in Wave 1 because it changes what an explicitly named path means, and the refusal machinery had just been introduced.
 
-**Wave 3 — presentation and self-documentation coherence.** JSON schema unified across commands (no empty-string `scope`/`machine_scope` from default-constructed reports; four near-identical `json!` blocks collapsed; `SuccessOutput`'s implicit `human`/`stdout` precedence untangled); `status`/`diff` merged or reconciled (Wave 1 made them agree on *what* is drift; the remaining question is whether two commands are wanted at all); exit-code table made coherent and documented in `--help`; `init` generates the commented `config.toml` DESIGN calls load-bearing (today it's comment-free, so the documented scope-discovery mechanism yields nothing); DESIGN.md Commands section corrected (says "one command" then lists eight, omits `init` and `status`); `docs/SKILL.md` re-verified against actual behavior; user-facing text purged of `bookmark`/`jj` vocabulary (DESIGN: "abstracts jj away entirely").
+**Wave 3 — presentation and self-documentation coherence. ✅ implemented on `MC-wave3-presentation`.** The shipped JSON schema is documented in full, one example per command, under "JSON output contract" below — that section now describes what the code does rather than what an older design intended. What changed: `synced_output` replaced the five hand-built `json!` blocks that had drifted apart, and `scope` stopped repeating `machine_scope` on the commands that only sync; `abort` reports `paused_scope`, which is neither the scope that was aborted nor the scope the discarded commit was on. `CommitReport.recorded` is an `Option`, so a commit that records nothing — which runs no cascade and no home sync — reports `outcome: "nothing_to_commit"` with no `synced_files` at all, instead of a default-constructed `SyncReport` whose empty `machine_scope` agents were reading; `SyncReport` lost `Default` so that substitution cannot come back. `SuccessOutput` grew a `HumanOutput` enum in place of the `human`/`stdout` precedence that made every `view` arm set `human: String::new()`. `status` and `diff` answer with the same `changes` array of the same `{path, state, reason}` objects and the same header and per-file line, `diff` adding the diff; `groups` and the two counts are gone. `ErrorReport.current_state` is a `Vec<String>` — one fact per entry, joined only for humans. Exit 3 became a property of the state (`DotsyncError::is_paused_cascade`, exhaustive) rather than of the command that met it, and the table is in `--help`, in DESIGN's Commands section, and in `docs/SKILL.md`. `init` writes a commented `config.toml` and a joining machine *edits* that file instead of re-rendering it from the parsed graph. `view` validates its scope argument, so an unknown scope gets `commit`'s teaching error instead of "does not have a local bookmark"; a file that is not on a scope is `file_not_on_scope` instead of "jj operation failed"; `MissingScopeBookmark` is `ScopeNotInRepo`; the `Jj` variant keeps jj's detail in its chain but its headline and its code (`internal`) are dotsync's.
+
+Things worth knowing before the next wave:
+
+- **The config file is now edited, not generated, and that is load-bearing in both directions.** `config_with_scopes` adds only the scopes this machine needs and preserves everything else, because the second machine to run `init` used to delete every comment in the file — including the ones the first machine's `init` had just written. `render_config` is gone. This adds `toml_edit` as a direct dependency; it was already in the lock via `toml`, so it costs no new compilation. The consequence to remember: **the config file is no longer a pure function of the scope graph**, so anything that wants to reorganise scopes has to edit the document rather than rebuild it.
+- **`view` was left with four JSON shapes under one command name** (SMELLS-surface S10). It was not in this wave's list and fixing it properly means answering whether those are one command at all; `scopes` still changes type between two of them and `contents` is still UTF-8 lossy for binary files (S20). Recorded in the JSON contract section so nobody mistakes it for coherent.
+- **`--force` is still the only thing keeping `status`/`diff` from being the same command.** They now agree on population, objects, header and per-file rendering; the difference in output is the diff string, and the difference in behaviour is that `diff` exits 1 when it finds anything. That is a `--verbose` flag's worth of difference, which is why the open question below is filed rather than answered.
+- **`N file(s)` was left alone.** The singular/plural fix went to the two messages that read as grammatical errors ("cannot commit 1 of the paths you named"); `file(s)` is a deliberate compact convention used in a dozen places and changing it is churn, not coherence.
+- **Nothing was done about `commit.rs`'s size.** It is still ~1400 lines and its split is still unscheduled; this wave added `DirectoryWalk` to it. See the Wave 2 note.
+
+Original statement of the wave: JSON schema unified across commands (no empty-string `scope`/`machine_scope` from default-constructed reports; four near-identical `json!` blocks collapsed; `SuccessOutput`'s implicit `human`/`stdout` precedence untangled); `status`/`diff` merged or reconciled (Wave 1 made them agree on *what* is drift; the remaining question is whether two commands are wanted at all); exit-code table made coherent and documented in `--help`; `init` generates the commented `config.toml` DESIGN calls load-bearing (today it's comment-free, so the documented scope-discovery mechanism yields nothing); DESIGN.md Commands section corrected (says "one command" then lists eight, omits `init` and `status`); `docs/SKILL.md` re-verified against actual behavior; user-facing text purged of `bookmark`/`jj` vocabulary (DESIGN: "abstracts jj away entirely").
+
 
 **Tracked into later items (root fix belongs there):**
 
 - Item 2: divergence-as-merge, push retry loop, rejection classification. (Item 2's first-commit deletion slot is consumed by Wave 0.)
 - Item 3: DL-2's root fix — "resolved" must be a property of content, not of having run `continue`; the interim Wave-0 guard is deleted with the pause file. Note: the exit-3 pause JSON contract documented below **does not exist in the code today** (actual output is the generic error JSON; `conflicted_files` is stringly-joined into the message) — item 3 *builds* the contract rather than changes it.
 - Item 4: read-only commands never mutate (in-memory merge reporting), `status` reports unpushed scopes.
-- Windows path-separator suspect: `collect_home_directory_files` builds relatives with `read_dir` separators and feeds `from_internal_string` — would produce a tree entry literally named `.config\fish\config.fish` for directory-selection commits on Windows. Inferred from source, unconfirmed — needs a Windows run before item 2 multiplies the conversion sites. Scope-name/`RepoPathBuf` typing (15 conversion sites, `"all"` hardcoded 8×) rides along with whichever wave touches those seams first.
+- Windows path-separator suspect: the directory walk (`DirectoryWalk`, formerly `collect_home_directory_files`) builds relatives with `read_dir` separators and feeds `from_internal_string` — would produce a tree entry literally named `.config\fish\config.fish` for directory-selection commits on Windows. Inferred from source, unconfirmed — needs a Windows run before item 2 multiplies the conversion sites. Scope-name/`RepoPathBuf` typing (15 conversion sites, `"all"` hardcoded 8×) rides along with whichever wave touches those seams first.
 
 ### 2. The convergence pass (#17 and the heart of the design)
 
@@ -137,6 +148,7 @@ Use the headless agent-scenario infrastructure (`tests/agent-scenarios/`) with a
 - PR [#15](https://github.com/maxeonyx/dotsync/pull/15) (scope lifecycle / add-scope): review against current main, land or close.
 - Issues [#5](https://github.com/maxeonyx/dotsync/issues/5), [#8](https://github.com/maxeonyx/dotsync/issues/8), [#10](https://github.com/maxeonyx/dotsync/issues/10), [#11](https://github.com/maxeonyx/dotsync/issues/11): partially or fully addressed by PRs #14/#16 (`view`, `diff`, init/status UX) — verify and close or trim.
 - Issues [#4](https://github.com/maxeonyx/dotsync/issues/4), [#18](https://github.com/maxeonyx/dotsync/issues/18): re-triage after steps 1–4; several items fall out of them naturally.
+- **Open design question for Max (filed by Wave 3): are `status` and `diff` one command or two?** Wave 1 made them agree on what a change is; Wave 3 made them agree on how to say it. They now report the same population, as the same `{path, state, reason}` objects, under the same header, with the same per-file line. Everything `diff` adds is the diff string attached to each entry, and `status` adds the `incoming` list. The two remaining differences are that `diff` exits 1 when it finds anything and `status` always exits 0. That is the shape of a flag, not of a command — `dotsync status --diff` or `dotsync status --verbose` would say the same things — but "exits non-zero when dirty" is a genuinely different contract for a script, and merging them means choosing which of the two exit behaviours the merged command has. Deliberately not decided here: it is a product-surface call, and both commands are documented in DESIGN, `--help` and the dotfiles skill.
 - **Open design question for Max**: should committing to a non-ancestor scope (for example another machine's leaf scope) be allowed? It is currently silently accepted. The old tombstoned test `retired_non_ancestor_scope_human_error_stands_alone` suggests it was once meant to error, and DESIGN.md does not say either way.
 
 ## Key design decision: conflicts are commits (2026-08-12 revision)
@@ -177,54 +189,75 @@ The message MUST contain all of the following:
 
 ## JSON output contract (`--output json`)
 
-All commands emit JSON on stdout when `--output json` is passed. Human-readable messages go to stderr regardless.
+Every command emits one JSON object on stdout when `--output json` is passed. Human-readable messages and notes go to stderr regardless, so a caller can capture the payload and still show the run's own words. This section is the shipped schema as of Wave 3 — one example per command, taken from a live run.
 
-### Conflict pause (exit code 3)
+The envelope is two fields: `status` is `"ok"` or `"error"`, and `command` names the command that answered. Read `status` first: it is what separates `dotsync diff`'s exit 1 (changes found, `"ok"`) from a stop (`"error"`). Any command that could not reach the remote also carries `remote_unreachable` with git's own words, meaning the payload describes the last state this machine fetched.
+
+### `dotsync` (sync), `init`, `continue`
+
 ```json
-{
-  "status": "conflict",
-  "scope": "mx-xps-cy",
-  "conflicted_files": [".shellrc", ".config/fish/config.fish"],
-  "scopes_done": ["linux"],
-  "scopes_pending": ["mx-xps-cy", "hyprland"],
-  "original_scope": "all",
-  "machine_scope": "mx-xps-cy"
-}
+{"status":"ok","command":"sync","machine_scope":"box1","synced_files":[".config/dotsync/config.toml"],"unpushed_scopes":[]}
 ```
 
-### Success (exit code 0)
+One machine scope under one name: `scope` used to repeat `machine_scope` here and was deleted. `unpushed_scopes` lists scopes committed on this machine but not on the remote — the remote refused them, publishing was withheld while a cascade is paused, or the remote was out of reach. Empty means the remote has every scope commit this machine holds, including anything earlier runs left behind, which every publishing command republishes even when it has nothing of its own to add.
+
+### `abort`
+
 ```json
-{
-  "status": "ok",
-  "command": "commit",
-  "scope": "all",
-  "synced_files": [".gitconfig", ".shellrc"],
-  "machine_scope": "mx-xps-cy",
-  "unpushed_scopes": []
-}
+{"status":"ok","command":"abort","machine_scope":"box2","paused_scope":"linux","synced_files":[".config/app.conf"]}
 ```
 
-`unpushed_scopes` is emitted by every command that publishes (`init`, sync, `commit`, `continue`) and lists scopes that are committed on this machine but not on the remote — because the remote refused them, or because publishing was withheld while a cascade is paused. Empty means the remote has every scope commit this machine holds: not just the work this run created, but anything earlier runs left unpublished, which every publishing command republishes even when it has nothing of its own to add. `abort` does not publish and does not emit the field.
+`abort` publishes nothing, so it has no `unpushed_scopes`. `paused_scope` is where the cascade had stopped — not the scope the discarded commit was on, and not something that was itself aborted.
 
-### Error (exit code 1)
+### `commit`
+
 ```json
-{
-  "status": "error",
-  "error": "invalid_scope",
-  "message": "scope `nonexistent` does not exist"
-}
+{"status":"ok","command":"commit","outcome":"committed","scope":"all","machine_scope":"box1","skipped_paths":[],"unpushed_scopes":[],"synced_files":[".apprc"],"newly_tracked":[".apprc"],"forced_overwrites":[]}
 ```
 
-Stable error codes include: `invalid_scope`, `drift_detected`, `no_paused_cascade`, `not_initialized`, etc. Drift errors include a `drifts` array with per-file details.
-
-### Usage error (exit code 2)
 ```json
-{
-  "status": "error",
-  "error": "usage",
-  "message": "missing required argument: -m <message>"
-}
+{"status":"ok","command":"commit","outcome":"nothing_to_commit","scope":"all","machine_scope":"box1","skipped_paths":[],"unpushed_scopes":[]}
 ```
+
+`outcome` distinguishes the two, and they are genuinely different events: a commit with nothing to record writes no history, runs no cascade and runs no home sync, so `synced_files`, `newly_tracked` and `forced_overwrites` are absent rather than empty. `skipped_paths` holds what a named directory matched and the commit left alone, each as `{path, state, reason}` — `state` is a file state such as `stale_not_yours`, or `symlink` / `not_a_regular_file` for a path dotsync cannot record whatever its content says.
+
+### `status` and `diff`
+
+```json
+{"status":"ok","command":"status","machine_scope":"box1","changes":[{"path":".apprc","state":"modified","reason":"edited here since the last sync"}],"incoming":[]}
+```
+
+```json
+{"status":"ok","command":"diff","machine_scope":"box1","changes":[{"path":".apprc","state":"modified","reason":"edited here since the last sync","diff":"--- repo\n+++ system\n@@ -1 +1 @@\n-hello\n+changed"}]}
+```
+
+The same population, the same objects, the same names: `diff` is `status`'s `changes` with the diff attached. `status` adds `incoming`, the files another machine changed that home has not caught up to. Neither carries a count — the arrays have lengths.
+
+### `view`
+
+Four shapes under one command name, one per question asked: `{scope, files}`, `{file, scopes}`, `{scope, path, contents}`, and the overview's `{scopes, files}`. This is a known sharp edge (SMELLS-surface S10) and is **not** fixed: the shapes are coherent with each other only in the envelope, `scopes` changes type between two of them, and file contents are UTF-8 lossy. Whoever takes it should decide whether these are one command at all.
+
+### Errors (exit code 1, or 3 for a paused cascade)
+
+```json
+{"status":"error","error":"unusable_commit_paths","message":"cannot commit 2 of the paths you named","current_state":["`/etc/passwd` is an absolute path, and dotsync resolves every commit path against your home directory.","`typo.conf` matched nothing: no file exists at or under /home/you/typo.conf, and scope `all` tracks no file at or under `typo.conf`."],"drifts":[],"forced_overwrites":[]}
+```
+
+`current_state` is a list of facts, one per thing the run found, so a caller never has to split a rendering apart on newlines; the human rendering joins them. `drifts` carries the same change objects `status` and `diff` report, with the diff, and is populated for `drift_detected`. `forced_overwrites` is what the run had already recorded over an incoming change before it stopped. All three are always present, so error handling has one shape.
+
+Error codes in use: `not_initialized`, `repo_exists`, `invalid_scope`, `file_not_on_scope`, `scope_not_in_repo`, `scope_diverged`, `no_current_scope`, `missing_parent`, `scope_cycle`, `config_parse`, `config_edit`, `sync_state`, `drift_detected`, `unusable_commit_paths`, `stale_commit_paths`, `cascade_paused`, `paused_cascade_in_progress`, `unresolved_conflict`, `pause_predates_resolution_check`, `no_paused_cascade`, `missing_hostname`, `remote_unreachable`, `home_not_set`, `non_utf8_path`, `git_submodule`, `io`, `internal`. Plus `usage` on exit 2.
+
+### Usage errors (exit code 2)
+
+```json
+{"status":"error","error":"usage","message":"unknown command `bogus`; run `dotsync --help` for supported commands"}
+```
+
+Emitted for clap's own parse failures too, which is why `--output` is read straight from argv before clap runs.
+
+### The conflict pause payload
+
+Today a pause is an ordinary error payload with `error: "cascade_paused"` and the conflicted files in the message. The richer contract this section used to document — `scopes_done`, `scopes_pending`, `original_scope` — **does not exist and is not being built here**: item 3 (conflicts as commits) derives the pause from conflicted heads, at which point `scopes_pending` stops being a coherent idea because the cascade always completes. Item 3 builds that contract.
 
 ## Architecture notes
 
