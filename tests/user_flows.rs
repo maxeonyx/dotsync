@@ -2389,6 +2389,42 @@ fn status_ignores_unmanaged_files() {
 // may treat it as a fetch conflict.
 
 #[test]
+fn interrupted_push_reports_that_scope_updates_were_not_pushed() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_file(".config/fish/dev-certs.fish", "set -gx DEV_CERTS 1\n");
+    block_remote_pushes(&machine);
+    let commit_output =
+        machine.run("dotsync commit all -m 'add dev-certs helper' -- .config/fish/dev-certs.fish");
+    allow_remote_pushes(&machine);
+
+    assert_ne!(
+        bookmark_revision(&machine, "all"),
+        remote_branch_revision(&machine, "all"),
+        "this test needs a push that really was rejected"
+    );
+
+    // The exit code is deliberately not asserted: whether a rejected push is an
+    // error or just deferred convergence is a work item 2 question. What must
+    // be true either way is that the run says the change was not published, so
+    // the user knows why the remote does not have it.
+    let stderr = String::from_utf8_lossy(&commit_output.stderr).to_lowercase();
+    assert!(
+        stderr.contains("push"),
+        "a run whose push was rejected must say the scope updates were not pushed: {}",
+        render_output(&commit_output)
+    );
+}
+
+#[test]
 fn status_works_while_local_scopes_are_ahead_of_remote() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
