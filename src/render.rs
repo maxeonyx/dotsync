@@ -64,16 +64,16 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             "cascade paused",
             "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config.",
             "This commit flow was merging the scoped change through the scope DAG and reached a branch where the same file had incompatible edits.",
-            "It expects you to resolve the conflicted file in home, then run `dotsync continue` to create the merge commit and resume the cascade.",
+            "It expects you to edit the conflicted file in home to the merged contents you want, then run `dotsync continue` to create the merge commit and resume the cascade.",
             error_report
                 .current_state
                 .as_deref()
                 .unwrap_or(&error_report.message),
             &error_report.message,
             &[
-                "edit each conflicted file at its real path in home and keep the desired final contents.",
+                "edit each conflicted file at its real path in home so it holds the merged contents you want; the file has to change, because dotsync reads the resolution back out of it.",
                 "run `dotsync continue` from the same machine to finish cascading and syncing.",
-                "or run `dotsync abort` from the same machine to discard the paused cascade and restore the pre-pause state.",
+                "or run `dotsync abort` from the same machine to discard the paused cascade; that reverts the conflicted files in home to this machine's scope state.",
                 "do not run another dotsync commit while the cascade is paused.",
             ],
         ),
@@ -96,8 +96,9 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                         .unwrap_or_default()
                 ),
                 "write the merged contents into the file in home, then run `dotsync continue`.",
+                "`dotsync abort` discards the paused cascade, and reverts the conflicted files in home to this machine's scope state - so anything in home you want to keep must be saved outside home first.",
                 &format!(
-                    "if home already holds exactly the contents you want, run `dotsync abort`, commit those contents to `{scope}` directly, then redo the original commit."
+                    "if home already holds exactly the contents you want: save them outside home, run `dotsync abort`, put them back, commit them to `{scope}` directly, then redo the original commit."
                 ),
             ],
         ),
@@ -112,9 +113,9 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 .unwrap_or(&error_report.message),
             "Dotsync stopped before fetching, committing, or syncing because starting another commit would hide the real paused-cascade task and may mutate unrelated scope state.",
             &[
-                "edit each conflicted file at its real path in home and keep the desired final contents.",
+                "edit each conflicted file at its real path in home so it holds the merged contents you want; the file has to change, because dotsync reads the resolution back out of it.",
                 "run `dotsync continue` to finish the paused cascade.",
-                "or run `dotsync abort` to discard the paused cascade and restore the pre-pause state.",
+                "or run `dotsync abort` to discard the paused cascade; that reverts the conflicted files in home to this machine's scope state.",
                 "after `dotsync continue` succeeds, rerun the new commit if it is still needed.",
             ],
         ),

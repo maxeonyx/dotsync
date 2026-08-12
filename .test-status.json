@@ -24,7 +24,7 @@
     "dotsync::user_flows$commit_with_nothing_to_commit_still_publishes_unpushed_scopes": "passing",
     "dotsync::user_flows$commit_without_paths_imports_all_diffs": "passing",
     "dotsync::user_flows$concurrent_same_scope_file_edits_require_resolution": "passing",
-    "dotsync::user_flows$conflict_messages_agree_that_resolving_means_editing_home": "pending",
+    "dotsync::user_flows$conflict_messages_agree_that_resolving_means_editing_home": "passing",
     "dotsync::user_flows$continue_json_reports_unpushed_scopes": "passing",
     "dotsync::user_flows$continue_preserves_non_conflicting_parent_changes_from_paused_merge": "passing",
     "dotsync::user_flows$continue_refuses_a_conflicted_file_that_was_never_resolved": "passing",
