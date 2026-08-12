@@ -2612,6 +2612,34 @@ fn commit_noop_when_no_changes() {
 }
 
 #[test]
+fn noop_commit_names_the_scope_it_targeted() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    // The report for a commit that found nothing was default-constructed, so
+    // it did not carry the scope the agent had just named - and the message
+    // interpolated the empty string into "committed  and synced".
+    let commit_output = machine.run("dotsync commit mx-xps-cy -m noop");
+    assert_eq!(
+        commit_output.status.code(),
+        Some(0),
+        "{}",
+        render_output(&commit_output)
+    );
+    assert_stderr_snapshot(
+        &commit_output,
+        "dotsync: committed mx-xps-cy and synced 0 file(s)\n",
+    );
+}
+
+#[test]
 fn commit_invalid_scope_errors() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
