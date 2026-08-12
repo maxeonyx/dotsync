@@ -325,6 +325,51 @@ pub enum DotsyncError {
 }
 
 impl DotsyncError {
+    /// Whether this stop is "a paused cascade is in the way", which is the one
+    /// state with a remedy of its own: resolve the conflicted files and run
+    /// `dotsync continue`, or discard the cascade with `dotsync abort`.
+    ///
+    /// The binary turns this into exit code 3. It is a property of the state
+    /// rather than of which command met it, because it used to be neither: the
+    /// run that created the pause exited 3 and the next run that ran into it
+    /// exited 1, so an agent that had learned "3 means go and resolve" was told
+    /// its very next command had failed for some other reason. Exhaustive on
+    /// purpose — a new variant describing this state has to answer the
+    /// question rather than inherit a default.
+    pub fn is_paused_cascade(&self) -> bool {
+        match self {
+            DotsyncError::CascadePaused { .. }
+            | DotsyncError::PausedCascadeInProgress { .. }
+            | DotsyncError::UnresolvedConflict { .. }
+            | DotsyncError::PausePredatesResolutionCheck { .. } => true,
+            DotsyncError::HomeNotSet
+            | DotsyncError::NonUtf8Path { .. }
+            | DotsyncError::GitSubmodule { .. }
+            | DotsyncError::UnusableCommitPaths { .. }
+            | DotsyncError::StaleCommitPaths { .. }
+            | DotsyncError::Io { .. }
+            | DotsyncError::ConfigParse { .. }
+            | DotsyncError::MissingParent { .. }
+            | DotsyncError::ScopeCycle { .. }
+            | DotsyncError::NoCurrentScope
+            | DotsyncError::InvalidScope { .. }
+            | DotsyncError::ScopeDiverged { .. }
+            | DotsyncError::MissingScopeBookmark { .. }
+            | DotsyncError::SyncState { .. }
+            | DotsyncError::DriftDetected { .. }
+            | DotsyncError::NoPausedCascade
+            | DotsyncError::RepoAlreadyExists { .. }
+            | DotsyncError::NotInitialized { .. }
+            | DotsyncError::MissingHostname
+            | DotsyncError::RemoteUnreachable { .. }
+            | DotsyncError::Jj { .. } => false,
+            // Whatever stopped the init is what the reader has to act on, and
+            // an init cannot meet a paused cascade — but saying so through the
+            // wrapped error keeps that true by construction.
+            DotsyncError::PartialInitLeftBehind { original, .. } => original.is_paused_cascade(),
+        }
+    }
+
     pub fn to_error_report(&self) -> ErrorReport {
         match self {
             DotsyncError::DriftDetected { drifts, .. } => ErrorReport {

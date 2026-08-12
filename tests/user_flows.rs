@@ -2423,8 +2423,8 @@ fn continue_refuses_a_pause_that_predates_the_resolution_check() {
     let continued = machine.run("dotsync continue");
     assert_eq!(
         continued.status.code(),
-        Some(1),
-        "continue must refuse a pause it cannot verify\n{}",
+        Some(3),
+        "continue must refuse a pause it cannot verify, and the cascade is still paused\n{}",
         render_output(&continued)
     );
     let stderr = String::from_utf8_lossy(&continued.stderr).into_owned();
@@ -2457,8 +2457,8 @@ fn continue_refuses_a_conflicted_file_that_was_never_resolved() {
     let continued = machine_b.run("dotsync continue");
     assert_eq!(
         continued.status.code(),
-        Some(1),
-        "continue must refuse an unresolved conflict\n{}",
+        Some(3),
+        "continue must refuse an unresolved conflict, and the cascade is still paused\n{}",
         render_output(&continued)
     );
     assert_stderr_snapshot(
@@ -2651,8 +2651,8 @@ fn commit_while_cascade_paused_is_blocked_without_mutating_scope() {
 
     assert_eq!(
         blocked.status.code(),
-        Some(1),
-        "commit while a cascade is paused should be blocked\n{}",
+        Some(3),
+        "commit while a cascade is paused should be blocked, with the code that means a pause is waiting\n{}",
         render_output(&blocked)
     );
     assert_stderr_snapshot(

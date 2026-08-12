@@ -22,7 +22,15 @@ Basic workflow:
   - run `dotsync continue` if a cascade pauses for conflicts
   - run `dotsync abort` to discard a paused cascade";
 
-const TOP_LEVEL_AFTER_HELP: &str = "Examples:
+const TOP_LEVEL_AFTER_HELP: &str = "Exit codes:
+  0  the command did what it says
+  1  dotsync stopped, or `dotsync diff` found changes — with `--output json`,
+     `status` is \"error\" for a stop and \"ok\" for changes `diff` found
+  2  the command line was wrong
+  3  a paused cascade is waiting; resolve the conflicted files in home and run
+     `dotsync continue`, or run `dotsync abort` to discard it
+
+Examples:
   $ dotsync
   $ dotsync commit linux -m \"add bashrc\" .bashrc
   $ dotsync init <url>";
@@ -931,11 +939,7 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
             error,
             forced_overwrites,
         }) => {
-            let exit_code = if matches!(error, DotsyncError::CascadePaused { .. }) {
-                3
-            } else {
-                1
-            };
+            let exit_code = if error.is_paused_cascade() { 3 } else { 1 };
             for note in render::forced_overwrite_notes(&forced_overwrites) {
                 eprintln!("{note}");
             }
