@@ -2664,6 +2664,83 @@ fn drift_stop_during_commit_does_not_strand_unpushed_history() {
 }
 
 #[test]
+fn continue_json_reports_unpushed_scopes() {
+    let harness = TestHarness::new();
+    let machine_a = harness.machine("machine-a", "linux", "goof-a");
+    let machine_b = harness.machine("machine-b", "linux", "goof-b");
+
+    let init_a = machine_a.init();
+    assert!(init_a.status.success(), "{}", render_output(&init_a));
+    let init_b = machine_b.init();
+    assert!(init_b.status.success(), "{}", render_output(&init_b));
+    let sync_a_after_join = machine_a.run("dotsync --force");
+    assert!(
+        sync_a_after_join.status.success(),
+        "{}",
+        render_output(&sync_a_after_join)
+    );
+
+    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
+    let commit_base = machine_a.run("dotsync commit all -m 'add base config' -- .config/app.conf");
+    assert!(
+        commit_base.status.success(),
+        "{}",
+        render_output(&commit_base)
+    );
+    machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
+    let commit_linux =
+        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
+    assert!(
+        commit_linux.status.success(),
+        "{}",
+        render_output(&commit_linux)
+    );
+
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
+    let conflict =
+        machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
+    assert_eq!(
+        conflict.status.code(),
+        Some(3),
+        "this test needs a paused cascade\n{}",
+        render_output(&conflict)
+    );
+
+    machine_b.write_file(".config/app.conf", "setting = \"all+linux\"\n");
+    block_remote_pushes(&machine_b);
+    let continued = machine_b.run("dotsync --output json continue");
+    allow_remote_pushes(&machine_b);
+    assert!(continued.status.success(), "{}", render_output(&continued));
+    assert_ne!(
+        bookmark_revision(&machine_b, "all"),
+        remote_branch_revision(&machine_b, "all"),
+        "this test needs a push that really was rejected"
+    );
+
+    let json = parse_stdout_json(&continued);
+    let unpushed = json["unpushed_scopes"]
+        .as_array()
+        .expect("continue should report unpushed_scopes like every other publishing command")
+        .iter()
+        .map(|scope| {
+            scope
+                .as_str()
+                .expect("scope should be a string")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    for scope in ["all", "linux"] {
+        assert!(
+            unpushed.contains(&scope.to_string()),
+            "`{scope}` was cascaded and refused, so it must be reported unpushed: {}",
+            render_output(&continued)
+        );
+    }
+}
+
+#[test]
 fn paused_cascade_withholds_publishing_until_it_is_resolved() {
     let harness = TestHarness::new();
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
