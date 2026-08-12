@@ -24,6 +24,14 @@ pub enum DotsyncError {
     NonUtf8Path { path: PathBuf },
     #[error("{path} is a git submodule; dotsync manages regular files and symlinks only")]
     GitSubmodule { path: PathBuf },
+    #[error("commit path `{path}` matched no file to commit")]
+    UnmatchedCommitPath {
+        path: PathBuf,
+        home_path: PathBuf,
+        scope: String,
+    },
+    #[error("commit path `{path}` is absolute")]
+    AbsoluteCommitPath { path: PathBuf },
     #[error("failed to read {path}: {source}")]
     Io {
         path: PathBuf,
@@ -123,6 +131,12 @@ impl DotsyncError {
             DotsyncError::HomeNotSet => basic_error_report("home_not_set", self),
             DotsyncError::NonUtf8Path { .. } => basic_error_report("non_utf8_path", self),
             DotsyncError::GitSubmodule { .. } => basic_error_report("git_submodule", self),
+            DotsyncError::UnmatchedCommitPath { .. } => {
+                basic_error_report("unmatched_commit_path", self)
+            }
+            DotsyncError::AbsoluteCommitPath { .. } => {
+                basic_error_report("absolute_commit_path", self)
+            }
         }
     }
 }
@@ -150,6 +164,20 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
             "scope: {scope}; local target: {local_target}; remote target: {remote_target}"
         )),
         DotsyncError::CascadePaused { scope, .. } => Some(format!("paused scope: {scope}")),
+        DotsyncError::UnmatchedCommitPath {
+            path,
+            home_path,
+            scope,
+        } => Some(format!(
+            "`{}` matched nothing: no file exists at or under {}, and scope `{scope}` tracks no file at or under `{}`.",
+            path.display(),
+            home_path.display(),
+            path.display()
+        )),
+        DotsyncError::AbsoluteCommitPath { path } => Some(format!(
+            "`{}` is an absolute path, and dotsync resolves every commit path against your home directory.",
+            path.display()
+        )),
         DotsyncError::PausedCascadeInProgress { scope } => Some(format!("paused scope: {scope}")),
         DotsyncError::NotInitialized { path } => Some(format!(
             "expected repo path: {}; standard location: ~/.local/share/dotsync/repo",

@@ -94,6 +94,24 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 "after `dotsync continue` succeeds, rerun the new commit if it is still needed.",
             ],
         ),
+        DotsyncError::UnmatchedCommitPath { .. } | DotsyncError::AbsoluteCommitPath { .. } => {
+            render_structured_error(
+                "cannot commit that path",
+                "Dotsync records the home files you name onto a scope branch, then cascades that scope so every machine sharing it receives the change.",
+                "This commit flow resolves each path you name against your home directory and against the files already tracked on the target scope.",
+                "It expects every path you name to be relative to your home directory, such as `.bashrc`, `.config/fish/config.fish`, or `.config/fish/`.",
+                error_report
+                    .current_state
+                    .as_deref()
+                    .unwrap_or(&error_report.message),
+                "Committing a path dotsync cannot resolve would record no change while reporting success, so you would believe the config was saved when it was not.",
+                &[
+                    "name paths relative to your home directory: `dotsync commit <scope> -m \"message\" -- .config/fish/config.fish`.",
+                    "do not use `~/` or absolute paths; dotsync resolves every path against your home directory already.",
+                    "run `dotsync status` to see which managed files changed.",
+                ],
+            )
+        }
         DotsyncError::InvalidScope { .. } => render_structured_error(
             "invalid scope",
             "Dotsync stores dotfiles in a scope DAG so shared config can live on shared ancestor scopes and machine-specific config can stay isolated on leaf scopes.",

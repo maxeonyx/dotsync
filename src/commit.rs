@@ -129,6 +129,7 @@ pub async fn commit_and_sync(
     let selected_paths = select_commit_paths(
         paths,
         repo.as_ref(),
+        &options.scope,
         &options.selection,
         &target_entries,
         &internal_paths,
@@ -418,13 +419,20 @@ fn load_scope_entries(
 async fn select_commit_paths(
     paths: &DotsyncPaths,
     repo: &dyn jj_lib::repo::Repo,
+    scope: &str,
     selection: &CommitSelection,
     target_entries: &BTreeMap<PathBuf, TreeValue>,
     internal_paths: &BTreeSet<PathBuf>,
 ) -> Result<Vec<PathBuf>, DotsyncError> {
     match selection {
         CommitSelection::Paths(selection_paths) if !selection_paths.is_empty() => {
-            expand_selection_paths(paths, selection_paths, target_entries, internal_paths)
+            expand_selection_paths(
+                paths,
+                scope,
+                selection_paths,
+                target_entries,
+                internal_paths,
+            )
         }
         CommitSelection::Paths(_) => {
             detect_changed_managed_paths(paths, repo, target_entries).await
@@ -467,6 +475,7 @@ async fn detect_changed_managed_paths(
 
 fn expand_selection_paths(
     paths: &DotsyncPaths,
+    scope: &str,
     selection_paths: &[PathBuf],
     target_entries: &BTreeMap<PathBuf, TreeValue>,
     internal_paths: &BTreeSet<PathBuf>,
@@ -480,6 +489,14 @@ fn expand_selection_paths(
         .map(|p| p.to_path_buf());
 
     for selection_path in selection_paths {
+        // An absolute path resolves against the filesystem root, not against
+        // home, so it can never name a repo-relative file. Say so rather than
+        // handing the raw path to the repo layer.
+        if selection_path.is_absolute() {
+            return Err(DotsyncError::AbsoluteCommitPath {
+                path: selection_path.clone(),
+            });
+        }
         if internal_paths.contains(selection_path) {
             continue;
         }
@@ -495,25 +512,40 @@ fn expand_selection_paths(
             || target_entries.keys().any(|candidate| {
                 candidate != selection_path && path_has_prefix(candidate, selection_path)
             });
+        let mut matched = BTreeSet::new();
         if is_directory_selection {
             if home_path.exists() {
                 collect_home_directory_files(
                     &paths.home_dir,
                     &home_path,
-                    &mut expanded,
+                    &mut matched,
                     internal_paths,
                     &paths.repo_root,
                 )?;
             }
-            expanded.extend(
+            matched.extend(
                 target_entries
                     .keys()
                     .filter(|candidate| path_has_prefix(candidate, selection_path))
                     .cloned(),
             );
-        } else {
-            expanded.insert(selection_path.clone());
+        } else if home_path.exists() || target_entries.contains_key(selection_path) {
+            // A tracked path whose home file is gone is a deletion, so the
+            // tracked side counts as a match too.
+            matched.insert(selection_path.clone());
         }
+
+        // A path that matches nothing names neither a home file nor a tracked
+        // file. Committing it would report success having recorded nothing,
+        // which is how a typo reads to an agent as a saved config change.
+        if matched.is_empty() {
+            return Err(DotsyncError::UnmatchedCommitPath {
+                path: selection_path.clone(),
+                home_path,
+                scope: scope.to_string(),
+            });
+        }
+        expanded.extend(matched);
     }
 
     Ok(expanded.into_iter().collect())
