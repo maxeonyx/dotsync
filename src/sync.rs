@@ -13,7 +13,7 @@ use crate::error::DotsyncError;
 use crate::machine::detect_machine;
 use crate::repo::{
     collect_managed_tree_entries, fetch_origin, load_repo_direct, load_scope_commit,
-    push_scope_updates, read_tree_entry_bytes, PushReport,
+    pending_push_scopes, push_scope_updates, read_tree_entry_bytes, PushReport,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -62,8 +62,15 @@ pub async fn sync(
     let repo = load_repo_direct(paths).await?;
     let _repo = fetch_origin(repo).await?;
     // Publish before touching home: scope commits left behind by an
-    // interrupted run must reach the remote even if the home sync stops.
-    let push = push_scope_updates(paths).await?;
+    // interrupted run must reach the remote even if the home sync stops. The
+    // exception is a paused cascade, whose scopes are only half cascaded.
+    let push = match crate::commit::paused_cascade_scope(paths)? {
+        Some(paused_scope) => PushReport::WithheldPausedCascade {
+            scopes: pending_push_scopes(paths).await?,
+            paused_scope,
+        },
+        None => push_scope_updates(paths).await?,
+    };
     let sync = sync_repo_to_home(paths, options, &[], None).await?;
     Ok(SyncCommandReport { sync, push })
 }

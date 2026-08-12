@@ -987,6 +987,17 @@ fn remove_paused_cascade_state(paths: &DotsyncPaths) -> Result<(), DotsyncError>
     }
 }
 
+/// The scope a paused cascade stopped at, if one is paused. Reads the same
+/// state file `continue` and `abort` read, and disappears with it when
+/// conflicts become commits.
+pub(crate) fn paused_cascade_scope(paths: &DotsyncPaths) -> Result<Option<String>, DotsyncError> {
+    match load_paused_cascade_state(paths) {
+        Ok(state) => Ok(Some(state.paused_scope)),
+        Err(DotsyncError::NoPausedCascade) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn reject_commit_if_cascade_paused(paths: &DotsyncPaths) -> Result<(), DotsyncError> {
     match load_paused_cascade_state(paths) {
         Ok(state) => Err(DotsyncError::PausedCascadeInProgress {

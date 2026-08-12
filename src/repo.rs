@@ -195,6 +195,13 @@ pub enum PushReport {
         scopes: Vec<String>,
         rejection_reason: Option<String>,
     },
+    /// Dotsync did not offer these scopes to the remote, because publishing a
+    /// half-cascaded scope would put history on the remote that `dotsync abort`
+    /// could no longer take back.
+    WithheldPausedCascade {
+        scopes: Vec<String>,
+        paused_scope: String,
+    },
 }
 
 impl PushReport {
@@ -202,18 +209,14 @@ impl PushReport {
         match self {
             PushReport::UpToDate => &[],
             PushReport::Refused { scopes, .. } => scopes,
+            PushReport::WithheldPausedCascade { scopes, .. } => scopes,
         }
     }
 }
 
-pub(crate) async fn push_scope_updates(paths: &DotsyncPaths) -> Result<PushReport, DotsyncError> {
-    let repo = load_repo_direct(paths).await?;
-    let settings = default_settings()?;
-    let subprocess_options = GitSubprocessOptions::from_settings(&settings)
-        .map_err(|err| jj_error(format!("load git subprocess settings: {err}")))?;
-
-    let updates: Vec<(RefNameBuf, BookmarkPushUpdate)> = repo
-        .view()
+/// Scopes whose local bookmark is not where the remote has it.
+fn pending_bookmark_updates(repo: &ReadonlyRepo) -> Vec<(RefNameBuf, BookmarkPushUpdate)> {
+    repo.view()
         .local_remote_bookmarks("origin".as_ref())
         .filter_map(|(name, targets)| {
             let local = targets.local_target.as_normal()?.clone();
@@ -229,7 +232,25 @@ pub(crate) async fn push_scope_updates(paths: &DotsyncPaths) -> Result<PushRepor
                 },
             ))
         })
-        .collect();
+        .collect()
+}
+
+/// The scopes a push would offer the remote right now.
+pub(crate) async fn pending_push_scopes(paths: &DotsyncPaths) -> Result<Vec<String>, DotsyncError> {
+    let repo = load_repo_direct(paths).await?;
+    Ok(pending_bookmark_updates(&repo)
+        .into_iter()
+        .map(|(name, _)| name.as_str().to_string())
+        .collect())
+}
+
+pub(crate) async fn push_scope_updates(paths: &DotsyncPaths) -> Result<PushReport, DotsyncError> {
+    let repo = load_repo_direct(paths).await?;
+    let settings = default_settings()?;
+    let subprocess_options = GitSubprocessOptions::from_settings(&settings)
+        .map_err(|err| jj_error(format!("load git subprocess settings: {err}")))?;
+
+    let updates = pending_bookmark_updates(&repo);
 
     if updates.is_empty() {
         return Ok(PushReport::UpToDate);

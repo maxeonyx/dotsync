@@ -196,6 +196,21 @@ fn notes_for_push(push: &PushReport) -> Vec<String> {
                 "dotsync: those scopes are committed here but not published, so the remote does not have this change yet. The next run will try again.".to_string(),
             ]
         }
+        PushReport::WithheldPausedCascade {
+            scopes,
+            paused_scope,
+        } => {
+            if scopes.is_empty() {
+                return Vec::new();
+            }
+            vec![
+                format!(
+                    "dotsync: not publishing {} while the cascade paused at `{paused_scope}` is unresolved",
+                    scopes.join(", ")
+                ),
+                "dotsync: run `dotsync continue` to finish the cascade, or `dotsync abort` to discard it; publishing resumes after that.".to_string(),
+            ]
+        }
     }
 }
 
