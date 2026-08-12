@@ -177,6 +177,41 @@ impl MachineEnvironment {
 
     /// Runs dotsync with no `HOME` in the environment, which is how dotsync
     /// finds both the home directory it manages and its hidden repo.
+    /// Runs dotsync and gives up on it after `limit`.
+    ///
+    /// For the one failure a plain `output()` cannot report: dotsync never
+    /// returning at all. A hang shows up as a test the runner kills minutes
+    /// later, with nothing said about which call blocked; a run that is killed
+    /// here fails the exit-code assertion immediately.
+    fn run_within(&self, command: &str, limit: std::time::Duration) -> Output {
+        let args = dotsync_args(command);
+        let mut child = Command::new(env!("CARGO_BIN_EXE_dotsync"))
+            .args(args)
+            .current_dir(&self.home_dir)
+            .env("HOME", &self.home_dir)
+            .env("DOTSYNC_OS", &self.os)
+            .env("DOTSYNC_HOSTNAME", &self.hostname)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn dotsync");
+
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            match child.try_wait().expect("poll dotsync") {
+                Some(_) => break,
+                None if std::time::Instant::now() >= deadline => {
+                    child
+                        .kill()
+                        .expect("kill a dotsync run that never returned");
+                    break;
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+        child.wait_with_output().expect("collect dotsync output")
+    }
+
     fn run_without_home(&self, command: &str) -> Output {
         let args = dotsync_args(command);
         let mut command = Command::new(env!("CARGO_BIN_EXE_dotsync"));
@@ -569,6 +604,19 @@ fn symlink_at(target: &Path, link: &Path) {
         let _ = (target, link);
         panic!("symlink fixtures are unix-only");
     }
+}
+
+/// A named pipe: a path that exists, is not a regular file, and blocks
+/// forever if anything opens it for reading.
+fn make_fifo(path: &Path) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create parent dir");
+    }
+    let status = Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .expect("run mkfifo");
+    assert!(status.success(), "mkfifo {} failed", path.display());
 }
 
 fn write_file_at(path: &Path, contents: &str) {
@@ -6095,4 +6143,317 @@ fn a_forced_sync_says_which_home_files_it_overwrote() {
         render_output(&forced)
     );
     assert_eq!(machine.read_file(".bashrc"), "export DOTSYNC=repo\n");
+}
+
+/// An unknown command with `--output json` after it emitted nothing at all on
+/// stdout: clap's external-subcommand catch-all swallows every trailing
+/// argument, so the flag never reached the parsed value the emitter reads. An
+/// empty stdout and exit 2 is indistinguishable from a crash, for the one
+/// mistake an agent makes most.
+#[test]
+fn an_unknown_command_honors_the_json_contract_wherever_the_flag_sits() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    for command in ["dotsync --output json bogus", "dotsync bogus --output json"] {
+        let output = machine.run(command);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{command}\n{}",
+            render_output(&output)
+        );
+        let json = parse_stdout_json(&output);
+        assert_eq!(json["status"], "error", "{command}");
+        assert_eq!(json["error"], "usage", "{command}");
+        assert!(
+            json["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("bogus")),
+            "{command}\n{}",
+            render_output(&output)
+        );
+    }
+}
+
+/// Every error payload carries the same three collections, so error handling
+/// has one shape — PLAN says so. Usage errors carried none of them, which is
+/// the one error an agent hits before it has learned anything else.
+#[test]
+fn a_usage_error_has_the_same_shape_as_every_other_error() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let output = machine.run("dotsync --output json bogus");
+    assert_eq!(output.status.code(), Some(2), "{}", render_output(&output));
+
+    let json = parse_stdout_json(&output);
+    for field in ["current_state", "drifts", "forced_overwrites"] {
+        assert_eq!(
+            json[field].as_array().map(Vec::len),
+            Some(0),
+            "a usage error must carry `{field}` like every other error\n{}",
+            render_output(&output)
+        );
+    }
+}
+
+/// The drift stop lists the files it stopped on, and used to list them as `- `
+/// bullets printed straight after the `Correct flow:` bullets — so the files
+/// read as more instructions. They are also the same files `status` and `diff`
+/// report, and were rendered in a third shape.
+#[test]
+fn the_drift_stop_lists_files_the_way_status_does_and_apart_from_its_instructions() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+    machine.write_file(".bashrc", "export DOTSYNC=mine\n");
+
+    let stopped = machine.run("dotsync");
+    assert_eq!(
+        stopped.status.code(),
+        Some(1),
+        "{}",
+        render_output(&stopped)
+    );
+    let stderr = String::from_utf8_lossy(&stopped.stderr).into_owned();
+
+    let status_output = machine.run("dotsync status");
+    let status_stderr = String::from_utf8_lossy(&status_output.stderr).into_owned();
+    let status_line = status_stderr
+        .lines()
+        .find(|line| line.contains(".bashrc"))
+        .expect("status names the changed file");
+    assert!(
+        stderr.contains(status_line),
+        "the stop names the file the way `status` does\nstop:\n{stderr}\nstatus line: {status_line:?}"
+    );
+
+    let (instructions, files) = stderr
+        .split_once("Correct flow:")
+        .expect("the stop teaches a correct flow");
+    assert!(
+        !instructions.contains("- .bashrc"),
+        "the file list must not be rendered as instruction bullets\n{stderr}"
+    );
+    assert!(
+        files.contains("Changed files:"),
+        "the file list needs a heading of its own so it is not read as more instructions\n{stderr}"
+    );
+}
+
+/// `dotsync status` is the reflex diagnostic. On a machine where a cascade is
+/// paused — which is a machine that cannot commit anything at all — it
+/// reported "no changes", and nothing anywhere else said otherwise once the
+/// original pause message had scrolled away.
+#[test]
+fn status_and_diff_say_a_cascade_is_paused() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
+    let base = machine_a.run("dotsync commit all -m 'add base' -- .config/app.conf");
+    assert!(base.status.success(), "{}", render_output(&base));
+    machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
+    let linux = machine_a.run("dotsync commit linux -m 'linux flavour' -- .config/app.conf");
+    assert!(linux.status.success(), "{}", render_output(&linux));
+
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
+    let conflict = machine_b.run("dotsync commit all -m 'shared change' -- .config/app.conf");
+    assert_eq!(
+        conflict.status.code(),
+        Some(3),
+        "{}",
+        render_output(&conflict)
+    );
+
+    // Home now holds exactly what the pause left there, so both commands would
+    // otherwise report a clean machine.
+    machine_b.write_file(".config/app.conf", "setting = \"linux\"\n");
+
+    for command in ["dotsync status", "dotsync diff"] {
+        let output = machine_b.run(command);
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            stderr.contains("paused") && stderr.contains("linux"),
+            "`{command}` must say a cascade is paused, and where\n{stderr}"
+        );
+        assert!(
+            stderr.contains("dotsync continue") || stderr.contains("dotsync abort"),
+            "`{command}` must point at the way out\n{stderr}"
+        );
+    }
+
+    for command in ["dotsync --output json status", "dotsync --output json diff"] {
+        let output = machine_b.run(command);
+        assert_eq!(
+            parse_stdout_json(&output)["paused_cascade"],
+            "linux",
+            "`{command}` must report the pause in the payload too\n{}",
+            render_output(&output)
+        );
+    }
+}
+
+/// "Then rerun `dotsync status`" was the advice whatever you had run, so an
+/// agent that ran `dotsync commit` was told to finish by running something
+/// else. The message was also the one structured error written in a shape of
+/// its own.
+#[test]
+fn the_not_initialized_stop_names_the_command_you_ran() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let output = machine.run("dotsync commit all -m 'add bashrc' -- .bashrc");
+    assert_eq!(output.status.code(), Some(1), "{}", render_output(&output));
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        stderr.contains("rerun `dotsync commit`"),
+        "the advice must name the command that was run\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("rerun `dotsync status`"),
+        "and must not name a command the agent never ran\n{stderr}"
+    );
+    for section in [
+        "What dotsync does:",
+        "This flow:",
+        "Expected:",
+        "Current state found:",
+        "Why dotsync stopped:",
+        "Correct flow:",
+    ] {
+        assert!(
+            stderr.contains(section),
+            "not-initialized must be laid out like every other teaching error; missing {section:?}\n{stderr}"
+        );
+    }
+}
+
+/// `repo already exists at <path>` was a one-line dead end: it named a
+/// directory the agent is told never to touch, and said nothing about what to
+/// do with an already-initialized machine.
+#[test]
+fn init_on_an_initialized_machine_says_what_to_run_instead() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    let again = machine.init();
+    assert_eq!(again.status.code(), Some(1), "{}", render_output(&again));
+    let stderr = String::from_utf8_lossy(&again.stderr).into_owned();
+    assert!(
+        stderr.contains("already initialized"),
+        "the stop has to say what state the machine is in\n{stderr}"
+    );
+    assert!(
+        stderr.contains("run `dotsync`") && stderr.contains("dotsync status"),
+        "and what to run instead\n{stderr}"
+    );
+    assert!(
+        stderr.contains("Correct flow:"),
+        "laid out like every other teaching error\n{stderr}"
+    );
+}
+
+/// A named path that is not a regular file used to hang the process: `fs::read`
+/// on a FIFO blocks until somebody writes to the other end, and nothing ever
+/// does. A directory selection already steps around one and says so; naming it
+/// exactly has to be refused, and every other read of home has to refuse it
+/// too, because a tracked path can become one at any time.
+#[test]
+fn a_named_path_that_is_not_a_regular_file_is_refused_rather_than_read() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    make_fifo(&machine.home_dir.join(".pipe"));
+
+    let named = machine.run_within(
+        "dotsync commit all -m 'pipe' -- .pipe",
+        std::time::Duration::from_secs(20),
+    );
+    assert_eq!(
+        named.status.code(),
+        Some(1),
+        "naming a fifo must be refused, not read\n{}",
+        render_output(&named)
+    );
+    let stderr = String::from_utf8_lossy(&named.stderr).into_owned();
+    assert!(
+        stderr.contains("not a regular file"),
+        "and the refusal has to say why\n{stderr}"
+    );
+
+    // The same file where dotsync reads home without being asked: a path the
+    // scope already tracks, replaced in home by a fifo.
+    machine.write_file(".bashrc", "export DOTSYNC=1\n");
+    let tracked = machine.run("dotsync commit all -m 'bashrc' -- .bashrc");
+    assert!(tracked.status.success(), "{}", render_output(&tracked));
+    machine.delete_file(".bashrc");
+    make_fifo(&machine.home_dir.join(".bashrc"));
+
+    let status = machine.run_within("dotsync status", std::time::Duration::from_secs(20));
+    assert_eq!(
+        status.status.code(),
+        Some(1),
+        "reading home must stop rather than block forever\n{}",
+        render_output(&status)
+    );
+    assert!(
+        String::from_utf8_lossy(&status.stderr).contains("not a regular file"),
+        "{}",
+        render_output(&status)
+    );
+}
+
+/// `dotsync view --file` on a path no scope holds printed the two headings and
+/// nothing between them, which reads exactly like a bug — and is the answer to
+/// the commonest reason for asking: a typo.
+#[test]
+fn view_says_when_no_scope_holds_a_file() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    let output = machine.run("dotsync view --file .nosuchfile");
+    assert_eq!(output.status.code(), Some(0), "{}", render_output(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        stdout.contains("No scope holds .nosuchfile"),
+        "an empty answer has to say it is an answer\n{stdout}"
+    );
 }
