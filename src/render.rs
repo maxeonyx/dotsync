@@ -64,33 +64,57 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             "cascade paused",
             "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config.",
             "This commit flow was merging the scoped change through the scope DAG and reached a branch where the same file had incompatible edits.",
-            "It expects you to resolve the conflicted file in home, then run `dotsync continue` to create the merge commit and resume the cascade.",
+            "It expects you to edit the conflicted file in home to the merged contents you want, then run `dotsync continue` to create the merge commit and resume the cascade.",
             error_report
                 .current_state
                 .as_deref()
                 .unwrap_or(&error_report.message),
             &error_report.message,
             &[
-                "edit each conflicted file at its real path in home and keep the desired final contents.",
+                "edit each conflicted file at its real path in home so it holds the merged contents you want; the file has to change, because dotsync reads the resolution back out of it.",
                 "run `dotsync continue` from the same machine to finish cascading and syncing.",
-                "or run `dotsync abort` from the same machine to discard the paused cascade and restore the pre-pause state.",
+                "or run `dotsync abort` from the same machine to discard the paused cascade; that reverts the conflicted files in home to this machine's scope state.",
                 "do not run another dotsync commit while the cascade is paused.",
             ],
         ),
-        DotsyncError::ConcurrentScopeConflict { .. } => render_structured_error(
-            "concurrent scope conflict",
-            "Dotsync stores one shared version of each file on a scope branch, and machines import selected home edits into that scope explicitly.",
-            "This commit flow fetched remote scope history before committing, then found that the selected home file does not match a scope path that changed since this machine's previous local view of that scope.",
-            "It expects you to resolve the home file against the already-published scope version before creating a new shared-scope commit.",
+        DotsyncError::PausePredatesResolutionCheck { .. } => render_structured_error(
+            "cannot check this conflict resolution",
+            "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config. Where two branches changed one file differently, the cascade pauses and asks you for the merged contents.",
+            "This continue flow reads each conflicted file back out of your home directory and records what it finds there as the resolution. To tell a resolution from an untouched file, it compares them against what they held when the cascade paused.",
+            "It expects the paused cascade to have recorded those contents.",
             error_report
                 .current_state
                 .as_deref()
                 .unwrap_or(&error_report.message),
-            &error_report.message,
+            "This cascade was paused by an older dotsync, which recorded nothing to compare against. Continuing would record whatever is in home as the resolution without being able to tell whether anything was resolved, and that silently discards the other scope's version.",
             &[
-                "inspect the already-published scope version before deciding what the shared file should contain.",
-                "edit the conflicted file in home so it contains the resolved shared contents.",
-                "rerun `dotsync commit <scope> -m \"message\" -- <path>` after resolving the file.",
+                "run `dotsync abort` to discard the paused cascade; it reverts the conflicted files in home to this machine's scope state.",
+                "then redo the commit that started the cascade; the pause it creates records what this check needs.",
+            ],
+        ),
+        DotsyncError::UnresolvedConflict { scope, paths } => render_structured_error(
+            "conflict not resolved",
+            "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config. Where two branches changed one file differently, the cascade pauses and asks you for the merged contents.",
+            "This continue flow reads each conflicted file back out of your home directory and records what it finds there as the resolution.",
+            "It expects those files to have changed since the cascade paused, because the resolution is the contents you write into them.",
+            error_report
+                .current_state
+                .as_deref()
+                .unwrap_or(&error_report.message),
+            "Dotsync does not yet write the two conflicting versions into home, so an unchanged file is not a resolution - it is only the version that happened to already be there. Recording it would silently discard the other scope's version.",
+            &[
+                &format!(
+                    "read the version dotsync would discard with `dotsync view --scope {scope} --file {}`, and compare it against the file in home.",
+                    paths
+                        .first()
+                        .map(|path| display_path(path))
+                        .unwrap_or_default()
+                ),
+                "write the merged contents into the file in home, then run `dotsync continue`.",
+                "`dotsync abort` discards the paused cascade, and reverts the conflicted files in home to this machine's scope state - so anything in home you want to keep must be saved outside home first.",
+                &format!(
+                    "if home already holds exactly the contents you want: save them outside home, run `dotsync abort`, put them back, commit them to `{scope}` directly, then redo the original commit."
+                ),
             ],
         ),
         DotsyncError::PausedCascadeInProgress { .. } => render_structured_error(
@@ -104,12 +128,54 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 .unwrap_or(&error_report.message),
             "Dotsync stopped before fetching, committing, or syncing because starting another commit would hide the real paused-cascade task and may mutate unrelated scope state.",
             &[
-                "edit each conflicted file at its real path in home and keep the desired final contents.",
+                "edit each conflicted file at its real path in home so it holds the merged contents you want; the file has to change, because dotsync reads the resolution back out of it.",
                 "run `dotsync continue` to finish the paused cascade.",
-                "or run `dotsync abort` to discard the paused cascade and restore the pre-pause state.",
+                "or run `dotsync abort` to discard the paused cascade; that reverts the conflicted files in home to this machine's scope state.",
                 "after `dotsync continue` succeeds, rerun the new commit if it is still needed.",
             ],
         ),
+        DotsyncError::UnusableCommitPaths { scope, rejected } => {
+            let mut steps = vec![format!(
+                "name paths relative to your home directory: `dotsync commit {scope} -m \"message\" -- .config/fish/config.fish`."
+            )];
+            steps.push(
+                "do not use `~/`, absolute paths, or `..`; dotsync resolves every path against your home directory already, and records it verbatim.".to_string(),
+            );
+            if rejected.iter().any(|rejected| rejected.is_scope_graph()) {
+                steps.push(
+                    "commit the scope graph to `all`, which is the only scope dotsync reads it from: `dotsync commit all -m \"message\" -- .config/dotsync/config.toml`."
+                        .to_string(),
+                );
+            }
+            if rejected.iter().any(|rejected| rejected.is_dotsync_state()) {
+                steps.push(
+                    "commit the config files you edited instead; dotsync's own state is not config and cannot travel on a scope."
+                        .to_string(),
+                );
+                steps.push(
+                    "to change which scopes exist, edit `.config/dotsync/config.toml` in home and commit that path to `all`."
+                        .to_string(),
+                );
+            }
+            steps.push("run `dotsync status` to see which managed files changed.".to_string());
+
+            render_structured_error(
+                if rejected.len() == 1 {
+                    "cannot commit that path"
+                } else {
+                    "cannot commit those paths"
+                },
+                "Dotsync records the home files you name onto a scope branch, then cascades that scope so every machine sharing it receives the change. Every file on a scope is written back into home on each of those machines.",
+                "This commit flow resolves each path you name against your home directory, checks that it is a config file dotsync may record, and commits the ones that changed.",
+                "It expects every path you name to be a config file inside your home directory, named relative to it, and to exist either in home or on the target scope already.",
+                error_report
+                    .current_state
+                    .as_deref()
+                    .unwrap_or(&error_report.message),
+                "Dotsync stopped before recording anything. A commit records every path you named or none of them, so fixing the paths above and rerunning the same command is safe.",
+                &steps.iter().map(String::as_str).collect::<Vec<_>>(),
+            )
+        }
         DotsyncError::InvalidScope { .. } => render_structured_error(
             "invalid scope",
             "Dotsync stores dotfiles in a scope DAG so shared config can live on shared ancestor scopes and machine-specific config can stay isolated on leaf scopes.",
@@ -138,7 +204,9 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             "dotsync: not initialized\n\nWhat happened:\nDotsync could not find its hidden repo at {}.\n\nWhat to do:\n- Run `dotsync init <remote-url>` from this home directory.\n- Then rerun `dotsync status`.\n\nThe remote URL is the git remote that stores your dotsync repo.",
             path.display()
         ),
-        DotsyncError::NotImplemented(_)
+        DotsyncError::HomeNotSet
+        | DotsyncError::NonUtf8Path { .. }
+        | DotsyncError::GitSubmodule { .. }
         | DotsyncError::NoPausedCascade
         | DotsyncError::Io { .. }
         | DotsyncError::ConfigParse { .. }

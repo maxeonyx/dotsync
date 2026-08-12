@@ -15,6 +15,10 @@ use crate::repo::{load_repo_direct, load_scope_commit, read_tree_entry_bytes};
 use crate::scope_graph::{scope_depth, ScopeGraph};
 
 pub(crate) const DOTSYNC_CONFIG_RELATIVE_PATH: &str = ".config/dotsync/config.toml";
+
+/// The root scope. Every machine descends from it, which is why the scope
+/// graph itself is read from here and nowhere else.
+pub(crate) const ALL_SCOPE: &str = "all";
 pub(crate) const DEFAULT_SYNC_STATE_RELATIVE_PATH: &str = ".config/dotsync/sync-state.json";
 
 #[derive(Debug, Clone)]

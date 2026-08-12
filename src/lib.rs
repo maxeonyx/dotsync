@@ -12,11 +12,11 @@ mod sync;
 
 pub use crate::bootstrap::{init, InitReport};
 pub use crate::commit::{
-    abort_paused_cascade, commit_and_sync, continue_after_conflict, AbortReport, CommandOutcome,
-    CommitOptions, CommitReport, CommitSelection, ContinueReport,
+    abort_paused_cascade, commit_and_sync, continue_after_conflict, AbortReport, CommitOptions,
+    CommitReport, CommitSelection, ContinueReport,
 };
 pub use crate::config::DotsyncPaths;
-pub use crate::error::{DotsyncError, ErrorReport};
+pub use crate::error::{CommitPathProblem, DotsyncError, ErrorReport, RejectedCommitPath};
 pub use crate::inspect::{
     diff_home, list_scope_tree, list_scopes, read_scope_file, DiffReport, FileReport, ScopeInfo,
     ScopeListReport, TreeReport,

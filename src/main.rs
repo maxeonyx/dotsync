@@ -1,9 +1,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
     abort_paused_cascade, commit_and_sync, continue_after_conflict, diff_home, init,
-    list_scope_tree, list_scopes, read_scope_file, status, sync, ChangeStatus, CommandOutcome,
-    CommitOptions, CommitSelection, DiffReport, DotsyncError, DotsyncPaths, FileDrift,
-    ScopeListReport, SyncOptions, TreeReport,
+    list_scope_tree, list_scopes, read_scope_file, status, sync, ChangeStatus, CommitOptions,
+    CommitSelection, DiffReport, DotsyncError, DotsyncPaths, FileDrift, ScopeListReport,
+    SyncOptions, TreeReport,
 };
 mod render;
 use serde_json::json;
@@ -70,10 +70,10 @@ struct Cli {
     command: Option<Command>,
 
     /// Output format
-    #[arg(long = "output", value_enum, default_value = "human")]
+    #[arg(long = "output", value_enum, default_value = "human", global = true)]
     output_format: OutputFormat,
 
-    /// Proceed even when drift is detected
+    /// Proceed even when drift is detected (sync, commit, continue, abort)
     #[arg(long, global = true)]
     force: bool,
 }
@@ -98,9 +98,7 @@ enum Action {
     Abort {
         force: bool,
     },
-    Status {
-        force: bool,
-    },
+    Status,
     Diff,
     View {
         scope: Option<String>,
@@ -185,13 +183,16 @@ enum CliOutput {
     Usage(UsageError),
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
-    if try_handle_version_request() {
+    if try_handle_version_json_request() {
         return;
     }
 
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => std::process::exit(emit_clap_error(error)),
+    };
     let output_format = cli.output_format;
     let outcome = match Action::try_from_cli(cli, detect_cli_context()) {
         Ok(action) => dispatch(action).await,
@@ -211,54 +212,93 @@ fn detect_cli_context() -> CliContext {
     }
 }
 
-fn try_handle_version_request() -> bool {
+/// `<tool> --version --json` is the agent-tools workspace contract for
+/// machine-readable version reporting, enforced across every tool by the
+/// `version-artifacts` concern. Clap cannot express it: `--version` prints and
+/// exits inside clap, so `--json` never reaches a handler. Plain `--version`
+/// is clap's own.
+fn try_handle_version_json_request() -> bool {
     let args: Vec<String> = env::args().skip(1).collect();
-
-    if is_version_json_request(&args) {
-        println!(
-            "{}",
-            json!({
-                "package": "dotsync",
-                "binary": "dotsync",
-                "version": env!("CARGO_PKG_VERSION"),
-            })
-        );
-        return true;
-    }
-
-    if is_version_request(&args) {
-        println!("dotsync {}", env!("CARGO_PKG_VERSION"));
-        return true;
-    }
-
-    false
-}
-
-fn is_version_request(args: &[String]) -> bool {
-    args.len() == 1 && matches!(args[0].as_str(), "--version" | "-V")
-}
-
-fn is_version_json_request(args: &[String]) -> bool {
-    args.iter()
+    let is_version_json_request = args
+        .iter()
         .any(|arg| matches!(arg.as_str(), "--version" | "-V"))
         && args.iter().any(|arg| arg == "--json")
         && args
             .iter()
-            .all(|arg| matches!(arg.as_str(), "--version" | "-V" | "--json"))
+            .all(|arg| matches!(arg.as_str(), "--version" | "-V" | "--json"));
+    if !is_version_json_request {
+        return false;
+    }
+
+    println!(
+        "{}",
+        json!({
+            "package": "dotsync",
+            "binary": "dotsync",
+            "version": env!("CARGO_PKG_VERSION"),
+        })
+    );
+    true
+}
+
+/// Clap exits the process itself on a parse failure, which used to happen
+/// before `main` had read `--output` — so every clap-generated usage error
+/// broke the documented JSON contract. Reading the format straight out of
+/// argv is the only way to honor it: there is no parsed `Cli` to ask.
+fn emit_clap_error(error: clap::Error) -> i32 {
+    if !error.use_stderr() {
+        // `--help` and `--version` arrive here as errors; they render on
+        // stdout and exit 0.
+        let _ = error.print();
+        return error.exit_code();
+    }
+
+    let message = error.render().to_string();
+    eprint!("{message}");
+    if matches!(output_format_from_args(), OutputFormat::Json) {
+        println!(
+            "{}",
+            render::render_usage_error_json(&usage_error(message.trim_end()))
+        );
+    }
+    error.exit_code()
+}
+
+fn output_format_from_args() -> OutputFormat {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let requested_json = args.iter().enumerate().any(|(index, arg)| {
+        arg == "--output=json"
+            || (arg == "--output" && args.get(index + 1).is_some_and(|value| value == "json"))
+    });
+    if requested_json {
+        OutputFormat::Json
+    } else {
+        OutputFormat::Human
+    }
 }
 
 impl Action {
     fn try_from_cli(cli: Cli, context: CliContext) -> Result<Self, UsageError> {
         match cli.command {
             Some(Command::Init { remote_url }) => {
+                reject_force_before(cli.force, "init")?;
                 let remote_url = init_remote_from_args(remote_url, context)?;
                 Ok(Self::Init { remote_url })
             }
             Some(Command::Continue) => Ok(Self::Continue { force: cli.force }),
             Some(Command::Abort) => Ok(Self::Abort { force: cli.force }),
-            Some(Command::Status) => Ok(Self::Status { force: false }),
-            Some(Command::Diff) => Ok(Self::Diff),
-            Some(Command::View { scope, file }) => Ok(Self::View { scope, file }),
+            Some(Command::Status) => {
+                reject_force_before(cli.force, "status")?;
+                Ok(Self::Status)
+            }
+            Some(Command::Diff) => {
+                reject_force_before(cli.force, "diff")?;
+                Ok(Self::Diff)
+            }
+            Some(Command::View { scope, file }) => {
+                reject_force_before(cli.force, "view")?;
+                Ok(Self::View { scope, file })
+            }
             Some(Command::Commit {
                 scope,
                 message,
@@ -283,6 +323,8 @@ impl Action {
                 })
             }
             Some(Command::Unknown(args)) => {
+                // `--force` is checked per command below, and an unknown
+                // command has no behavior to force.
                 let command = args.first().map(String::as_str).unwrap_or("<empty>");
                 Err(usage_error(&format!(
                     "unknown command `{command}`; run `dotsync --help` for supported commands"
@@ -320,10 +362,26 @@ async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
         Action::Init { remote_url } => run_init(remote_url).await,
         Action::Continue { force } => run_continue(force).await,
         Action::Abort { force } => run_abort(force).await,
-        Action::Status { force } => run_status(force).await,
+        Action::Status => run_status().await,
         Action::Diff => run_diff().await,
         Action::View { scope, file } => run_view(scope, file).await,
     }
+}
+
+/// `--force` is global, like `--output`, so it parses in either position and
+/// one message explains it wherever it means nothing. Declaring it per command
+/// instead would hand the commands that reject it clap's generic 'unexpected
+/// argument' - and on `init`, clap's 'to pass --force as a value' tip, which
+/// would make the flag the remote URL. Commands that never write home have no
+/// meaning for it, and silently accepting it there would teach an agent that
+/// retrying with `--force` could change the answer.
+fn reject_force_before(force: bool, command: &str) -> Result<(), UsageError> {
+    if !force {
+        return Ok(());
+    }
+    Err(usage_error(&format!(
+        "`--force` has no meaning for `{command}`; it only affects commands that write files into your home directory: plain `dotsync`, `commit`, `continue`, and `abort`"
+    )))
 }
 
 fn usage_error(message: &str) -> UsageError {
@@ -381,49 +439,47 @@ fn prompt_init_remote_url() -> Result<String, UsageError> {
 
 async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    match continue_after_conflict(&paths, SyncOptions { force }).await? {
-        CommandOutcome::Success(report) => Ok(CliOutput::Success(SuccessOutput {
-            json: json!({
-                "status": "ok",
-                "command": "continue",
-                "scope": report.sync.current_scope,
-                "machine_scope": report.sync.current_scope,
-                "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
-                "unpushed_scopes": report.push.unpushed_scopes(),
-            }),
-            human: format!(
-                "dotsync: resumed cascade and synced {} file(s)",
-                report.sync.synced_paths.len()
-            ),
-            notes: render::success_notes(&report.sync.drifts, Some(&report.push)),
-            stdout: None,
-            exit_code: 0,
-        })),
-    }
+    let report = continue_after_conflict(&paths, SyncOptions { force }).await?;
+    Ok(CliOutput::Success(SuccessOutput {
+        json: json!({
+            "status": "ok",
+            "command": "continue",
+            "scope": report.sync.current_scope,
+            "machine_scope": report.sync.current_scope,
+            "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
+            "unpushed_scopes": report.push.unpushed_scopes(),
+        }),
+        human: format!(
+            "dotsync: resumed cascade and synced {} file(s)",
+            report.sync.synced_paths.len()
+        ),
+        notes: render::success_notes(&report.sync.drifts, Some(&report.push)),
+        stdout: None,
+        exit_code: 0,
+    }))
 }
 
 async fn run_abort(force: bool) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    match abort_paused_cascade(&paths, SyncOptions { force }).await? {
-        CommandOutcome::Success(report) => Ok(CliOutput::Success(SuccessOutput {
-            json: json!({
-                "status": "ok",
-                "command": "abort",
-                "aborted_scope": report.aborted_scope,
-                "scope": report.sync.current_scope,
-                "machine_scope": report.sync.current_scope,
-                "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>()
-            }),
-            human: format!(
-                "dotsync: aborted cascade at {} and synced {} file(s)",
-                report.aborted_scope,
-                report.sync.synced_paths.len()
-            ),
-            notes: render::success_notes(&report.sync.drifts, None),
-            stdout: None,
-            exit_code: 0,
-        })),
-    }
+    let report = abort_paused_cascade(&paths, SyncOptions { force }).await?;
+    Ok(CliOutput::Success(SuccessOutput {
+        json: json!({
+            "status": "ok",
+            "command": "abort",
+            "aborted_scope": report.aborted_scope,
+            "scope": report.sync.current_scope,
+            "machine_scope": report.sync.current_scope,
+            "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>()
+        }),
+        human: format!(
+            "dotsync: aborted cascade at {} and synced {} file(s)",
+            report.aborted_scope,
+            report.sync.synced_paths.len()
+        ),
+        notes: render::success_notes(&report.sync.drifts, None),
+        stdout: None,
+        exit_code: 0,
+    }))
 }
 
 async fn run_sync(force: bool) -> Result<CliOutput, DotsyncError> {
@@ -449,7 +505,7 @@ async fn run_sync(force: bool) -> Result<CliOutput, DotsyncError> {
     }))
 }
 
-async fn run_status(_force: bool) -> Result<CliOutput, DotsyncError> {
+async fn run_status() -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     let report = status(&paths).await?;
     let files = report
@@ -546,7 +602,7 @@ async fn run_commit(
     selection: CommitSelection,
 ) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    match commit_and_sync(
+    let report = commit_and_sync(
         &paths,
         CommitOptions {
             scope,
@@ -555,33 +611,31 @@ async fn run_commit(
             selection,
         },
     )
-    .await?
-    {
-        CommandOutcome::Success(report) => Ok(CliOutput::Success(SuccessOutput {
-            json: json!({
-                "status": "ok",
-                "command": "commit",
-                "scope": report.committed_scope,
-                "machine_scope": report.sync.current_scope,
-                "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
-                "unpushed_scopes": report.push.unpushed_scopes(),
-            }),
-            human: format!(
-                "dotsync: committed {} and synced {} file(s)",
-                report.committed_scope,
-                report.sync.synced_paths.len()
-            ),
-            notes: render::success_notes(&report.sync.drifts, Some(&report.push)),
-            stdout: None,
-            exit_code: 0,
-        })),
-    }
+    .await?;
+    Ok(CliOutput::Success(SuccessOutput {
+        json: json!({
+            "status": "ok",
+            "command": "commit",
+            "scope": report.committed_scope,
+            "machine_scope": report.sync.current_scope,
+            "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
+            "unpushed_scopes": report.push.unpushed_scopes(),
+        }),
+        human: format!(
+            "dotsync: committed {} and synced {} file(s)",
+            report.committed_scope,
+            report.sync.synced_paths.len()
+        ),
+        notes: render::success_notes(&report.sync.drifts, Some(&report.push)),
+        stdout: None,
+        exit_code: 0,
+    }))
 }
 
 fn discover_paths() -> Result<DotsyncPaths, DotsyncError> {
     let home_dir = env::var_os("HOME")
         .map(PathBuf::from)
-        .ok_or(DotsyncError::NotImplemented("HOME is not set"))?;
+        .ok_or(DotsyncError::HomeNotSet)?;
     Ok(DotsyncPaths {
         repo_root: home_dir.join(".local/share/dotsync/repo"),
         home_dir,
@@ -775,10 +829,7 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
             success.exit_code
         }
         CliOutput::Error(error) => {
-            let exit_code = if matches!(
-                error,
-                DotsyncError::CascadePaused { .. } | DotsyncError::ConcurrentScopeConflict { .. }
-            ) {
+            let exit_code = if matches!(error, DotsyncError::CascadePaused { .. }) {
                 3
             } else {
                 1

@@ -84,6 +84,19 @@ impl MachineEnvironment {
         command.output().expect("run dotsync")
     }
 
+    /// Runs dotsync with no `HOME` in the environment, which is how dotsync
+    /// finds both the home directory it manages and its hidden repo.
+    fn run_without_home(&self, command: &str) -> Output {
+        let args = dotsync_args(command);
+        let mut command = Command::new(env!("CARGO_BIN_EXE_dotsync"));
+        command.args(args);
+        command.current_dir(&self.home_dir);
+        command.env_remove("HOME");
+        command.env("DOTSYNC_OS", &self.os);
+        command.env("DOTSYNC_HOSTNAME", &self.hostname);
+        command.output().expect("run dotsync")
+    }
+
     fn delete_file(&self, relative: &str) {
         fs::remove_file(self.home_dir.join(relative)).expect("delete file");
     }
@@ -1044,7 +1057,7 @@ fn v03_plain_sync_ignores_unrelated_home_changes() {
 }
 
 #[test]
-fn v03_commit_returns_not_implemented() {
+fn commit_with_no_paths_ignores_unmanaged_home_files() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
@@ -1055,18 +1068,44 @@ fn v03_commit_returns_not_implemented() {
         render_output(&init_output)
     );
 
+    // An unmanaged file in home. `dotsync commit <scope> -m ...` with no paths
+    // means "every managed file that changed", and nothing managed changed, so
+    // this is an ordinary no-op commit — not a reason to refuse the command.
     machine.write_file(".gitconfig", "[user]\nname = \"Max\"\n");
 
-    let commit_output = machine.run("dotsync commit all -m 'not implemented yet'");
+    let revision_before = bookmark_revision(&machine, "all");
+
+    let commit_output = machine.run("dotsync commit all -m 'nothing changed'");
     assert_eq!(
         commit_output.status.code(),
-        Some(1),
-        "scoped commit should return a normal not-implemented error in v0.3 task 1\n{}",
+        Some(0),
+        "a no-paths commit with nothing to commit should succeed\n{}",
         render_output(&commit_output)
     );
+
+    assert_eq!(bookmark_revision(&machine, "all"), revision_before);
+    assert!(
+        !bookmark_has_file(&machine, "all", ".gitconfig"),
+        "an unmanaged home file must not be swept into the scope"
+    );
+    assert_eq!(machine.read_file(".gitconfig"), "[user]\nname = \"Max\"\n");
+}
+
+#[test]
+fn missing_home_is_reported_as_an_environment_error() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let status_output = machine.run_without_home("dotsync status");
+    assert_eq!(
+        status_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&status_output)
+    );
     assert_stderr_snapshot(
-        &commit_output,
-        "dotsync: not implemented: scoped commit is not available until home-diff commit flow lands\n"
+        &status_output,
+        "dotsync: HOME is not set, so dotsync cannot find your home directory. Set HOME to the home directory dotsync should manage, then rerun.\n",
     );
 }
 
@@ -1286,6 +1325,309 @@ fn unknown_command_is_not_treated_as_scope_commit() {
     assert_stderr_snapshot(
         &output,
         "dotsync: unknown command `nonesuch`; run `dotsync --help` for supported commands\n",
+    );
+}
+
+#[test]
+fn commit_path_that_matches_nothing_is_an_error() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_file(".apprc", "ui_theme = dark\n");
+    fs::create_dir_all(machine.home_dir.join("empty-dir")).expect("create empty dir");
+    let revision_before = bookmark_revision(&machine, "all");
+
+    // A typo, a `~/`-prefixed path, an absolute path, and a directory holding
+    // nothing at all. Each of these used to commit nothing and report success,
+    // which tells an agent its config was saved when it was not.
+    let absolute = machine.home_dir.join(".apprc");
+    let absolute = absolute.to_str().expect("home path should be UTF-8");
+    for command in [
+        "dotsync commit all -m typo -- nonexistent-file".to_string(),
+        "dotsync commit all -m tilde -- '~/.apprc'".to_string(),
+        format!("dotsync commit all -m absolute -- {absolute}"),
+        "dotsync commit all -m empty-dir -- empty-dir".to_string(),
+    ] {
+        let output = machine.run(&command);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "`{command}` should fail rather than report a successful empty commit\n{}",
+            render_output(&output)
+        );
+        assert_eq!(
+            bookmark_revision(&machine, "all"),
+            revision_before,
+            "`{command}` must not move the scope"
+        );
+    }
+
+    let typo_output = machine.run("dotsync commit all -m typo -- nonexistent-file");
+    assert_stderr_snapshot(
+        &typo_output,
+        &format!(
+            "\
+dotsync: cannot commit that path
+
+What dotsync does:
+Dotsync records the home files you name onto a scope branch, then cascades that scope so every machine sharing it receives the change. Every file on a scope is written back into home on each of those machines.
+
+This flow:
+This commit flow resolves each path you name against your home directory, checks that it is a config file dotsync may record, and commits the ones that changed.
+
+Expected:
+It expects every path you name to be a config file inside your home directory, named relative to it, and to exist either in home or on the target scope already.
+
+Current state found:
+`nonexistent-file` matched nothing: no file exists at or under {}/nonexistent-file, and scope `all` tracks no file at or under `nonexistent-file`.
+
+Why dotsync stopped:
+Dotsync stopped before recording anything. A commit records every path you named or none of them, so fixing the paths above and rerunning the same command is safe.
+
+Correct flow:
+- name paths relative to your home directory: `dotsync commit all -m \"message\" -- .config/fish/config.fish`.
+- do not use `~/`, absolute paths, or `..`; dotsync resolves every path against your home directory already, and records it verbatim.
+- run `dotsync status` to see which managed files changed.
+",
+            machine.home_dir.display()
+        ),
+    );
+
+    let absolute_output = machine.run(&format!("dotsync commit all -m absolute -- {absolute}"));
+    let absolute_stderr = String::from_utf8_lossy(&absolute_output.stderr);
+    assert!(
+        absolute_stderr.contains(&format!(
+            "`{absolute}` is an absolute path, and dotsync resolves every commit path against your home directory."
+        )),
+        "{}",
+        render_output(&absolute_output)
+    );
+}
+
+#[test]
+fn commit_path_that_escapes_home_is_an_error() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    // Dotsync records the path you name verbatim as a repo path, and every
+    // machine on that scope writes it back out under its own home. A path that
+    // climbs out of home therefore writes outside home everywhere.
+    let outside = machine.home_dir.parent().expect("home has a parent");
+    write_file_at(&outside.join("outside.conf"), "PWNED=1\n");
+    write_file_at(&outside.join("deeper.conf"), "PWNED=2\n");
+    let revision_before = bookmark_revision(&machine, "all");
+
+    for command in [
+        "dotsync commit all -m escape -- ../outside.conf",
+        "dotsync commit all -m escape -- ../../machine-a/home/../deeper.conf",
+    ] {
+        let output = machine.run(command);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "`{command}` should be refused\n{}",
+            render_output(&output)
+        );
+        assert_eq!(
+            bookmark_revision(&machine, "all"),
+            revision_before,
+            "`{command}` must not move the scope"
+        );
+    }
+
+    assert!(
+        !bookmark_has_file(&machine, "all", "../outside.conf"),
+        "a path that climbs out of home must never become a repo entry"
+    );
+}
+
+#[test]
+fn committing_the_scope_graph_outside_all_is_an_error() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    let config_path = ".config/dotsync/config.toml";
+    let original = machine.read_file(config_path);
+    machine.write_file(
+        config_path,
+        &format!("{original}\n# hyprland: wayland compositor config\n"),
+    );
+    let linux_before = bookmark_revision(&machine, "linux");
+
+    // Dotsync only ever reads the scope graph from `all`. A copy recorded on
+    // another scope configures nothing, but it still syncs into home on that
+    // scope's machines, where it overwrites the real one.
+    let wrong_scope = machine.run(&format!(
+        "dotsync commit linux -m 'describe hyprland' -- {config_path}"
+    ));
+    assert_eq!(
+        wrong_scope.status.code(),
+        Some(1),
+        "committing the scope graph to a non-all scope should be refused\n{}",
+        render_output(&wrong_scope)
+    );
+    assert_eq!(
+        bookmark_revision(&machine, "linux"),
+        linux_before,
+        "the refused commit must not move the scope"
+    );
+
+    let stderr = String::from_utf8_lossy(&wrong_scope.stderr).into_owned();
+    assert!(
+        stderr.contains("dotsync only reads it from `all`"),
+        "the refusal must teach where the scope graph lives\n{}",
+        render_output(&wrong_scope)
+    );
+
+    // The same change is fine on `all`, which is the only place it is read.
+    let right_scope = machine.run(&format!(
+        "dotsync commit all -m 'describe hyprland' -- {config_path}"
+    ));
+    assert!(
+        right_scope.status.success(),
+        "{}",
+        render_output(&right_scope)
+    );
+    assert!(
+        read_bookmark_file_contents(&machine, "all", config_path)
+            .contains("# hyprland: wayland compositor config"),
+        "the scope graph change should land on all"
+    );
+}
+
+#[test]
+fn commit_reports_every_unusable_path_at_once() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_file(".apprc", "ui_theme = dark\n");
+
+    // Reporting only the first bad path costs the agent one round trip per
+    // mistake, and each round trip is a full fetch-and-commit attempt.
+    let output = machine.run(
+        "dotsync commit all -m mixed -- nonexistent-file '~/.apprc' .local/share/dotsync/repo",
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", render_output(&output));
+
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    for expected in [
+        "`nonexistent-file` matched nothing",
+        "`~/.apprc` matched nothing",
+        "`.local/share/dotsync/repo` is dotsync's hidden repo itself",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "one run should report every unusable path; missing {expected:?}\n{}",
+            render_output(&output)
+        );
+    }
+    assert!(
+        !stderr.contains("is inside dotsync's hidden repo at"),
+        "the repo root is the repo, not something inside it\n{}",
+        render_output(&output)
+    );
+}
+
+#[test]
+fn commit_path_inside_dotsyncs_own_state_is_an_error() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    let sync_state = machine.sync_state_relative_path();
+    let sync_state = sync_state.to_str().expect("sync state path is UTF-8");
+    assert!(
+        machine.file_exists(sync_state),
+        "init should have written the sync state file"
+    );
+    let revision_before = bookmark_revision(&machine, "all");
+
+    // Both of these are dotsync's own bookkeeping sitting in home: the
+    // machine-local sync state, and the hidden repo itself. Naming either used
+    // to be filtered out of the selection without a word, so the commit
+    // reported success having recorded nothing.
+    for command in [
+        format!("dotsync commit all -m state -- {sync_state}"),
+        "dotsync commit all -m repo -- .local/share/dotsync/repo".to_string(),
+    ] {
+        let output = machine.run(&command);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "`{command}` should fail rather than report a successful empty commit\n{}",
+            render_output(&output)
+        );
+        assert_eq!(
+            bookmark_revision(&machine, "all"),
+            revision_before,
+            "`{command}` must not move the scope"
+        );
+    }
+
+    let state_output = machine.run(&format!("dotsync commit all -m state -- {sync_state}"));
+    assert_stderr_snapshot(
+        &state_output,
+        &format!(
+            "\
+dotsync: cannot commit that path
+
+What dotsync does:
+Dotsync records the home files you name onto a scope branch, then cascades that scope so every machine sharing it receives the change. Every file on a scope is written back into home on each of those machines.
+
+This flow:
+This commit flow resolves each path you name against your home directory, checks that it is a config file dotsync may record, and commits the ones that changed.
+
+Expected:
+It expects every path you name to be a config file inside your home directory, named relative to it, and to exist either in home or on the target scope already.
+
+Current state found:
+`{sync_state}` is this machine's dotsync sync state; it records which machine scope this home uses, so it has to stay machine-local.
+
+Why dotsync stopped:
+Dotsync stopped before recording anything. A commit records every path you named or none of them, so fixing the paths above and rerunning the same command is safe.
+
+Correct flow:
+- name paths relative to your home directory: `dotsync commit all -m \"message\" -- .config/fish/config.fish`.
+- do not use `~/`, absolute paths, or `..`; dotsync resolves every path against your home directory already, and records it verbatim.
+- commit the config files you edited instead; dotsync's own state is not config and cannot travel on a scope.
+- to change which scopes exist, edit `.config/dotsync/config.toml` in home and commit that path to `all`.
+- run `dotsync status` to see which managed files changed.
+"
+        ),
     );
 }
 
@@ -1616,7 +1958,7 @@ This flow:
 This commit flow was merging the scoped change through the scope DAG and reached a branch where the same file had incompatible edits.
 
 Expected:
-It expects you to resolve the conflicted file in home, then run `dotsync continue` to create the merge commit and resume the cascade.
+It expects you to edit the conflicted file in home to the merged contents you want, then run `dotsync continue` to create the merge commit and resume the cascade.
 
 Current state found:
 paused scope: all
@@ -1625,9 +1967,9 @@ Why dotsync stopped:
 cascade paused at scope `all` with conflicts in .config/shared.conf
 
 Correct flow:
-- edit each conflicted file at its real path in home and keep the desired final contents.
+- edit each conflicted file at its real path in home so it holds the merged contents you want; the file has to change, because dotsync reads the resolution back out of it.
 - run `dotsync continue` from the same machine to finish cascading and syncing.
-- or run `dotsync abort` from the same machine to discard the paused cascade and restore the pre-pause state.
+- or run `dotsync abort` from the same machine to discard the paused cascade; that reverts the conflicted files in home to this machine's scope state.
 - do not run another dotsync commit while the cascade is paused.
 "#,
     );
@@ -1724,7 +2066,7 @@ This flow:
 This commit flow was merging the scoped change through the scope DAG and reached a branch where the same file had incompatible edits.
 
 Expected:
-It expects you to resolve the conflicted file in home, then run `dotsync continue` to create the merge commit and resume the cascade.
+It expects you to edit the conflicted file in home to the merged contents you want, then run `dotsync continue` to create the merge commit and resume the cascade.
 
 Current state found:
 paused scope: linux
@@ -1733,9 +2075,9 @@ Why dotsync stopped:
 cascade paused at scope `linux` with conflicts in .config/app.conf
 
 Correct flow:
-- edit each conflicted file at its real path in home and keep the desired final contents.
+- edit each conflicted file at its real path in home so it holds the merged contents you want; the file has to change, because dotsync reads the resolution back out of it.
 - run `dotsync continue` from the same machine to finish cascading and syncing.
-- or run `dotsync abort` from the same machine to discard the paused cascade and restore the pre-pause state.
+- or run `dotsync abort` from the same machine to discard the paused cascade; that reverts the conflicted files in home to this machine's scope state.
 - do not run another dotsync commit while the cascade is paused.
 "
     );
@@ -1768,6 +2110,207 @@ Correct flow:
     );
     assert_eq!(
         read_bookmark_file_contents(&machine_a, "goof-b", ".config/app.conf"),
+        "setting = \"all+linux\"\n"
+    );
+}
+
+/// Two machines, a base file on `all`, a `linux` override of it, then a
+/// conflicting edit committed to `all` from the second machine — which leaves
+/// that machine with a cascade paused at `linux` over `.config/app.conf`.
+/// Returns the paused machine and the output of the run that paused.
+fn pause_a_conflict_on_linux(harness: &TestHarness) -> (MachineEnvironment, Output) {
+    let machine_a = harness.machine("machine-a", "linux", "goof-a");
+    let machine_b = harness.machine("machine-b", "linux", "goof-b");
+
+    let init_a = machine_a.init();
+    assert!(init_a.status.success(), "{}", render_output(&init_a));
+    let init_b = machine_b.init();
+    assert!(init_b.status.success(), "{}", render_output(&init_b));
+    let sync_a_after_join = machine_a.run("dotsync --force");
+    assert!(
+        sync_a_after_join.status.success(),
+        "{}",
+        render_output(&sync_a_after_join)
+    );
+
+    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
+    let commit_base = machine_a.run("dotsync commit all -m 'add base config' -- .config/app.conf");
+    assert!(
+        commit_base.status.success(),
+        "{}",
+        render_output(&commit_base)
+    );
+
+    machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
+    let commit_linux =
+        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
+    assert!(
+        commit_linux.status.success(),
+        "{}",
+        render_output(&commit_linux)
+    );
+
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+
+    machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
+    let conflict =
+        machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
+    assert_eq!(
+        conflict.status.code(),
+        Some(3),
+        "{}",
+        render_output(&conflict)
+    );
+
+    (machine_b, conflict)
+}
+
+#[test]
+fn conflict_messages_agree_that_resolving_means_editing_home() {
+    let harness = TestHarness::new();
+    let (machine, pause) = pause_a_conflict_on_linux(&harness);
+
+    // The pause used to say "keep the desired final contents", which reads as
+    // "leaving the file alone is a valid resolution". `continue` refuses that,
+    // so the pause has to ask for an edit.
+    let pause_stderr = String::from_utf8_lossy(&pause.stderr).into_owned();
+    assert!(
+        pause_stderr.contains(
+            "the file has to change, because dotsync reads the resolution back out of it"
+        ),
+        "the pause must say the conflicted file has to change\n{}",
+        render_output(&pause)
+    );
+
+    let refusal = machine.run("dotsync continue");
+    let refusal_stderr = String::from_utf8_lossy(&refusal.stderr).into_owned();
+    // `dotsync abort` syncs home back to the machine scope, so telling an agent
+    // to abort and then commit "the contents you want" hands it the contents
+    // abort just destroyed.
+    assert!(
+        refusal_stderr
+            .contains("reverts the conflicted files in home to this machine's scope state"),
+        "the refusal must say that abort reverts home\n{}",
+        render_output(&refusal)
+    );
+    assert!(
+        refusal_stderr.contains("save them outside home"),
+        "the refusal must say to save wanted contents outside home before aborting\n{}",
+        render_output(&refusal)
+    );
+}
+
+#[test]
+fn continue_refuses_a_pause_that_predates_the_resolution_check() {
+    let harness = TestHarness::new();
+    let (machine, _pause) = pause_a_conflict_on_linux(&harness);
+
+    // A machine that upgrades while a cascade is paused holds a pause file
+    // written by the older binary, which recorded no pre-pause contents. The
+    // resolution check has nothing to compare against there, and skipping it
+    // silently reopens the data loss it exists to prevent.
+    let pause_path = machine.repo_dir.join(".dotsync-paused-cascade.json");
+    let mut pause_state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&pause_path).expect("read pause state"))
+            .expect("pause state is JSON");
+    let pause_object = pause_state
+        .as_object_mut()
+        .expect("pause state is an object");
+    let recorded = pause_object
+        .remove("paused_home_contents")
+        .expect("this dotsync records pre-pause contents");
+    assert!(
+        recorded.as_object().is_some_and(|map| !map.is_empty()),
+        "the pause should have recorded contents to remove"
+    );
+    fs::write(
+        &pause_path,
+        serde_json::to_string_pretty(&pause_state).expect("serialize pause state"),
+    )
+    .expect("write pause state");
+
+    let continued = machine.run("dotsync continue");
+    assert_eq!(
+        continued.status.code(),
+        Some(1),
+        "continue must refuse a pause it cannot verify\n{}",
+        render_output(&continued)
+    );
+    let stderr = String::from_utf8_lossy(&continued.stderr).into_owned();
+    assert!(
+        stderr.contains("run `dotsync abort`"),
+        "the refusal must point at the way out\n{}",
+        render_output(&continued)
+    );
+
+    // The way out has to actually work: abort reads nothing the old pause file
+    // lacks.
+    let aborted = machine.run("dotsync abort");
+    assert!(aborted.status.success(), "{}", render_output(&aborted));
+    assert_eq!(
+        machine.read_file(".config/app.conf"),
+        "setting = \"linux\"\n",
+        "abort should have reverted home to this machine's scope state"
+    );
+}
+
+#[test]
+fn continue_refuses_a_conflicted_file_that_was_never_resolved() {
+    let harness = TestHarness::new();
+    let (machine_b, _pause) = pause_a_conflict_on_linux(&harness);
+
+    // The pause tells the agent to resolve the conflicted file in home, but
+    // dotsync never wrote the two conflicting versions there, so the file is
+    // exactly as the agent left it. Taking that as the resolution silently
+    // deletes the `linux` version, and reports success doing it.
+    let continued = machine_b.run("dotsync continue");
+    assert_eq!(
+        continued.status.code(),
+        Some(1),
+        "continue must refuse an unresolved conflict\n{}",
+        render_output(&continued)
+    );
+    assert_stderr_snapshot(
+        &continued,
+        "\
+dotsync: conflict not resolved
+
+What dotsync does:
+Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config. Where two branches changed one file differently, the cascade pauses and asks you for the merged contents.
+
+This flow:
+This continue flow reads each conflicted file back out of your home directory and records what it finds there as the resolution.
+
+Expected:
+It expects those files to have changed since the cascade paused, because the resolution is the contents you write into them.
+
+Current state found:
+unchanged since the cascade paused at scope `linux`: .config/app.conf
+
+Why dotsync stopped:
+Dotsync does not yet write the two conflicting versions into home, so an unchanged file is not a resolution - it is only the version that happened to already be there. Recording it would silently discard the other scope's version.
+
+Correct flow:
+- read the version dotsync would discard with `dotsync view --scope linux --file .config/app.conf`, and compare it against the file in home.
+- write the merged contents into the file in home, then run `dotsync continue`.
+- `dotsync abort` discards the paused cascade, and reverts the conflicted files in home to this machine's scope state - so anything in home you want to keep must be saved outside home first.
+- if home already holds exactly the contents you want: save them outside home, run `dotsync abort`, put them back, commit them to `linux` directly, then redo the original commit.
+",
+    );
+
+    assert_eq!(
+        read_bookmark_file_contents(&machine_b, "linux", ".config/app.conf"),
+        "setting = \"linux\"\n",
+        "the refused continue must not have discarded the linux version"
+    );
+
+    // The guard is not a wedge: a real resolution still finishes the cascade.
+    machine_b.write_file(".config/app.conf", "setting = \"all+linux\"\n");
+    let resolved = machine_b.run("dotsync continue");
+    assert!(resolved.status.success(), "{}", render_output(&resolved));
+    assert_eq!(
+        read_bookmark_file_contents(&machine_b, "linux", ".config/app.conf"),
         "setting = \"all+linux\"\n"
     );
 }
@@ -1943,9 +2486,9 @@ Why dotsync stopped:
 Dotsync stopped before fetching, committing, or syncing because starting another commit would hide the real paused-cascade task and may mutate unrelated scope state.
 
 Correct flow:
-- edit each conflicted file at its real path in home and keep the desired final contents.
+- edit each conflicted file at its real path in home so it holds the merged contents you want; the file has to change, because dotsync reads the resolution back out of it.
 - run `dotsync continue` to finish the paused cascade.
-- or run `dotsync abort` to discard the paused cascade and restore the pre-pause state.
+- or run `dotsync abort` to discard the paused cascade; that reverts the conflicted files in home to this machine's scope state.
 - after `dotsync continue` succeeds, rerun the new commit if it is still needed.
 "
     );
@@ -2066,6 +2609,34 @@ fn commit_noop_when_no_changes() {
 
     let revision_after = bookmark_revision(&machine, "mx-xps-cy");
     assert_eq!(revision_after, revision_before);
+}
+
+#[test]
+fn noop_commit_names_the_scope_it_targeted() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    // The report for a commit that found nothing was default-constructed, so
+    // it did not carry the scope the agent had just named - and the message
+    // interpolated the empty string into "committed  and synced".
+    let commit_output = machine.run("dotsync commit mx-xps-cy -m noop");
+    assert_eq!(
+        commit_output.status.code(),
+        Some(0),
+        "{}",
+        render_output(&commit_output)
+    );
+    assert_stderr_snapshot(
+        &commit_output,
+        "dotsync: committed mx-xps-cy and synced 0 file(s)\n",
+    );
 }
 
 #[test]
@@ -2230,6 +2801,142 @@ dotsync: 1 changed managed file(s) for mx-xps-cy
   M .bashrc
 ",
     );
+}
+
+#[test]
+fn force_is_refused_with_one_message_wherever_it_is_meaningless() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    // `--force` reaches exactly one decision: whether to overwrite drifted
+    // home files. On the commands that never write home it means nothing, and
+    // it has to say so in whichever position the agent wrote it - `--output`
+    // works after the subcommand, so that is the position agents will reach
+    // for.
+    for command in [
+        "dotsync status --force",
+        "dotsync --force status",
+        "dotsync diff --force",
+        "dotsync --force diff",
+        "dotsync view --force",
+        "dotsync --force view",
+        "dotsync init --force",
+        "dotsync --force init",
+    ] {
+        let output = machine.run(command);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "`{command}` should be a usage error\n{}",
+            render_output(&output)
+        );
+        let name = command
+            .split_whitespace()
+            .find(|word| !matches!(*word, "dotsync" | "--force"))
+            .expect("command name");
+        assert_stderr_snapshot(
+            &output,
+            &format!(
+                "dotsync: `--force` has no meaning for `{name}`; it only affects commands that write files into your home directory: plain `dotsync`, `commit`, `continue`, and `abort`\n"
+            ),
+        );
+    }
+
+    // The commands that do write home keep it, in both positions.
+    machine.write_file(".apprc", "ui_theme = dark\n");
+    let commit_output = machine.run("dotsync commit all -m 'add apprc' --force -- .apprc");
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
+    machine.write_file(".apprc", "ui_theme = light\n");
+    let commit_before = machine.run("dotsync --force commit all -m 'light theme' -- .apprc");
+    assert!(
+        commit_before.status.success(),
+        "{}",
+        render_output(&commit_before)
+    );
+    let sync_output = machine.run("dotsync --force");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+}
+
+#[test]
+fn output_format_is_accepted_after_the_subcommand() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    // `--force` is global and `--output` was not, so the two flags on the same
+    // struct had opposite positional rules and neither one said so.
+    let status_output = machine.run("dotsync status --output json");
+    assert_eq!(
+        status_output.status.code(),
+        Some(0),
+        "{}",
+        render_output(&status_output)
+    );
+
+    let payload = parse_stdout_json(&status_output);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "status");
+    assert_eq!(payload["machine_scope"], "mx-xps-cy");
+}
+
+#[test]
+fn clap_usage_errors_emit_the_json_contract() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    // Clap's own usage errors used to exit 2 with plain text and nothing on
+    // stdout, so an agent driving dotsync with `--output json` got no JSON at
+    // all for the most common mistake it can make.
+    for command in [
+        "dotsync commit --output json",
+        "dotsync --output json commit",
+        "dotsync --output json commit all --nosuchflag",
+    ] {
+        let output = machine.run(command);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "`{command}` should be a usage error\n{}",
+            render_output(&output)
+        );
+
+        let payload = parse_stdout_json(&output);
+        assert_eq!(payload["status"], "error", "`{command}`");
+        assert_eq!(payload["error"], "usage", "`{command}`");
+        assert!(
+            payload["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()),
+            "`{command}` should explain the usage error in its JSON message\n{}",
+            render_output(&output)
+        );
+        assert!(
+            !output.stderr.is_empty(),
+            "`{command}` should still explain itself on stderr\n{}",
+            render_output(&output)
+        );
+    }
 }
 
 #[test]
@@ -3033,38 +3740,8 @@ fn tdd_ratchet_gatekeeper() {
     }
 }
 
-macro_rules! retired_ratchet_test {
-    ($name:ident) => {
-        #[test]
-        fn $name() {
-            assert!(true);
-        }
-    };
-}
-
-retired_ratchet_test!(
-    retired_ancestor_scope_commit_from_machine_working_copy_stays_consistent_across_stages
-);
-retired_ratchet_test!(retired_command_while_cascade_paused_human_error_stands_alone);
-retired_ratchet_test!(retired_continue_without_pause_human_error_stands_alone);
-retired_ratchet_test!(retired_dirty_working_copy_human_error_stands_alone);
-retired_ratchet_test!(retired_dirty_working_copy_json_contract_stays_compatible);
-retired_ratchet_test!(retired_invalid_scope_human_error_stands_alone);
-retired_ratchet_test!(retired_non_ancestor_scope_human_error_stands_alone);
-retired_ratchet_test!(retired_pending_commit_all_preserves_whole_tree_commit_behavior);
-retired_ratchet_test!(retired_pending_commit_mode_rejects_all_plus_paths);
-retired_ratchet_test!(retired_pending_config_path_is_rejected_for_non_all_scope_commits);
-retired_ratchet_test!(
-    retired_pending_explicit_path_commit_only_commits_selected_paths_and_leaves_other_changes_dirty
-);
-retired_ratchet_test!(retired_pending_fetch_stops_when_remote_would_reset_local_bookmark);
-retired_ratchet_test!(
-    retired_pending_joining_existing_remote_creates_new_scope_and_first_commit_works
-);
-retired_ratchet_test!(retired_pending_scoped_commit_requires_paths_or_all_in_human_and_json_modes);
 #[test]
-fn retired_pending_selected_add_modify_and_delete_are_applied_without_touching_unselected_changes()
-{
+fn selected_add_modify_and_delete_are_applied_without_touching_unselected_changes() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
@@ -3125,13 +3802,3 @@ fn retired_pending_selected_add_modify_and_delete_are_applied_without_touching_u
     );
     assert!(!machine.file_exists(".config/fish/removed.fish"));
 }
-
-retired_ratchet_test!(
-    retired_pending_selective_commit_preserves_unselected_dirty_paths_when_cascade_pauses
-);
-retired_ratchet_test!(
-    retired_pending_sync_loads_config_from_committed_all_scope_not_working_copy_edit
-);
-retired_ratchet_test!(retired_plain_dotsync_rejects_working_copy_changes);
-retired_ratchet_test!(retired_scoped_commit_deletion_removes_file_from_fake_home);
-retired_ratchet_test!(retired_scoped_deletion_only_affects_homes_where_scope_applies);

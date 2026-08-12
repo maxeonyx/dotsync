@@ -364,9 +364,9 @@ pub(crate) async fn read_tree_entry_bytes(
     relative: &Path,
     value: &TreeValue,
 ) -> Result<Vec<u8>, DotsyncError> {
-    let relative_str = relative.to_str().ok_or(DotsyncError::NotImplemented(
-        "non-utf8 repo paths are not supported yet",
-    ))?;
+    let relative_str = relative.to_str().ok_or_else(|| DotsyncError::NonUtf8Path {
+        path: relative.to_path_buf(),
+    })?;
     let repo_path = jj_lib::repo_path::RepoPath::from_internal_string(relative_str)
         .map_err(|err| jj_error(format!("invalid repo path {}: {err}", relative.display())))?;
     match value {
@@ -391,9 +391,9 @@ pub(crate) async fn read_tree_entry_bytes(
             })?;
             Ok(target.into_bytes())
         }
-        TreeValue::GitSubmodule(_) => Err(DotsyncError::NotImplemented(
-            "git submodule sync is not supported yet",
-        )),
+        TreeValue::GitSubmodule(_) => Err(DotsyncError::GitSubmodule {
+            path: relative.to_path_buf(),
+        }),
         TreeValue::Tree(_) => unreachable!("tree entries are filtered out before copying"),
     }
 }

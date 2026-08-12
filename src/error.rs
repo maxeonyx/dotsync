@@ -12,10 +12,105 @@ pub struct ErrorReport {
     pub current_state: Option<String>,
 }
 
+/// One path a commit named that dotsync will not record, and why. Kept
+/// structured so that one run reports every bad path, and each line is
+/// rendered at the edge rather than built into the error.
+#[derive(Debug, Clone)]
+pub struct RejectedCommitPath {
+    pub path: PathBuf,
+    pub problem: CommitPathProblem,
+}
+
+#[derive(Debug, Clone)]
+pub enum CommitPathProblem {
+    Absolute,
+    EscapesHome,
+    /// Matched neither a file in home nor a file already on the target scope.
+    Unmatched {
+        home_path: PathBuf,
+    },
+    SyncState,
+    /// The scope graph, named for a scope other than `all`.
+    ScopeGraphOutsideAllScope,
+    DotsyncRepoRoot {
+        repo_root: PathBuf,
+    },
+    InsideDotsyncRepo {
+        repo_root: PathBuf,
+    },
+}
+
+impl RejectedCommitPath {
+    pub(crate) fn explain(&self, scope: &str) -> String {
+        let path = self.path.display();
+        match &self.problem {
+            CommitPathProblem::Absolute => format!(
+                "`{path}` is an absolute path, and dotsync resolves every commit path against your home directory."
+            ),
+            CommitPathProblem::EscapesHome => format!(
+                "`{path}` climbs out of your home directory with `..`, and dotsync records the path you name verbatim, so every machine on the scope would write it outside its own home."
+            ),
+            CommitPathProblem::Unmatched { home_path } => format!(
+                "`{path}` matched nothing: no file exists at or under {}, and scope `{scope}` tracks no file at or under `{path}`.",
+                home_path.display()
+            ),
+            CommitPathProblem::SyncState => format!(
+                "`{path}` is this machine's dotsync sync state; it records which machine scope this home uses, so it has to stay machine-local."
+            ),
+            CommitPathProblem::ScopeGraphOutsideAllScope => format!(
+                "`{path}` is the scope graph, and dotsync only reads it from `all`; a copy recorded on `{scope}` would configure nothing, and would still overwrite the real one in home on every machine using that scope."
+            ),
+            CommitPathProblem::DotsyncRepoRoot { repo_root } => format!(
+                "`{path}` is dotsync's hidden repo itself, at {}, which is where dotsync stores every scope.",
+                repo_root.display()
+            ),
+            CommitPathProblem::InsideDotsyncRepo { repo_root } => format!(
+                "`{path}` is inside dotsync's hidden repo at {}, which is where dotsync stores every scope.",
+                repo_root.display()
+            ),
+        }
+    }
+
+    /// Read by the binary's renderer to add advice about dotsync's own state.
+    pub fn is_dotsync_state(&self) -> bool {
+        matches!(
+            self.problem,
+            CommitPathProblem::SyncState
+                | CommitPathProblem::DotsyncRepoRoot { .. }
+                | CommitPathProblem::InsideDotsyncRepo { .. }
+        )
+    }
+
+    /// Read by the binary's renderer to point at the one scope that owns the
+    /// scope graph.
+    pub fn is_scope_graph(&self) -> bool {
+        matches!(self.problem, CommitPathProblem::ScopeGraphOutsideAllScope)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum DotsyncError {
-    #[error("not implemented: {0}")]
-    NotImplemented(&'static str),
+    #[error(
+        "HOME is not set, so dotsync cannot find your home directory. Set HOME to the home directory dotsync should manage, then rerun."
+    )]
+    HomeNotSet,
+    #[error(
+        "path {path:?} is not valid UTF-8; dotsync can only manage files whose paths are valid UTF-8"
+    )]
+    NonUtf8Path { path: PathBuf },
+    #[error("{path} is a git submodule; dotsync manages regular files and symlinks only")]
+    GitSubmodule { path: PathBuf },
+    #[error("cannot commit {} of the paths you named", rejected.len())]
+    UnusableCommitPaths {
+        scope: String,
+        rejected: Vec<RejectedCommitPath>,
+    },
+    #[error("{} conflicted file(s) are unchanged since the cascade paused at scope `{scope}`", paths.len())]
+    UnresolvedConflict { scope: String, paths: Vec<PathBuf> },
+    #[error(
+        "the cascade paused at scope `{scope}` recorded no contents to check a resolution against"
+    )]
+    PausePredatesResolutionCheck { scope: String },
     #[error("failed to read {path}: {source}")]
     Io {
         path: PathBuf,
@@ -58,11 +153,6 @@ pub enum DotsyncError {
         scope: String,
         conflicted_files: String,
     },
-    #[error("concurrent edit on scope `{scope}` conflicts in {conflicted_files}")]
-    ConcurrentScopeConflict {
-        scope: String,
-        conflicted_files: String,
-    },
     #[error("paused cascade at scope `{scope}` must be resolved before starting another commit")]
     PausedCascadeInProgress { scope: String },
     #[error("no paused cascade to continue")]
@@ -100,9 +190,6 @@ impl DotsyncError {
             DotsyncError::ConfigParse { .. } => basic_error_report("config_parse", self),
             DotsyncError::SyncState { .. } => basic_error_report("sync_state", self),
             DotsyncError::CascadePaused { .. } => basic_error_report("cascade_paused", self),
-            DotsyncError::ConcurrentScopeConflict { .. } => {
-                basic_error_report("concurrent_scope_conflict", self)
-            }
             DotsyncError::PausedCascadeInProgress { .. } => {
                 basic_error_report("paused_cascade_in_progress", self)
             }
@@ -120,7 +207,18 @@ impl DotsyncError {
             DotsyncError::MissingHostname => basic_error_report("missing_hostname", self),
             DotsyncError::Io { .. } => basic_error_report("io", self),
             DotsyncError::Jj { .. } => basic_error_report("jj", self),
-            DotsyncError::NotImplemented(_) => basic_error_report("not_implemented", self),
+            DotsyncError::HomeNotSet => basic_error_report("home_not_set", self),
+            DotsyncError::NonUtf8Path { .. } => basic_error_report("non_utf8_path", self),
+            DotsyncError::GitSubmodule { .. } => basic_error_report("git_submodule", self),
+            DotsyncError::UnusableCommitPaths { .. } => {
+                basic_error_report("unusable_commit_paths", self)
+            }
+            DotsyncError::UnresolvedConflict { .. } => {
+                basic_error_report("unresolved_conflict", self)
+            }
+            DotsyncError::PausePredatesResolutionCheck { .. } => {
+                basic_error_report("pause_predates_resolution_check", self)
+            }
         }
     }
 }
@@ -148,15 +246,32 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
             "scope: {scope}; local target: {local_target}; remote target: {remote_target}"
         )),
         DotsyncError::CascadePaused { scope, .. } => Some(format!("paused scope: {scope}")),
-        DotsyncError::ConcurrentScopeConflict { scope, .. } => {
-            Some(format!("conflicted scope: {scope}"))
-        }
+        DotsyncError::UnusableCommitPaths { scope, rejected } => Some(
+            rejected
+                .iter()
+                .map(|rejected| rejected.explain(scope))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        DotsyncError::PausePredatesResolutionCheck { scope } => Some(format!(
+            "paused scope: {scope}; the pause holds no record of what the conflicted files contained when it paused."
+        )),
+        DotsyncError::UnresolvedConflict { scope, paths } => Some(format!(
+            "unchanged since the cascade paused at scope `{scope}`: {}",
+            paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
         DotsyncError::PausedCascadeInProgress { scope } => Some(format!("paused scope: {scope}")),
         DotsyncError::NotInitialized { path } => Some(format!(
             "expected repo path: {}; standard location: ~/.local/share/dotsync/repo",
             path.display()
         )),
-        DotsyncError::NotImplemented(_)
+        DotsyncError::HomeNotSet
+        | DotsyncError::NonUtf8Path { .. }
+        | DotsyncError::GitSubmodule { .. }
         | DotsyncError::NoPausedCascade
         | DotsyncError::Io { .. }
         | DotsyncError::ConfigParse { .. }
