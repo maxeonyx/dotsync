@@ -1966,9 +1966,11 @@ Correct flow:
     );
 }
 
-#[test]
-fn continue_refuses_a_conflicted_file_that_was_never_resolved() {
-    let harness = TestHarness::new();
+/// Two machines, a base file on `all`, a `linux` override of it, then a
+/// conflicting edit committed to `all` from the second machine — which leaves
+/// that machine with a cascade paused at `linux` over `.config/app.conf`.
+/// Returns the paused machine and the output of the run that paused.
+fn pause_a_conflict_on_linux(harness: &TestHarness) -> (MachineEnvironment, Output) {
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
@@ -2012,6 +2014,49 @@ fn continue_refuses_a_conflicted_file_that_was_never_resolved() {
         "{}",
         render_output(&conflict)
     );
+
+    (machine_b, conflict)
+}
+
+#[test]
+fn conflict_messages_agree_that_resolving_means_editing_home() {
+    let harness = TestHarness::new();
+    let (machine, pause) = pause_a_conflict_on_linux(&harness);
+
+    // The pause used to say "keep the desired final contents", which reads as
+    // "leaving the file alone is a valid resolution". `continue` refuses that,
+    // so the pause has to ask for an edit.
+    let pause_stderr = String::from_utf8_lossy(&pause.stderr).into_owned();
+    assert!(
+        pause_stderr.contains(
+            "the file has to change, because dotsync reads the resolution back out of it"
+        ),
+        "the pause must say the conflicted file has to change\n{}",
+        render_output(&pause)
+    );
+
+    let refusal = machine.run("dotsync continue");
+    let refusal_stderr = String::from_utf8_lossy(&refusal.stderr).into_owned();
+    // `dotsync abort` syncs home back to the machine scope, so telling an agent
+    // to abort and then commit "the contents you want" hands it the contents
+    // abort just destroyed.
+    assert!(
+        refusal_stderr
+            .contains("reverts the conflicted files in home to this machine's scope state"),
+        "the refusal must say that abort reverts home\n{}",
+        render_output(&refusal)
+    );
+    assert!(
+        refusal_stderr.contains("save them outside home"),
+        "the refusal must say to save wanted contents outside home before aborting\n{}",
+        render_output(&refusal)
+    );
+}
+
+#[test]
+fn continue_refuses_a_conflicted_file_that_was_never_resolved() {
+    let harness = TestHarness::new();
+    let (machine_b, _pause) = pause_a_conflict_on_linux(&harness);
 
     // The pause tells the agent to resolve the conflicted file in home, but
     // dotsync never wrote the two conflicting versions there, so the file is
