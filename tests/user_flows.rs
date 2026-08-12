@@ -136,6 +136,17 @@ impl MachineEnvironment {
     fn write_sync_state_raw(&self, contents: &str) {
         write_file_at(&self.sync_state_path(), contents);
     }
+
+    fn read_sync_state_raw(&self) -> String {
+        fs::read_to_string(self.sync_state_path()).expect("read sync state file")
+    }
+
+    fn modified_time(&self, relative: &str) -> std::time::SystemTime {
+        fs::metadata(self.home_dir.join(relative))
+            .expect("stat home file")
+            .modified()
+            .expect("read home file mtime")
+    }
 }
 
 fn test_settings() -> UserSettings {
@@ -3801,4 +3812,561 @@ fn selected_add_modify_and_delete_are_applied_without_touching_unselected_change
         "complete -c git\n"
     );
     assert!(!machine.file_exists(".config/fish/removed.fish"));
+}
+
+// --- Wave 1: the three-way drift authority -------------------------------
+//
+// Every test below distinguishes three sides of one managed path: what dotsync
+// last synced to this machine, what is in home now, and what the machine
+// scope's tip holds now. Before Wave 1 each consumer answered "what differs"
+// against a different baseline, which is what made DL-1 (a machine that is
+// merely behind silently reverting another machine's published work)
+// representable at all.
+
+/// Two machines on one remote, both initialised and both synced to the same
+/// state. `machine_a` syncs last because `machine_b`'s init adds its own scope
+/// to the shared scope graph, which reaches `machine_a`'s home config.
+fn two_synced_machines(harness: &TestHarness) -> (MachineEnvironment, MachineEnvironment) {
+    let machine_a = harness.machine("machine-a", "linux", "goof-a");
+    let machine_b = harness.machine("machine-b", "linux", "goof-b");
+
+    let init_a = machine_a.init();
+    assert!(init_a.status.success(), "{}", render_output(&init_a));
+    let init_b = machine_b.init();
+    assert!(init_b.status.success(), "{}", render_output(&init_b));
+    let sync_a = machine_a.run("dotsync --force");
+    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+
+    (machine_a, machine_b)
+}
+
+/// Seeds `.apprc` on `all` from `machine_a` and brings `machine_b` up to it, so
+/// both machines start from one synced version of one shared file.
+fn seed_shared_apprc(machine_a: &MachineEnvironment, machine_b: &MachineEnvironment) {
+    machine_a.write_file(".apprc", "ui_theme = dark\nfont = mono\n");
+    let commit = machine_a.run("dotsync commit all -m 'seed apprc' -- .apprc");
+    assert!(commit.status.success(), "{}", render_output(&commit));
+
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    assert_eq!(
+        machine_b.read_file(".apprc"),
+        "ui_theme = dark\nfont = mono\n"
+    );
+}
+
+#[test]
+fn a_stale_home_file_cannot_be_committed_over_another_machines_change() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+    seed_shared_apprc(&machine_a, &machine_b);
+
+    // B adds a line and publishes it. A has done nothing since the seed: its
+    // home `.apprc` is not edited, it is simply behind.
+    machine_b.write_file(".apprc", "ui_theme = dark\nfont = mono\nsize = 14\n");
+    let commit_b = machine_b.run("dotsync commit all -m 'add size' -- .apprc");
+    assert!(commit_b.status.success(), "{}", render_output(&commit_b));
+    assert_eq!(
+        remote_branch_file_contents(&machine_b, "all", ".apprc"),
+        "ui_theme = dark\nfont = mono\nsize = 14\n"
+    );
+
+    // The taught workflow starts with `status`, and every dotsync command
+    // fetches on entry. Whatever `status` reports, the commit that follows must
+    // not re-record A's older content on top of B's published change.
+    let status_a = machine_a.run("dotsync status");
+    assert!(status_a.status.success(), "{}", render_output(&status_a));
+
+    let commit_a = machine_a.run("dotsync commit all -m 'commit what status showed' -- .apprc");
+    assert_eq!(
+        commit_a.status.code(),
+        Some(1),
+        "committing a file this machine has not edited must be refused\n{}",
+        render_output(&commit_a)
+    );
+    let stderr = String::from_utf8_lossy(&commit_a.stderr).into_owned();
+    assert!(
+        stderr.contains("has not been edited here"),
+        "the refusal must say the file was not edited here\n{stderr}"
+    );
+    assert!(
+        stderr.contains("run `dotsync` to bring this machine up to date"),
+        "the refusal must point at plain `dotsync`\n{stderr}"
+    );
+
+    assert_eq!(
+        remote_branch_file_contents(&machine_a, "all", ".apprc"),
+        "ui_theme = dark\nfont = mono\nsize = 14\n",
+        "the refused commit must leave the other machine's published change alone"
+    );
+
+    // The taught recovery works: sync, then edit, then commit.
+    let sync_a = machine_a.run("dotsync");
+    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    assert_eq!(
+        machine_a.read_file(".apprc"),
+        "ui_theme = dark\nfont = mono\nsize = 14\n"
+    );
+}
+
+#[test]
+fn concurrent_edits_still_require_resolution_after_an_intervening_status() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    machine_a.write_file(".config/shared.conf", "setting = \"base\"\n");
+    let commit_base =
+        machine_a.run("dotsync commit all -m 'add shared base' -- .config/shared.conf");
+    assert!(
+        commit_base.status.success(),
+        "{}",
+        render_output(&commit_base)
+    );
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+
+    // Two genuinely different edits to one file on one scope.
+    machine_a.write_file(".config/shared.conf", "setting = \"all-a\"\n");
+    machine_b.write_file(".config/shared.conf", "setting = \"all-b\"\n");
+    let commit_a =
+        machine_a.run("dotsync commit all -m 'update shared from a' -- .config/shared.conf");
+    assert!(commit_a.status.success(), "{}", render_output(&commit_a));
+
+    // The read-only command that the workflow tells B to run first. It must not
+    // turn a genuine two-sided conflict into a silent overwrite of A's edit.
+    let status_b = machine_b.run("dotsync status");
+    assert!(status_b.status.success(), "{}", render_output(&status_b));
+
+    let conflict =
+        machine_b.run("dotsync commit all -m 'update shared from b' -- .config/shared.conf");
+    assert_eq!(
+        conflict.status.code(),
+        Some(3),
+        "a two-sided conflict must still pause after an intervening read-only command\n{}",
+        render_output(&conflict)
+    );
+    assert_eq!(
+        remote_branch_file_contents(&machine_b, "all", ".config/shared.conf"),
+        "setting = \"all-a\"\n",
+        "machine A's published edit must still be on the remote"
+    );
+    assert_eq!(
+        machine_b.read_file(".config/shared.conf"),
+        "setting = \"all-b\"\n",
+        "the paused commit must not overwrite B's unresolved home edit"
+    );
+
+    machine_b.write_file(".config/shared.conf", "setting = \"all-a+all-b\"\n");
+    let continued = machine_b.run("dotsync continue");
+    assert!(continued.status.success(), "{}", render_output(&continued));
+    assert_eq!(
+        remote_branch_file_contents(&machine_b, "all", ".config/shared.conf"),
+        "setting = \"all-a+all-b\"\n"
+    );
+}
+
+#[test]
+fn a_remote_advance_is_reported_as_incoming_by_status_diff_and_sync() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+    seed_shared_apprc(&machine_a, &machine_b);
+
+    machine_b.write_file(".apprc", "ui_theme = light\nfont = mono\n");
+    let commit_b = machine_b.run("dotsync commit all -m 'light theme' -- .apprc");
+    assert!(commit_b.status.success(), "{}", render_output(&commit_b));
+
+    // A is merely behind: nothing in its home changed. `status`, `diff` and
+    // plain `dotsync` have to agree about that.
+    let status_a = machine_a.run("dotsync status");
+    assert!(status_a.status.success(), "{}", render_output(&status_a));
+    assert_stderr_snapshot(
+        &status_a,
+        "\
+dotsync: 1 incoming file(s) for goof-a — plain `dotsync` applies these
+  U .apprc
+",
+    );
+
+    let status_json = machine_a.run("dotsync --output json status");
+    assert!(
+        status_json.status.success(),
+        "{}",
+        render_output(&status_json)
+    );
+    let json = parse_stdout_json(&status_json);
+    assert_eq!(
+        json["changed_count"],
+        0,
+        "a file this machine has not changed is not a change\n{}",
+        render_output(&status_json)
+    );
+    assert_eq!(json["incoming_count"], 1);
+
+    let diff_a = machine_a.run("dotsync diff");
+    assert_eq!(
+        diff_a.status.code(),
+        Some(0),
+        "a routine remote advance is not drift\n{}",
+        render_output(&diff_a)
+    );
+    assert_stderr_snapshot(&diff_a, "dotsync: no changes for goof-a\n");
+
+    let sync_a = machine_a.run("dotsync");
+    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    assert_eq!(
+        machine_a.read_file(".apprc"),
+        "ui_theme = light\nfont = mono\n"
+    );
+}
+
+#[test]
+fn an_untracked_home_file_is_not_overwritten_by_an_incoming_add() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    // Real content in A's home that dotsync has never seen.
+    machine_a.write_file(".newfile", "mine\n");
+
+    machine_b.write_file(".newfile", "theirs\n");
+    let commit_b = machine_b.run("dotsync commit all -m 'add newfile' -- .newfile");
+    assert!(commit_b.status.success(), "{}", render_output(&commit_b));
+
+    let sync_a = machine_a.run("dotsync");
+    assert_eq!(
+        sync_a.status.code(),
+        Some(1),
+        "an incoming add that collides with untracked home content is drift\n{}",
+        render_output(&sync_a)
+    );
+    assert_eq!(
+        machine_a.read_file(".newfile"),
+        "mine\n",
+        "dotsync must not silently overwrite home content it has never seen"
+    );
+
+    let forced = machine_a.run("dotsync --force");
+    assert!(forced.status.success(), "{}", render_output(&forced));
+    assert_eq!(machine_a.read_file(".newfile"), "theirs\n");
+}
+
+#[test]
+fn deleting_a_managed_file_blocks_sync_and_is_committable() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    machine.delete_file(".bashrc");
+
+    let diff_output = machine.run("dotsync diff");
+    assert_eq!(
+        diff_output.status.code(),
+        Some(1),
+        "a deleted managed file is drift, and `diff` must show it\n{}",
+        render_output(&diff_output)
+    );
+    let diff_stderr = String::from_utf8_lossy(&diff_output.stderr).into_owned();
+    assert!(
+        diff_stderr.contains(".bashrc") && diff_stderr.contains("-export DOTSYNC=repo"),
+        "`diff` must render what the deletion would discard\n{diff_stderr}"
+    );
+
+    let sync_output = machine.run("dotsync");
+    assert_eq!(
+        sync_output.status.code(),
+        Some(1),
+        "deletion drift blocks sync like an edit\n{}",
+        render_output(&sync_output)
+    );
+    assert!(
+        !machine.file_exists(".bashrc"),
+        "the blocked sync must not quietly restore the deleted file"
+    );
+
+    let commit_output = machine.run("dotsync commit mx-xps-cy -m 'drop bashrc' -- .bashrc");
+    assert!(
+        commit_output.status.success(),
+        "{}",
+        render_output(&commit_output)
+    );
+    assert!(!bookmark_has_file(&machine, "mx-xps-cy", ".bashrc"));
+    assert!(!machine.file_exists(".bashrc"));
+
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+}
+
+#[test]
+fn a_sync_interrupted_before_saving_state_is_not_drift_on_the_next_run() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".apprc", "version = 1\n");
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+    let state_before = machine.read_sync_state_raw();
+
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".apprc", "version = 2\n");
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+    assert_eq!(machine.read_file(".apprc"), "version = 2\n");
+
+    // A run that dies between finishing the home writes and saving sync state
+    // leaves exactly this: home already holds the new bytes, and the state file
+    // still points at the revision before them. The rerun must converge, not
+    // report the bytes it just wrote as local drift.
+    machine.write_sync_state_raw(&state_before);
+
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "an interrupted sync must converge on rerun\n{}",
+        render_output(&sync_output)
+    );
+    assert_eq!(machine.read_file(".apprc"), "version = 2\n");
+}
+
+#[test]
+fn abort_restores_a_drifted_file_outside_the_paused_selection() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
+    machine_a.write_file(".config/unrelated.conf", "unrelated = \"base\"\n");
+    let commit_base = machine_a
+        .run("dotsync commit all -m 'add base config' -- .config/app.conf .config/unrelated.conf");
+    assert!(
+        commit_base.status.success(),
+        "{}",
+        render_output(&commit_base)
+    );
+
+    machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
+    let commit_linux =
+        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
+    assert!(
+        commit_linux.status.success(),
+        "{}",
+        render_output(&commit_linux)
+    );
+
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+
+    // Drift on a file the paused commit never named.
+    machine_b.write_file(".config/unrelated.conf", "unrelated = \"drifted\"\n");
+    machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
+    let conflict =
+        machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
+    assert_eq!(
+        conflict.status.code(),
+        Some(3),
+        "conflicting all-to-linux cascade should pause\n{}",
+        render_output(&conflict)
+    );
+
+    let aborted = machine_b.run("dotsync abort");
+    assert!(
+        aborted.status.success(),
+        "abort reverts all the config files, so unrelated drift cannot block it\n{}",
+        render_output(&aborted)
+    );
+    assert_eq!(
+        machine_b.read_file(".config/app.conf"),
+        "setting = \"linux\"\n"
+    );
+    assert_eq!(
+        machine_b.read_file(".config/unrelated.conf"),
+        "unrelated = \"base\"\n",
+        "abort is a full sync of home, not a selective restore"
+    );
+}
+
+#[test]
+fn commit_force_applies_to_the_named_paths_and_not_to_unrelated_drift() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".gitconfig", "[user]\nname = Repo\n");
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".config/app.conf", "setting = one\n");
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    machine.write_file(".gitconfig", "[user]\nname = Drifted\n");
+    machine.write_file(".config/app.conf", "setting = two\n");
+
+    let commit_output =
+        machine.run("dotsync commit mx-xps-cy -m 'update app' --force -- .config/app.conf");
+    assert_eq!(
+        commit_output.status.code(),
+        Some(1),
+        "`--force` on commit covers the paths it names, so unrelated drift still stops the home sync\n{}",
+        render_output(&commit_output)
+    );
+    assert_eq!(
+        machine.read_file(".gitconfig"),
+        "[user]\nname = Drifted\n",
+        "`--force` on a commit must not revert a file the commit never named"
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "mx-xps-cy", ".config/app.conf"),
+        "setting = two\n",
+        "the named change is still recorded"
+    );
+}
+
+#[test]
+fn forcing_a_stale_commit_records_what_it_overwrote() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+    seed_shared_apprc(&machine_a, &machine_b);
+
+    machine_b.write_file(".apprc", "ui_theme = dark\nfont = mono\nsize = 14\n");
+    let commit_b = machine_b.run("dotsync commit all -m 'add size' -- .apprc");
+    assert!(commit_b.status.success(), "{}", render_output(&commit_b));
+
+    let status_a = machine_a.run("dotsync status");
+    assert!(status_a.status.success(), "{}", render_output(&status_a));
+
+    let commit_a =
+        machine_a.run("dotsync --output json commit all -m 'revert on purpose' --force -- .apprc");
+    assert!(commit_a.status.success(), "{}", render_output(&commit_a));
+
+    let json = parse_stdout_json(&commit_a);
+    assert_eq!(
+        json["forced_overwrites"]
+            .as_array()
+            .expect("forced_overwrites should be an array"),
+        &vec![serde_json::Value::from(".apprc")],
+        "a forced overwrite of an incoming change has to be on the record\n{}",
+        render_output(&commit_a)
+    );
+    assert_eq!(
+        remote_branch_file_contents(&machine_a, "all", ".apprc"),
+        "ui_theme = dark\nfont = mono\n"
+    );
+}
+
+#[test]
+fn diff_reports_an_inserted_line_as_a_single_addition() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(
+        &machine,
+        "mx-xps-cy",
+        ".config/app.conf",
+        "one\ntwo\nthree\n",
+    );
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    machine.write_file(".config/app.conf", "one\ninserted\ntwo\nthree\n");
+
+    let diff_output = machine.run("dotsync diff");
+    assert_eq!(
+        diff_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&diff_output)
+    );
+    let stderr = String::from_utf8_lossy(&diff_output.stderr).into_owned();
+    assert!(
+        stderr.contains("+inserted"),
+        "the inserted line should be reported as an addition\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("-two") && !stderr.contains("-three"),
+        "a real line diff aligns the unchanged tail instead of rewriting it\n{stderr}"
+    );
+}
+
+#[test]
+fn sync_does_not_rewrite_files_that_already_match() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".apprc", "ui_theme = dark\n");
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+    let written_at = machine.modified_time(".apprc");
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    assert_eq!(
+        machine.modified_time(".apprc"),
+        written_at,
+        "a sync that changes nothing must not rewrite the file"
+    );
 }
