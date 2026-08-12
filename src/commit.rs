@@ -141,85 +141,22 @@ pub async fn commit_and_sync(
     let machine_scope = crate::sync::resolve_current_scope(&config, sync_state.as_ref(), None)?;
     let target_entries = load_scope_entries(repo.as_ref(), &options.scope, &internal_paths)?;
 
-    // Whether a home file holds a change of this machine's own is a question
-    // about this machine, not about the scope the change is headed for: it is
-    // the same three-way classification `status` reports. Which tree the bytes
-    // are written into is the separate question, answered further down.
-    let named_paths = if options.paths.is_empty() {
-        None
-    } else {
-        Some(expand_selection_paths(
-            paths,
-            &options.scope,
-            &options.paths,
-            &target_entries,
-            &internal_paths,
-        )?)
-    };
-    let classification = classify_home_against_scope(
+    let selection = select_changes_to_record(
         paths,
         repo.as_ref(),
         &config,
         sync_state.as_ref(),
         &machine_scope,
-        &named_paths.iter().flatten().cloned().collect(),
-    )
-    .await?;
-
-    let selected_paths = match named_paths {
-        Some(named) => named,
-        // The default selection is exactly what `status` calls a change, so
-        // the two commands cannot disagree about what a bare commit records.
-        None => classification
-            .paths
-            .iter()
-            .filter(|(_, path)| path.state.is_drift())
-            .map(|(relative, _)| relative.clone())
-            .collect(),
-    };
-    reject_scope_graph_outside_all(
-        paths,
-        repo.as_ref(),
-        &options.scope,
+        &options,
         &target_entries,
-        &selected_paths,
+        &internal_paths,
     )
     .await?;
-
-    let refused = selected_paths
-        .iter()
-        .filter(|_| !options.force)
-        .filter_map(|relative| {
-            let state = classification.state(relative);
-            state.blocks_commit().then(|| RefusedCommitPath {
-                path: relative.clone(),
-                state,
-            })
-        })
-        .collect::<Vec<_>>();
-    if !refused.is_empty() {
-        return Err(DotsyncError::StaleCommitPaths {
-            scope: options.scope,
-            refused,
-        });
-    }
-
-    // Forcing means "home wins here regardless", so these paths skip the merge
-    // below entirely. Recording which ones actually needed that authority is
-    // what puts a deliberate revert on the record.
-    let forced_paths: Vec<PathBuf> = if options.force {
-        selected_paths.clone()
-    } else {
-        Vec::new()
-    };
-    let forced_overwrites = forced_paths
-        .iter()
-        .filter(|relative| {
-            let state = classification.state(relative);
-            state.blocks_commit() || state == FileState::DivergedEdit
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let Selection {
+        paths: selected_paths,
+        forced_paths,
+        forced_overwrites,
+    } = selection;
 
     if selected_paths.is_empty() {
         return Ok(CommitReport::nothing_to_commit(
@@ -411,6 +348,109 @@ pub async fn commit_and_sync(
         forced_overwrites,
         sync,
         push,
+    })
+}
+
+/// What this commit will record, and on whose authority.
+struct Selection {
+    paths: Vec<PathBuf>,
+    /// The paths `--force` covers. These skip the merge below entirely: the
+    /// point of forcing is that home wins here whatever the repo says.
+    forced_paths: Vec<PathBuf>,
+    /// The forced paths where that authority actually decided something —
+    /// where, without it, the commit would have been refused or would have
+    /// merged rather than overwritten.
+    forced_overwrites: Vec<PathBuf>,
+}
+
+/// Decides which paths a commit records and whether it is allowed to.
+///
+/// Whether a home file holds a change of *this machine's own* is a question
+/// about this machine, not about the scope the change is headed for, so it is
+/// the same three-way classification `status` reports — which is also why a
+/// bare `dotsync commit` and `dotsync status` can no longer disagree about
+/// what changed. Which tree the bytes are then written into is a separate
+/// question, answered by the caller.
+#[allow(clippy::too_many_arguments)]
+async fn select_changes_to_record(
+    paths: &DotsyncPaths,
+    repo: &dyn jj_lib::repo::Repo,
+    config: &crate::config::DotsyncConfig,
+    sync_state: Option<&crate::sync::SyncState>,
+    machine_scope: &str,
+    options: &CommitOptions,
+    target_entries: &BTreeMap<PathBuf, TreeValue>,
+    internal_paths: &BTreeSet<PathBuf>,
+) -> Result<Selection, DotsyncError> {
+    let named_paths = if options.paths.is_empty() {
+        None
+    } else {
+        Some(expand_selection_paths(
+            paths,
+            &options.scope,
+            &options.paths,
+            target_entries,
+            internal_paths,
+        )?)
+    };
+    let classification = classify_home_against_scope(
+        paths,
+        repo,
+        config,
+        sync_state,
+        machine_scope,
+        &named_paths.iter().flatten().cloned().collect(),
+    )
+    .await?;
+
+    let selected_paths = match named_paths {
+        Some(named) => named,
+        None => classification
+            .paths
+            .iter()
+            .filter(|(_, path)| path.state.is_drift())
+            .map(|(relative, _)| relative.clone())
+            .collect(),
+    };
+    reject_scope_graph_outside_all(paths, repo, &options.scope, target_entries, &selected_paths)
+        .await?;
+
+    if !options.force {
+        let refused = selected_paths
+            .iter()
+            .filter_map(|relative| {
+                let state = classification.state(relative);
+                state.blocks_commit().then(|| RefusedCommitPath {
+                    path: relative.clone(),
+                    state,
+                })
+            })
+            .collect::<Vec<_>>();
+        if !refused.is_empty() {
+            return Err(DotsyncError::StaleCommitPaths {
+                scope: options.scope.clone(),
+                refused,
+            });
+        }
+        return Ok(Selection {
+            paths: selected_paths,
+            forced_paths: Vec::new(),
+            forced_overwrites: Vec::new(),
+        });
+    }
+
+    let forced_overwrites = selected_paths
+        .iter()
+        .filter(|relative| {
+            let state = classification.state(relative);
+            state.blocks_commit() || state == FileState::DivergedEdit
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(Selection {
+        forced_paths: selected_paths.clone(),
+        paths: selected_paths,
+        forced_overwrites,
     })
 }
 
