@@ -749,7 +749,7 @@ Expected:
 This flow expects managed files in your home directory to already match the repo, unless you intentionally choose to overwrite drift.
 
 Current state found:
-Drifted files are listed below with diffs.
+The files that differ are listed under `Changed files:` below, each with what it would be replaced by.
 
 Why dotsync stopped:
 Dotsync stopped before overwriting local drift so you can inspect what would be replaced.
@@ -757,7 +757,9 @@ Dotsync stopped before overwriting local drift so you can inspect what would be 
 Correct flow:
 - If the repo is correct, rerun with `dotsync --force` to overwrite the drift after reviewing the diffs.
 - If the live file is the change you wanted, run `dotsync status`, then commit the intended path with `dotsync commit <scope> -m "message" -- <path>`.
-- .gitconfig (edited here since the last sync)
+
+Changed files:
+  M .gitconfig (edited here since the last sync)
 --- repo
 +++ system
 @@ -1,2 +1,2 @@
@@ -1418,7 +1420,7 @@ fn abort_paused_cascade_restores_pre_pause_state_and_clears_pause() {
         &aborted,
         "\
 dotsync: overwrote 1 drifted file(s)
-- .config/app.conf (edited here since the last sync)
+  M .config/app.conf (edited here since the last sync)
 --- repo
 +++ system
 @@ -1 +1 @@

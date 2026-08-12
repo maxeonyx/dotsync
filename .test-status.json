@@ -111,7 +111,7 @@
     "dotsync::user_flows$sync_does_not_rewrite_files_that_already_match": "passing",
     "dotsync::user_flows$sync_uses_state_machine_scope_even_if_checkout_changes": "passing",
     "dotsync::user_flows$tdd_ratchet_gatekeeper": "passing",
-    "dotsync::user_flows$the_drift_stop_lists_files_the_way_status_does_and_apart_from_its_instructions": "pending",
+    "dotsync::user_flows$the_drift_stop_lists_files_the_way_status_does_and_apart_from_its_instructions": "passing",
     "dotsync::user_flows$the_not_initialized_stop_names_the_command_you_ran": "pending",
     "dotsync::user_flows$unknown_command_is_not_treated_as_scope_commit": "passing",
     "dotsync::user_flows$v03_init_creates_hidden_repo_not_dotfiles": "passing",

@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
     abort_paused_cascade, commit_and_sync, continue_after_conflict, diff_home, init, status, sync,
-    view, CommitFailure, CommitOptions, DiffReport, DotsyncError, DotsyncPaths, FileDrift,
-    ForceScope, Run, UnreachableRemote, ViewReport,
+    view, CommitFailure, CommitOptions, DiffReport, DotsyncError, DotsyncPaths, ForceScope, Run,
+    UnreachableRemote, ViewReport,
 };
 mod render;
 use serde_json::json;
@@ -817,12 +817,6 @@ fn discover_paths() -> Result<DotsyncPaths, DotsyncError> {
     })
 }
 
-fn print_drifts(drifts: &[FileDrift]) {
-    for line in render::render_drifts_human(drifts) {
-        eprintln!("{line}");
-    }
-}
-
 /// The header `status` and `diff` share: same count, same population, same
 /// words. They are two views of one answer, and reading one after the other
 /// must not look like reading about two different machines.
@@ -962,8 +956,13 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
             eprintln!("{}", render::render_error_human(&error));
             let mut error_report = error.to_error_report();
             error_report.forced_overwrites = forced_overwrites;
+            // After the teaching message and set apart from it: these are the
+            // files the run stopped on, not more instructions.
             if !error_report.drifts.is_empty() {
-                print_drifts(&error_report.drifts);
+                eprintln!("\nChanged files:");
+                for line in render::render_drifts_human(&error_report.drifts) {
+                    eprintln!("{line}");
+                }
             }
             if matches!(output_format, OutputFormat::Json) {
                 println!(

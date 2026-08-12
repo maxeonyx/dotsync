@@ -220,7 +220,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             "Dotsync keeps its hidden repo as the source of truth for your home-directory config: the repo is the source of truth, and dotsync syncs committed repo state into the live system.",
             "This sync flow compares managed files in your home directory against the repo version for this machine scope before copying anything.",
             "This flow expects managed files in your home directory to already match the repo, unless you intentionally choose to overwrite drift.",
-            "Drifted files are listed below with diffs.",
+            "The files that differ are listed under `Changed files:` below, each with what it would be replaced by.",
             "Dotsync stopped before overwriting local drift so you can inspect what would be replaced.",
             &[
                 "If the repo is correct, rerun with `dotsync --force` to overwrite the drift after reviewing the diffs.",
@@ -653,22 +653,27 @@ fn notes_for_drifts(drifts: &[FileDrift]) -> Vec<String> {
         "dotsync: overwrote {} drifted file(s)",
         drifts.len()
     )];
-    notes.extend(drifts.iter().flat_map(render_drift_human));
+    notes.extend(render_drifts_human(drifts));
     notes
 }
 
+/// Changed files with their two sides shown: the same line `status` and `diff`
+/// give each file, then the diff under it.
+///
+/// One renderer, because these are the same files those commands report. A
+/// drift stop used to render them as `- path (reason)`, which is also how the
+/// teaching errors render their instruction bullets — so the files a run
+/// stopped on read as more things to do.
 pub(crate) fn render_drifts_human(drifts: &[FileDrift]) -> Vec<String> {
-    drifts.iter().flat_map(render_drift_human).collect()
-}
-
-/// The path, why it is drift, and the diff. Naming the reason matters when
-/// more than home moved: "deleted here" and "deleted here, and changed in the
-/// repo on another machine" call for different resolutions.
-fn render_drift_human(drift: &FileDrift) -> [String; 2] {
-    [
-        format!("- {} ({})", drift.repo_path.display(), drift.state.reason()),
-        render_drift_diff(drift),
-    ]
+    drifts
+        .iter()
+        .flat_map(|drift| {
+            [
+                render_change_line(&drift.repo_path, drift.state),
+                render_drift_diff(drift),
+            ]
+        })
+        .collect()
 }
 
 pub(crate) fn display_path(path: &Path) -> String {
