@@ -77,6 +77,21 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 "do not run another dotsync commit while the cascade is paused.",
             ],
         ),
+        DotsyncError::PausePredatesResolutionCheck { .. } => render_structured_error(
+            "cannot check this conflict resolution",
+            "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config. Where two branches changed one file differently, the cascade pauses and asks you for the merged contents.",
+            "This continue flow reads each conflicted file back out of your home directory and records what it finds there as the resolution. To tell a resolution from an untouched file, it compares them against what they held when the cascade paused.",
+            "It expects the paused cascade to have recorded those contents.",
+            error_report
+                .current_state
+                .as_deref()
+                .unwrap_or(&error_report.message),
+            "This cascade was paused by an older dotsync, which recorded nothing to compare against. Continuing would record whatever is in home as the resolution without being able to tell whether anything was resolved, and that silently discards the other scope's version.",
+            &[
+                "run `dotsync abort` to discard the paused cascade; it reverts the conflicted files in home to this machine's scope state.",
+                "then redo the commit that started the cascade; the pause it creates records what this check needs.",
+            ],
+        ),
         DotsyncError::UnresolvedConflict { scope, paths } => render_structured_error(
             "conflict not resolved",
             "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config. Where two branches changed one file differently, the cascade pauses and asks you for the merged contents.",

@@ -31,7 +31,7 @@
     "dotsync::user_flows$continue_json_reports_unpushed_scopes": "passing",
     "dotsync::user_flows$continue_preserves_non_conflicting_parent_changes_from_paused_merge": "passing",
     "dotsync::user_flows$continue_refuses_a_conflicted_file_that_was_never_resolved": "passing",
-    "dotsync::user_flows$continue_refuses_a_pause_that_predates_the_resolution_check": "pending",
+    "dotsync::user_flows$continue_refuses_a_pause_that_predates_the_resolution_check": "passing",
     "dotsync::user_flows$continue_without_pause_returns_clear_error": "passing",
     "dotsync::user_flows$diff_shows_line_oriented_home_drift_without_syncing": "passing",
     "dotsync::user_flows$diff_works_while_local_scopes_are_ahead_of_remote": "passing",

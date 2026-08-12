@@ -49,18 +49,19 @@ struct PausedCascadeState {
     machine_scope: String,
     paused_scope: String,
     parent_commit_ids: Vec<String>,
-    conflicted_files: Vec<PathBuf>,
     remaining_steps: Vec<PausedCascadeStep>,
     description: String,
     #[serde(default)]
     original_scope_commit_ids: BTreeMap<String, String>,
     #[serde(default)]
     abort_restore_paths: Vec<PathBuf>,
-    /// Home contents of each conflicted file as they stood when the cascade
-    /// paused. `continue` refuses when they have not changed — see
-    /// `unresolved_conflicted_files`. Deleted with this whole file when
-    /// conflicts become commits (PLAN item 3), like the
-    /// `WithheldPausedCascade` publish guard.
+    /// The conflicted files, and what each held in home when the cascade
+    /// paused. `continue` resolves exactly these paths, and refuses when they
+    /// have not changed — see `unresolved_conflicted_files`. Defaulted rather
+    /// than required so that a pause file written before this field existed
+    /// still loads and can still be aborted; `continue` refuses such a pause
+    /// outright. Deleted with this whole file when conflicts become commits
+    /// (PLAN item 3), like the `WithheldPausedCascade` publish guard.
     #[serde(default)]
     paused_home_contents: BTreeMap<PathBuf, Option<Vec<u8>>>,
 }
@@ -239,7 +240,6 @@ pub async fn commit_and_sync(
                     machine_scope,
                     paused_scope: options.scope.clone(),
                     parent_commit_ids: vec![base_commit.id().hex(), local_commit.id().hex()],
-                    conflicted_files: conflicted_paths.clone(),
                     remaining_steps: plan
                         .iter()
                         .map(|step| PausedCascadeStep {
@@ -314,7 +314,6 @@ pub async fn commit_and_sync(
                     machine_scope,
                     paused_scope: scope.clone(),
                     parent_commit_ids,
-                    conflicted_files: conflicted_paths.clone(),
                     remaining_steps,
                     description: cascade_command.description,
                     original_scope_commit_ids,
@@ -830,13 +829,7 @@ fn unresolved_conflicted_files(
     state: &PausedCascadeState,
 ) -> Result<Vec<PathBuf>, DotsyncError> {
     let mut unresolved = Vec::new();
-    for relative in &state.conflicted_files {
-        // A pause written before this guard existed has nothing to compare
-        // against. Refusing on that would wedge a machine mid-pause, which is
-        // the failure mode this project exists to remove.
-        let Some(paused_contents) = state.paused_home_contents.get(relative) else {
-            continue;
-        };
+    for (relative, paused_contents) in &state.paused_home_contents {
         if read_home_bytes(paths, relative)? == *paused_contents {
             unresolved.push(relative.clone());
         }
@@ -849,6 +842,16 @@ pub async fn continue_after_conflict(
     options: SyncOptions,
 ) -> Result<ContinueReport, DotsyncError> {
     let state = load_paused_cascade_state(paths)?;
+    // A cascade pauses because at least one file conflicted, so an empty
+    // record means the pause was written before this check existed rather than
+    // that nothing conflicted. Skipping the check there would reopen the
+    // silent discard exactly when a machine upgrades mid-pause; `abort` reads
+    // nothing this pause lacks, so refusing does not wedge it.
+    if state.paused_home_contents.is_empty() {
+        return Err(DotsyncError::PausePredatesResolutionCheck {
+            scope: state.paused_scope,
+        });
+    }
     let unresolved = unresolved_conflicted_files(paths, &state)?;
     if !unresolved.is_empty() {
         return Err(DotsyncError::UnresolvedConflict {
@@ -881,7 +884,7 @@ pub async fn continue_after_conflict(
             ),
         })?;
     let mut builder = MergedTreeBuilder::new(merged_tree);
-    for relative in &state.conflicted_files {
+    for relative in state.paused_home_contents.keys() {
         apply_home_path_to_tree(tx.repo_mut(), paths, relative, &mut builder).await?;
     }
     let resolved_tree = builder.write_tree().await.map_err(|err| DotsyncError::Jj {
@@ -952,7 +955,6 @@ pub async fn continue_after_conflict(
                     machine_scope: state.machine_scope,
                     paused_scope: scope.clone(),
                     parent_commit_ids,
-                    conflicted_files: conflicted_paths.clone(),
                     remaining_steps,
                     description: state.description,
                     original_scope_commit_ids: state.original_scope_commit_ids,
@@ -1019,13 +1021,13 @@ pub async fn abort_paused_cascade(
     remove_paused_cascade_state(paths)?;
 
     let restore_paths = if state.abort_restore_paths.is_empty() {
-        &state.conflicted_files
+        state.paused_home_contents.keys().cloned().collect()
     } else {
-        &state.abort_restore_paths
+        state.abort_restore_paths
     };
 
     let sync =
-        crate::sync::sync_repo_to_home(paths, options, restore_paths, Some(&state.machine_scope))
+        crate::sync::sync_repo_to_home(paths, options, &restore_paths, Some(&state.machine_scope))
             .await?;
 
     Ok(AbortReport {

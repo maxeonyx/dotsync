@@ -107,6 +107,10 @@ pub enum DotsyncError {
     },
     #[error("{} conflicted file(s) are unchanged since the cascade paused at scope `{scope}`", paths.len())]
     UnresolvedConflict { scope: String, paths: Vec<PathBuf> },
+    #[error(
+        "the cascade paused at scope `{scope}` recorded no contents to check a resolution against"
+    )]
+    PausePredatesResolutionCheck { scope: String },
     #[error("failed to read {path}: {source}")]
     Io {
         path: PathBuf,
@@ -212,6 +216,9 @@ impl DotsyncError {
             DotsyncError::UnresolvedConflict { .. } => {
                 basic_error_report("unresolved_conflict", self)
             }
+            DotsyncError::PausePredatesResolutionCheck { .. } => {
+                basic_error_report("pause_predates_resolution_check", self)
+            }
         }
     }
 }
@@ -246,6 +253,9 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
                 .collect::<Vec<_>>()
                 .join("\n"),
         ),
+        DotsyncError::PausePredatesResolutionCheck { scope } => Some(format!(
+            "paused scope: {scope}; the pause holds no record of what the conflicted files contained when it paused."
+        )),
         DotsyncError::UnresolvedConflict { scope, paths } => Some(format!(
             "unchanged since the cascade paused at scope `{scope}`: {}",
             paths
