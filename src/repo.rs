@@ -134,10 +134,19 @@ pub(crate) fn sync_local_bookmarks_from_remote(
             continue;
         }
         let Some(local_id) = local_target.as_normal().cloned() else {
-            // DELIBERATE CORRUPTION — restores the pre-fix behaviour so the new
-            // regression test is proved to fail. Reverted in the next commit.
-            mut_repo.set_local_bookmark_target(name.as_ref(), RefTarget::normal(remote_id));
-            continue;
+            // A conflicted bookmark is jj's own record that the fetched remote
+            // position could not be reconciled with the local one. Its sides
+            // are the local and the remote head; report only the local one.
+            return Err(DotsyncError::ScopeDiverged {
+                scope: name.as_str().to_string(),
+                local_target: local_target
+                    .added_ids()
+                    .filter(|id| **id != remote_id)
+                    .map(|id| id.hex())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                remote_target: remote_id.hex(),
+            });
         };
         if local_id == remote_id {
             continue;

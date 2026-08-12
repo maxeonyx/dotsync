@@ -23,7 +23,7 @@
     "dotsync::user_flows$continue_without_pause_returns_clear_error": "passing",
     "dotsync::user_flows$diff_shows_line_oriented_home_drift_without_syncing": "passing",
     "dotsync::user_flows$diff_works_while_local_scopes_are_ahead_of_remote": "passing",
-    "dotsync::user_flows$diverged_leaf_scope_keeps_the_local_commit_and_the_home_file": "pending",
+    "dotsync::user_flows$diverged_leaf_scope_keeps_the_local_commit_and_the_home_file": "passing",
     "dotsync::user_flows$diverged_scope_bookmark_is_reported_as_divergence_not_as_overwrite": "passing",
     "dotsync::user_flows$drift_detected_human_error_stands_alone": "passing",
     "dotsync::user_flows$drift_detected_json_contract_stays_compatible": "passing",
