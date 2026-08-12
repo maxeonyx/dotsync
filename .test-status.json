@@ -17,7 +17,7 @@
     "dotsync::user_flows$commit_pushes_scopes_left_unpushed_by_an_interrupted_commit": "passing",
     "dotsync::user_flows$commit_to_machine_scope_does_not_cascade": "passing",
     "dotsync::user_flows$commit_while_cascade_paused_is_blocked_without_mutating_scope": "passing",
-    "dotsync::user_flows$commit_with_no_paths_ignores_unmanaged_home_files": "pending",
+    "dotsync::user_flows$commit_with_no_paths_ignores_unmanaged_home_files": "passing",
     "dotsync::user_flows$commit_with_nothing_to_commit_still_publishes_unpushed_scopes": "passing",
     "dotsync::user_flows$commit_without_paths_imports_all_diffs": "passing",
     "dotsync::user_flows$concurrent_same_scope_file_edits_require_resolution": "passing",

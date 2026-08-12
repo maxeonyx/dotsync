@@ -123,8 +123,6 @@ pub async fn commit_and_sync(
     let machine_scope = crate::sync::resolve_current_scope(&config, sync_state.as_ref(), None)?;
 
     let old_machine_commit = load_scope_commit(repo.as_ref(), &machine_scope)?;
-    let machine_entries =
-        load_current_machine_entries(repo.as_ref(), &machine_scope, &internal_paths).await?;
     let pre_fetch_target_entries =
         load_scope_entries(pre_fetch_repo.as_ref(), &options.scope, &internal_paths)?;
     let target_entries = load_scope_entries(repo.as_ref(), &options.scope, &internal_paths)?;
@@ -147,13 +145,6 @@ pub async fn commit_and_sync(
     .await?;
 
     if selected_paths.is_empty() {
-        if matches!(options.selection, CommitSelection::Paths(_))
-            && home_has_unmanaged_files(paths, &machine_entries, &internal_paths)?
-        {
-            return Err(DotsyncError::NotImplemented(
-                "scoped commit is not available until home-diff commit flow lands",
-            ));
-        }
         return Ok(CommitReport::nothing_to_commit(pending_push));
     }
 
@@ -415,15 +406,6 @@ fn read_home_bytes(paths: &DotsyncPaths, relative: &Path) -> Result<Option<Vec<u
     }
 }
 
-async fn load_current_machine_entries(
-    repo: &dyn jj_lib::repo::Repo,
-    machine_scope: &str,
-    internal_paths: &std::collections::BTreeSet<PathBuf>,
-) -> Result<BTreeMap<PathBuf, TreeValue>, DotsyncError> {
-    let machine_commit = load_scope_commit(repo, machine_scope)?;
-    collect_managed_tree_entries(&machine_commit.tree(), internal_paths)
-}
-
 fn load_scope_entries(
     repo: &dyn jj_lib::repo::Repo,
     scope: &str,
@@ -668,89 +650,6 @@ async fn expected_machine_changes(
 
     all_paths.clear();
     Ok(changed)
-}
-
-fn home_has_unmanaged_files(
-    paths: &DotsyncPaths,
-    machine_entries: &BTreeMap<PathBuf, TreeValue>,
-    internal_paths: &std::collections::BTreeSet<PathBuf>,
-) -> Result<bool, DotsyncError> {
-    home_dir_has_unmanaged_files(
-        &paths.home_dir,
-        &paths.repo_root,
-        &paths.home_dir,
-        machine_entries,
-        internal_paths,
-    )
-}
-
-fn home_dir_has_unmanaged_files(
-    root: &Path,
-    repo_root: &Path,
-    current: &Path,
-    machine_entries: &BTreeMap<PathBuf, TreeValue>,
-    internal_paths: &std::collections::BTreeSet<PathBuf>,
-) -> Result<bool, DotsyncError> {
-    for entry in fs::read_dir(current).map_err(|source| DotsyncError::Io {
-        path: current.to_path_buf(),
-        source,
-    })? {
-        let entry = entry.map_err(|source| DotsyncError::Io {
-            path: current.to_path_buf(),
-            source,
-        })?;
-        let path = entry.path();
-        let file_type = entry.file_type().map_err(|source| DotsyncError::Io {
-            path: path.clone(),
-            source,
-        })?;
-
-        if path.starts_with(repo_root) {
-            continue;
-        }
-
-        if file_type.is_dir() {
-            if home_dir_has_unmanaged_files(
-                root,
-                repo_root,
-                &path,
-                machine_entries,
-                internal_paths,
-            )? {
-                return Ok(true);
-            }
-            continue;
-        }
-
-        if !file_type.is_file() {
-            continue;
-        }
-
-        let relative = path.strip_prefix(root).map_err(|source| DotsyncError::Jj {
-            message: format!(
-                "failed to make home path {} relative to {}: {source}",
-                path.display(),
-                root.display()
-            ),
-        })?;
-        let relative = relative.to_path_buf();
-
-        if relative
-            .components()
-            .any(|component| component.as_os_str().to_string_lossy().contains(".ignore"))
-        {
-            continue;
-        }
-
-        if internal_paths.contains(&relative) {
-            continue;
-        }
-        if !machine_entries.contains_key(&relative) {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
 }
 
 pub async fn continue_after_conflict(
