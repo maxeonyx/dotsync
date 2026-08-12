@@ -6056,3 +6056,43 @@ fn a_machine_joining_keeps_the_comments_already_in_the_config() {
         "with the same explanation init writes for a scope it creates:\n{joined}"
     );
 }
+
+/// A forced sync is the one thing plain `dotsync` does that cannot be undone:
+/// it throws away what is in home. The notes on stderr said so and the payload
+/// did not, so the machine-readable half of the run was the less honest one.
+#[test]
+fn a_forced_sync_says_which_home_files_it_overwrote() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
+    let clean = machine.run("dotsync --output json");
+    assert!(clean.status.success(), "{}", render_output(&clean));
+    assert_eq!(
+        parse_stdout_json(&clean)["overwritten_files"]
+            .as_array()
+            .map(Vec::len),
+        Some(0),
+        "a sync that overwrote nothing says so, rather than saying nothing\n{}",
+        render_output(&clean)
+    );
+
+    machine.write_file(".bashrc", "export DOTSYNC=mine\n");
+    let forced = machine.run("dotsync --force --output json");
+    assert!(forced.status.success(), "{}", render_output(&forced));
+    let json = parse_stdout_json(&forced);
+    assert_eq!(
+        json["overwritten_files"],
+        serde_json::json!([".bashrc"]),
+        "the file whose contents this run discarded has to be in the payload\n{}",
+        render_output(&forced)
+    );
+    assert_eq!(machine.read_file(".bashrc"), "export DOTSYNC=repo\n");
+}

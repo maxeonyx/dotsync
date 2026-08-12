@@ -12,6 +12,7 @@
     "dotsync::user_flows$a_concurrent_merge_leaves_no_drift_behind": "passing",
     "dotsync::user_flows$a_directory_selection_records_what_this_machine_changed_and_says_what_it_skipped": "passing",
     "dotsync::user_flows$a_forced_overwrite_is_reported_even_when_the_run_then_fails": "passing",
+    "dotsync::user_flows$a_forced_sync_says_which_home_files_it_overwrote": "pending",
     "dotsync::user_flows$a_machine_joining_keeps_the_comments_already_in_the_config": "passing",
     "dotsync::user_flows$a_machine_that_lost_its_sync_state_still_syncs": "passing",
     "dotsync::user_flows$a_machine_with_no_sync_record_says_so_instead_of_guessing": "passing",
