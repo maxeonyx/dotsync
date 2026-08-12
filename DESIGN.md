@@ -220,11 +220,13 @@ There is one command: `dotsync`.
 
 **`dotsync`** (no arguments): Pull and converge scope branches (merging remote changes and cascading, pausing on conflicts), sync repo -> system, push. It does not import home edits; use `dotsync status` and `dotsync commit <scope> -m "message" -- <paths...>` when home changes should be recorded.
 
-**`dotsync commit <scope> -m "message" <path>...`**: Commit the selected home-relative file/directory paths to the named scope branch, merge cascade through all descendant scopes, sync repo -> system, push to remote.
+**`dotsync commit <scope> -m "message" <path>...`**: Commit the selected home-relative file/directory paths to the named scope branch, merge cascade through all descendant scopes, sync repo -> system, push to remote. It refuses a named path whose home content is not a change made on this machine — see the drift classification above.
 
-**`dotsync commit <scope> --all -m "message"`**: Commit every changed managed file for that scope. It does not scan all of home for unrelated new files; new paths are intentionally opted into with explicit path arguments.
+**`dotsync commit <scope> -m "message"`** (no paths): Commit every managed file this machine has changed, which is exactly the set `dotsync status` lists as changes. It does not scan all of home for unrelated new files; new paths are intentionally opted into with explicit path arguments.
 
-**`dotsync diff`**: Show line-oriented diffs for managed home files that differ from the current machine scope. This is read-only and exits 1 when drift is present so scripts and agents can distinguish clean from dirty state.
+**`dotsync status`**: List managed files this machine has changed, and separately the files another machine changed that home has not caught up to. Read-only, and exits 0 either way.
+
+**`dotsync diff`**: Show line-oriented diffs for managed home files that have drifted. Read-only, and exits 1 when drift is present so scripts and agents can distinguish clean from dirty state. A file the repo has moved on from while home stayed put is not drift, so a machine that is merely behind exits 0 — the same answer `status` and plain `dotsync` give.
 
 **`dotsync view`**: Show a read-only overview of checked-in scope and file state. With `--scope <scope>`, show the managed file tree visible on that scope. With `--file <path>`, show the scopes where that file exists. With both `--scope <scope>` and `--file <path>`, print that file as it exists on that scope.
 
@@ -234,7 +236,7 @@ There is one command: `dotsync`.
 
 **`dotsync abort`**: Abort a paused cascade, restore scope branches to their pre-pause revisions, clear the pause marker, and sync the current machine home back to the restored repo state.
 
-Syncing and commit forms diff system files against the repo before syncing. If any system file has drifted from what the repo expects, dotsync stops, shows the diff, and warns. `--force` still shows the diffs but proceeds anyway — so you always see what's being overwritten, even if you've chosen not to stop for it.
+Syncing and commit forms diff system files against the repo before syncing. If any system file has drifted from what the repo expects, dotsync stops, shows the diff, and warns. `--force` still shows the diffs but proceeds anyway — so you always see what's being overwritten, even if you've chosen not to stop for it. On `commit`, `--force` covers only the paths that commit named; see the drift section above.
 
 ### Why one command?
 

@@ -175,11 +175,11 @@
     <div class="commands">
       <div class="command">
         <code>dotsync</code>
-        <p>Sync repo to system. Shows diffs for any files that have drifted.</p>
+        <p>Sync repo to system, applying whatever other machines have published. Stops and shows a diff for any file that drifted here first.</p>
       </div>
       <div class="command">
         <code>dotsync commit &lt;scope&gt; -m "message" &lt;path&gt;...</code>
-        <p>Commit selected repo-relative paths to a scope branch, cascade merges through descendants, sync, and push. Use <code>--all</code> only when you intentionally want the whole working tree committed.</p>
+        <p>Commit selected home-relative paths to a scope branch, cascade merges through descendants, sync, and push. Omit the paths to commit every managed file this machine has changed.</p>
       </div>
     </div>
 
