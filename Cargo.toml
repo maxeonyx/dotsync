@@ -1,6 +1,6 @@
 [package]
 name = "dotsync"
-version = "0.3.15"
+version = "0.3.16"
 edition = "2021"
 description = "Agent-first dotfile sync with scope branches and merge cascades"
 license = "MIT"
@@ -13,6 +13,7 @@ gix = "0.80"
 jj-lib = "0.39"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+similar = { version = "3.1.2", default-features = false, features = ["text"] }
 thiserror = "2.0"
 tokio = { version = "1.44", features = ["macros", "rt"] }
 toml = "0.8"

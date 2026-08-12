@@ -12,6 +12,7 @@ use crate::config::{
     default_sync_state_relative_path, load_config, render_config, write_config, DotsyncConfig,
     DotsyncPaths,
 };
+use crate::drift::RecordedFromHome;
 use crate::error::{jj_error, DotsyncError};
 use crate::machine::{detect_machine, MachineIdentity};
 use crate::repo::{
@@ -19,7 +20,7 @@ use crate::repo::{
     PushReport,
 };
 use crate::scope_graph::ScopeGraph;
-use crate::sync::{sync_repo_to_home, SyncOptions, SyncReport};
+use crate::sync::{sync_repo_to_home, ForceScope, SyncReport};
 
 #[derive(Debug, Clone)]
 pub struct InitReport {
@@ -64,8 +65,8 @@ pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, 
     let push = push_scope_updates(paths).await?;
     let sync = sync_repo_to_home(
         paths,
-        SyncOptions { force: true },
-        &[],
+        ForceScope::Everything,
+        &RecordedFromHome::default(),
         Some(&current_scope),
     )
     .await?;

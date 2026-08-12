@@ -1,6 +1,7 @@
 use crate::UsageError;
 use dotsync::{DotsyncError, ErrorReport, FileDrift, PushReport};
 use serde_json::json;
+use similar::TextDiff;
 use std::path::Path;
 
 pub(crate) fn render_error_json(error: &ErrorReport) -> serde_json::Value {
@@ -9,6 +10,7 @@ pub(crate) fn render_error_json(error: &ErrorReport) -> serde_json::Value {
         "error": error.code,
         "message": error.message,
         "drifts": error.drifts.iter().map(render_drift_json).collect::<Vec<_>>(),
+        "forced_overwrites": error.forced_overwrites.iter().map(|path| display_path(path)).collect::<Vec<_>>(),
         "current_state": error.current_state,
     })
 }
@@ -25,8 +27,42 @@ pub(crate) fn render_drift_json(drift: &FileDrift) -> serde_json::Value {
     json!({
         "path": display_path(&drift.repo_path),
         "system_path": display_path(&drift.system_path),
-        "diff": drift.diff,
+        "state": drift.state.code(),
+        "reason": drift.state.reason(),
+        "diff": render_drift_diff(drift),
     })
+}
+
+/// A unified diff of what the repo holds against what home holds.
+///
+/// An absent side reads as empty, so a file deleted from home renders as its
+/// whole content removed rather than as nothing at all. Non-UTF-8 content has
+/// no line structure to diff, so it is reported rather than mangled.
+pub(crate) fn render_drift_diff(drift: &FileDrift) -> String {
+    let (Some(repo), Some(system)) = (
+        drift_side_text(drift.repo_bytes.as_deref()),
+        drift_side_text(drift.home_bytes.as_deref()),
+    ) else {
+        return "binary content differs".to_string();
+    };
+
+    let mut rendered = TextDiff::from_lines(&repo, &system)
+        .unified_diff()
+        .header("repo", "system")
+        .to_string();
+    // Every caller prints this as one block with `eprintln!`, so the diff's own
+    // trailing newline would show up as a blank line.
+    if rendered.ends_with('\n') {
+        rendered.pop();
+    }
+    rendered
+}
+
+fn drift_side_text(bytes: Option<&[u8]>) -> Option<String> {
+    match bytes {
+        None => Some(String::new()),
+        Some(bytes) => String::from_utf8(bytes.to_vec()).ok(),
+    }
 }
 
 pub(crate) fn render_error_human(error: &DotsyncError) -> String {
@@ -176,6 +212,28 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 &steps.iter().map(String::as_str).collect::<Vec<_>>(),
             )
         }
+        DotsyncError::StaleCommitPaths { scope, refused } => render_structured_error(
+            if refused.len() == 1 {
+                "cannot commit a file this machine has not changed"
+            } else {
+                "cannot commit files this machine has not changed"
+            },
+            "Dotsync records the home files you name onto a scope branch and cascades them to every machine sharing it. Plain `dotsync` goes the other way, writing what the scopes hold back into home.",
+            "This commit flow reads each path you named across three sides: what dotsync last synced to this machine, what is in home now, and what the scopes hold now.",
+            "It expects the paths you name to hold a change you made in home since the last sync.",
+            error_report
+                .current_state
+                .as_deref()
+                .unwrap_or(&error_report.message),
+            "Recording these would put older bytes back on the scope and cascade them, silently reverting whoever published the change that is already there.",
+            &[
+                "run `dotsync` to bring this machine up to date; the incoming change is written into home, and an incoming deletion removes the file.",
+                "then edit the file in home if you still want a change of your own, and commit it. To bring back a file another machine deleted, recreate it in home after syncing and commit that.",
+                &format!(
+                    "if you really do mean to overwrite the incoming change with what is in home, rerun with `--force`: `dotsync commit {scope} -m \"message\" --force -- <paths...>`. On `commit`, `--force` applies only to the paths you name."
+                ),
+            ],
+        ),
         DotsyncError::InvalidScope { .. } => render_structured_error(
             "invalid scope",
             "Dotsync stores dotfiles in a scope DAG so shared config can live on shared ancestor scopes and machine-specific config can stay isolated on leaf scopes.",
@@ -240,6 +298,26 @@ pub(crate) fn render_structured_error(
     )
 }
 
+/// What a run overwrote under `--force`, said out loud. A forced overwrite is
+/// the one thing a run can do that discards somebody else's work, so both
+/// exits report it: the run that stopped afterwards, and the run that
+/// finished and left the revert standing on the remote.
+pub(crate) fn forced_overwrite_notes(forced_overwrites: &[std::path::PathBuf]) -> Vec<String> {
+    if forced_overwrites.is_empty() {
+        return Vec::new();
+    }
+    let mut notes = vec![format!(
+        "dotsync: recorded {} file(s) over an incoming change, because you passed `--force`",
+        forced_overwrites.len()
+    )];
+    notes.extend(
+        forced_overwrites
+            .iter()
+            .map(|path| format!("- {}", path.display())),
+    );
+    notes
+}
+
 /// Notes printed to stderr alongside a successful run: what was overwritten,
 /// and what did not reach the remote. `push` is `None` only for commands that
 /// do not publish at all, so a publishing command cannot quietly omit this.
@@ -290,25 +368,22 @@ fn notes_for_drifts(drifts: &[FileDrift]) -> Vec<String> {
         "dotsync: overwrote {} drifted file(s)",
         drifts.len()
     )];
-    notes.extend(drifts.iter().flat_map(|drift| {
-        [
-            format!("- {}", drift.repo_path.display()),
-            drift.diff.clone(),
-        ]
-    }));
+    notes.extend(drifts.iter().flat_map(render_drift_human));
     notes
 }
 
 pub(crate) fn render_drifts_human(drifts: &[FileDrift]) -> Vec<String> {
-    drifts
-        .iter()
-        .flat_map(|drift| {
-            [
-                format!("- {}", drift.repo_path.display()),
-                drift.diff.clone(),
-            ]
-        })
-        .collect()
+    drifts.iter().flat_map(render_drift_human).collect()
+}
+
+/// The path, why it is drift, and the diff. Naming the reason matters when
+/// more than home moved: "deleted here" and "deleted here, and changed in the
+/// repo on another machine" call for different resolutions.
+fn render_drift_human(drift: &FileDrift) -> [String; 2] {
+    [
+        format!("- {} ({})", drift.repo_path.display(), drift.state.reason()),
+        render_drift_diff(drift),
+    ]
 }
 
 pub(crate) fn display_path(path: &Path) -> String {

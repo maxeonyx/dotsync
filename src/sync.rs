@@ -1,31 +1,75 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId;
-use jj_lib::repo::Repo as _;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{internal_repo_paths, load_config, DotsyncConfig, DotsyncPaths};
+use crate::config::{load_config, DotsyncConfig, DotsyncPaths};
+use crate::drift::{classify_home_against_scope, ClassifiedPath, FileState, RecordedFromHome};
 use crate::error::DotsyncError;
 use crate::machine::detect_machine;
 use crate::repo::{
-    collect_managed_tree_entries, fetch_origin, load_repo_direct, load_scope_commit,
-    pending_push_scopes, push_scope_updates, read_tree_entry_bytes, PushReport,
+    fetch_origin, load_repo_direct, pending_push_scopes, push_scope_updates, PushReport,
 };
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SyncOptions {
-    pub force: bool,
+/// Which drifted home files a run may overwrite.
+///
+/// `--force` answers one question — "overwrite the drift?" — but the commands
+/// that ask it do not all have the same thing to scope the answer to. Plain
+/// `dotsync` and `continue` name no paths, so their `--force` is necessarily
+/// blanket. `commit` names paths, so its `--force` rides that same list and
+/// reaches nothing else. `init` and `abort` never really ask: `init` has
+/// nothing of yours to overwrite and `abort` exists to discard home edits, so
+/// both always overwrite and both refuse the flag.
+#[derive(Debug, Clone, Default)]
+pub enum ForceScope {
+    /// Any drift stops the run.
+    #[default]
+    Nothing,
+    /// Every drifted file.
+    Everything,
+    /// Only these paths; drift anywhere else still stops the run.
+    Paths(BTreeSet<PathBuf>),
 }
 
+impl ForceScope {
+    pub fn from_paths(paths: &[PathBuf]) -> Self {
+        if paths.is_empty() {
+            Self::Nothing
+        } else {
+            Self::Paths(paths.iter().cloned().collect())
+        }
+    }
+
+    fn allows(&self, relative: &Path) -> bool {
+        match self {
+            Self::Nothing => false,
+            Self::Everything => true,
+            Self::Paths(paths) => paths.contains(relative),
+        }
+    }
+}
+
+/// One managed path whose home content is not what the repo says it should be.
+///
+/// This carries the two sides rather than a rendered diff: a drift is a fact
+/// about content, and how it reads — unified diff, one line in `status`, a JSON
+/// field — is a decision for whichever edge is reporting it.
 #[derive(Debug, Clone)]
 pub struct FileDrift {
     pub repo_path: PathBuf,
     pub system_path: PathBuf,
-    pub diff: String,
+    /// Which of the three sides moved. The remedy depends on it, so every
+    /// rendering of a drift can say so rather than leaving the reader to
+    /// infer it from the diff.
+    pub state: FileState,
+    /// What the repo holds, or `None` when the repo has no such file.
+    pub repo_bytes: Option<Vec<u8>>,
+    /// What home holds, or `None` when the file was deleted from home.
+    pub home_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -57,7 +101,7 @@ pub(crate) struct SyncState {
 
 pub async fn sync(
     paths: &DotsyncPaths,
-    options: SyncOptions,
+    force: ForceScope,
 ) -> Result<SyncCommandReport, DotsyncError> {
     let repo = load_repo_direct(paths).await?;
     let _repo = fetch_origin(repo).await?;
@@ -71,7 +115,7 @@ pub async fn sync(
         },
         None => push_scope_updates(paths).await?,
     };
-    let sync = sync_repo_to_home(paths, options, &[], None).await?;
+    let sync = sync_repo_to_home(paths, force, &RecordedFromHome::default(), None).await?;
     Ok(SyncCommandReport { sync, push })
 }
 
@@ -97,75 +141,10 @@ pub(crate) fn resolve_current_scope(
     }
 }
 
-pub(crate) async fn detect_drifts(
+fn write_home_file(
     paths: &DotsyncPaths,
-    repo: &dyn jj_lib::repo::Repo,
-    managed_entries: &BTreeMap<PathBuf, jj_lib::backend::TreeValue>,
-) -> Result<Vec<FileDrift>, DotsyncError> {
-    let mut drifts = Vec::new();
-    for (relative, value) in managed_entries {
-        let system_path = paths.home_dir.join(relative);
-        let repo_bytes = read_tree_entry_bytes(repo.store(), relative, value).await?;
-        let system_bytes = match fs::read(&system_path) {
-            Ok(bytes) => bytes,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(source) => {
-                return Err(DotsyncError::Io {
-                    path: system_path.clone(),
-                    source,
-                })
-            }
-        };
-        if repo_bytes != system_bytes {
-            drifts.push(FileDrift {
-                repo_path: relative.clone(),
-                system_path: system_path.clone(),
-                diff: render_diff(&repo_bytes, &system_bytes),
-            });
-        }
-    }
-    Ok(drifts)
-}
-
-fn render_diff(repo_bytes: &[u8], system_bytes: &[u8]) -> String {
-    match (
-        String::from_utf8(repo_bytes.to_vec()),
-        String::from_utf8(system_bytes.to_vec()),
-    ) {
-        (Ok(repo), Ok(system)) => render_text_diff(&repo, &system),
-        _ => "binary content differs".to_string(),
-    }
-}
-
-fn render_text_diff(repo: &str, system: &str) -> String {
-    let repo_lines = repo.lines().collect::<Vec<_>>();
-    let system_lines = system.lines().collect::<Vec<_>>();
-    let mut lines = vec!["--- repo".to_string(), "+++ system".to_string()];
-    let max_len = repo_lines.len().max(system_lines.len());
-
-    for index in 0..max_len {
-        match (repo_lines.get(index), system_lines.get(index)) {
-            (Some(repo_line), Some(system_line)) if repo_line == system_line => {
-                lines.push(format!(" {repo_line}"));
-            }
-            (Some(repo_line), Some(system_line)) => {
-                lines.push(format!("-{repo_line}"));
-                lines.push(format!("+{system_line}"));
-            }
-            (Some(repo_line), None) => lines.push(format!("-{repo_line}")),
-            (None, Some(system_line)) => lines.push(format!("+{system_line}")),
-            (None, None) => unreachable!("index is bounded by max line length"),
-        }
-    }
-
-    lines.join("\n")
-}
-
-pub(crate) async fn copy_repo_file_to_home(
-    paths: &DotsyncPaths,
-    repo: &dyn jj_lib::repo::Repo,
     relative: &Path,
-    value: &jj_lib::backend::TreeValue,
+    contents: &[u8],
 ) -> Result<(), DotsyncError> {
     let system_path = paths.home_dir.join(relative);
     if let Some(parent) = system_path.parent() {
@@ -174,17 +153,21 @@ pub(crate) async fn copy_repo_file_to_home(
             source,
         })?;
     }
-    let contents = read_tree_entry_bytes(repo.store(), relative, value).await?;
     fs::write(&system_path, contents).map_err(|source| DotsyncError::Io {
         path: system_path,
         source,
     })
 }
 
+/// Writes the machine scope's tip into home, stopping first on anything home
+/// holds that dotsync neither put there nor has a record of.
+///
+/// `recorded_from_home` is empty for every caller but the two that have just
+/// written home content into the repo — see `RecordedFromHome`.
 pub(crate) async fn sync_repo_to_home(
     paths: &DotsyncPaths,
-    options: SyncOptions,
-    expected_repo_changes: &[PathBuf],
+    force: ForceScope,
+    recorded_from_home: &RecordedFromHome,
     machine_scope_hint: Option<&str>,
 ) -> Result<SyncReport, DotsyncError> {
     let config = load_config(paths).await?;
@@ -195,60 +178,72 @@ pub(crate) async fn sync_repo_to_home(
         .as_ref()
         .filter(|state| config.graph.parents.contains_key(&state.machine_scope));
     let current_scope = resolve_current_scope(&config, sync_state.as_ref(), machine_scope_hint)?;
-    let current_commit = load_scope_commit(repo.as_ref(), &current_scope)?;
-    let internal_paths = internal_repo_paths(&config);
-    let repo_entries = collect_managed_tree_entries(&current_commit.tree(), &internal_paths)?;
-    let drift_entries = if let Some(state) = &valid_sync_state {
-        match repo.store().get_commit(&state.last_synced_revision) {
-            Ok(previous_commit) => {
-                collect_managed_tree_entries(&previous_commit.tree(), &internal_paths)?
-            }
-            Err(_) => repo_entries.clone(),
-        }
-    } else {
-        repo_entries.clone()
-    };
-    let expected_repo_changes: BTreeSet<&PathBuf> = expected_repo_changes.iter().collect();
-    let drifts = detect_drifts(paths, repo.as_ref(), &drift_entries)
-        .await?
-        .into_iter()
-        .filter(|drift| !expected_repo_changes.contains(&drift.repo_path))
+    let classification = classify_home_against_scope(
+        paths,
+        repo.as_ref(),
+        &config,
+        valid_sync_state,
+        &current_scope,
+        &BTreeSet::new(),
+        recorded_from_home,
+    )
+    .await?;
+
+    let drifts = classification
+        .paths
+        .iter()
+        .filter(|(_, path)| path.state.is_drift())
+        .map(|(relative, path)| file_drift(paths, relative, path))
         .collect::<Vec<_>>();
-    if !drifts.is_empty() && !options.force {
+    let (overwritten, blocking): (Vec<FileDrift>, Vec<FileDrift>) = drifts
+        .into_iter()
+        .partition(|drift| force.allows(&drift.repo_path));
+    if !blocking.is_empty() {
         return Err(DotsyncError::DriftDetected {
-            count: drifts.len(),
-            drifts,
+            count: blocking.len(),
+            drifts: blocking,
         });
     }
+    let drifts = overwritten;
 
-    let mut synced_paths = Vec::with_capacity(repo_entries.len());
-    for (relative, value) in &repo_entries {
-        copy_repo_file_to_home(paths, repo.as_ref(), relative, value).await?;
-        synced_paths.push(relative.clone());
-    }
-
-    if let Some(state) = &valid_sync_state {
-        // If last_synced_revision doesn't exist in this repo, skip deletion
-        // (stale state from a different repo instance).
-        if let Ok(previous_commit) = repo.store().get_commit(&state.last_synced_revision) {
-            let previous_entries =
-                collect_managed_tree_entries(&previous_commit.tree(), &internal_paths)?;
-            for removed_path in previous_entries
-                .keys()
-                .filter(|path| !repo_entries.contains_key(*path))
-            {
-                remove_home_path(paths, removed_path)?;
+    // The tip is the source of truth for every managed path: if it holds the
+    // file, home gets those bytes; if it once held the file and no longer does,
+    // home loses it. The classification above already decided whether dotsync
+    // is allowed to get this far, so this loop needs no cases of its own.
+    let mut synced_paths = Vec::with_capacity(classification.tip_entries.len());
+    for (relative, path) in &classification.paths {
+        match &path.tip_bytes {
+            Some(tip_bytes) => {
+                if path.home_bytes.as_deref() != Some(tip_bytes.as_slice()) {
+                    write_home_file(paths, relative, tip_bytes)?;
+                }
+                synced_paths.push(relative.clone());
             }
+            // Only a path dotsync knows it wrote may be taken away again. That
+            // is what the last-synced side is for, and why a machine with no
+            // usable sync state deletes nothing.
+            None if path.last_synced_bytes.is_some() => remove_home_path(paths, relative)?,
+            None => {}
         }
     }
 
-    save_sync_state(paths, &config, &current_scope, current_commit.id())?;
+    save_sync_state(paths, &config, &current_scope, classification.tip.id())?;
 
     Ok(SyncReport {
         current_scope,
         synced_paths,
         drifts,
     })
+}
+
+fn file_drift(paths: &DotsyncPaths, relative: &Path, path: &ClassifiedPath) -> FileDrift {
+    FileDrift {
+        repo_path: relative.to_path_buf(),
+        system_path: paths.home_dir.join(relative),
+        state: path.state,
+        repo_bytes: path.tip_bytes.clone(),
+        home_bytes: path.home_bytes.clone(),
+    }
 }
 
 pub(crate) fn load_sync_state(
