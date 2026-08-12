@@ -82,7 +82,7 @@ pub async fn sync(
         },
         None => push_scope_updates(paths).await?,
     };
-    let sync = sync_repo_to_home(paths, options, &[], None).await?;
+    let sync = sync_repo_to_home(paths, options, None).await?;
     Ok(SyncCommandReport { sync, push })
 }
 
@@ -129,7 +129,6 @@ fn write_home_file(
 pub(crate) async fn sync_repo_to_home(
     paths: &DotsyncPaths,
     options: SyncOptions,
-    expected_repo_changes: &[PathBuf],
     machine_scope_hint: Option<&str>,
 ) -> Result<SyncReport, DotsyncError> {
     let config = load_config(paths).await?;
@@ -150,13 +149,10 @@ pub(crate) async fn sync_repo_to_home(
     )
     .await?;
 
-    let expected_repo_changes: BTreeSet<&PathBuf> = expected_repo_changes.iter().collect();
     let drifts = classification
         .paths
         .iter()
-        .filter(|(relative, path)| {
-            path.state.is_drift() && !expected_repo_changes.contains(relative)
-        })
+        .filter(|(_, path)| path.state.is_drift())
         .map(|(relative, path)| file_drift(paths, relative, path))
         .collect::<Vec<_>>();
     if !drifts.is_empty() && !options.force {

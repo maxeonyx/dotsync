@@ -11,7 +11,7 @@
     "dotsync::user_flows$a_sync_interrupted_before_saving_state_is_not_drift_on_the_next_run": "passing",
     "dotsync::user_flows$abort_paused_cascade_restores_non_conflicting_selected_paths": "passing",
     "dotsync::user_flows$abort_paused_cascade_restores_pre_pause_state_and_clears_pause": "passing",
-    "dotsync::user_flows$abort_restores_a_drifted_file_outside_the_paused_selection": "pending",
+    "dotsync::user_flows$abort_restores_a_drifted_file_outside_the_paused_selection": "passing",
     "dotsync::user_flows$an_untracked_home_file_is_not_overwritten_by_an_incoming_add": "passing",
     "dotsync::user_flows$clap_usage_errors_emit_the_json_contract": "passing",
     "dotsync::user_flows$commit_cascades_through_all_descendants": "passing",

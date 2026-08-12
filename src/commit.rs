@@ -53,8 +53,6 @@ struct PausedCascadeState {
     description: String,
     #[serde(default)]
     original_scope_commit_ids: BTreeMap<String, String>,
-    #[serde(default)]
-    abort_restore_paths: Vec<PathBuf>,
     /// The conflicted files, and what each held in home when the cascade
     /// paused. `continue` resolves exactly these paths, and refuses when they
     /// have not changed — see `unresolved_conflicted_files`. Defaulted rather
@@ -133,7 +131,6 @@ pub async fn commit_and_sync(
     let sync_state = crate::sync::load_sync_state(paths, &config)?;
     let machine_scope = crate::sync::resolve_current_scope(&config, sync_state.as_ref(), None)?;
 
-    let old_machine_commit = load_scope_commit(repo.as_ref(), &machine_scope)?;
     let pre_fetch_target_entries =
         load_scope_entries(pre_fetch_repo.as_ref(), &options.scope, &internal_paths)?;
     let target_entries = load_scope_entries(repo.as_ref(), &options.scope, &internal_paths)?;
@@ -256,7 +253,6 @@ pub async fn commit_and_sync(
                         .collect(),
                     description: options.message,
                     original_scope_commit_ids: original_scope_commit_ids.clone(),
-                    abort_restore_paths: selected_paths.clone(),
                     paused_home_contents: read_home_contents(paths, &conflicted_paths)?,
                 },
             )?;
@@ -324,7 +320,6 @@ pub async fn commit_and_sync(
                     remaining_steps,
                     description: cascade_command.description,
                     original_scope_commit_ids,
-                    abort_restore_paths: selected_paths.clone(),
                     paused_home_contents: read_home_contents(paths, &conflicted_paths)?,
                 },
             )?;
@@ -334,14 +329,6 @@ pub async fn commit_and_sync(
             });
         }
     }
-
-    let expected_changes = expected_machine_changes(
-        tx.repo_mut(),
-        &old_machine_commit,
-        &scope_heads.require(&machine_scope)?,
-        &internal_paths,
-    )
-    .await?;
 
     tx.commit("dotsync: commit and cascade")
         .await
@@ -357,7 +344,6 @@ pub async fn commit_and_sync(
         SyncOptions {
             force: options.force,
         },
-        &expected_changes,
         Some(&machine_scope),
     )
     .await?;
@@ -778,39 +764,6 @@ async fn apply_home_path_to_tree(
     Ok(())
 }
 
-async fn expected_machine_changes(
-    repo: &dyn jj_lib::repo::Repo,
-    old_machine_commit: &jj_lib::commit::Commit,
-    new_machine_commit: &jj_lib::commit::Commit,
-    internal_paths: &std::collections::BTreeSet<PathBuf>,
-) -> Result<Vec<PathBuf>, DotsyncError> {
-    let old_entries = collect_managed_tree_entries(&old_machine_commit.tree(), internal_paths)?;
-    let new_entries = collect_managed_tree_entries(&new_machine_commit.tree(), internal_paths)?;
-    let mut all_paths = old_entries
-        .keys()
-        .chain(new_entries.keys())
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut changed = Vec::new();
-
-    for path in all_paths.iter() {
-        let old_bytes = match old_entries.get(path) {
-            Some(value) => Some(read_tree_entry_bytes(repo.store(), path, value).await?),
-            None => None,
-        };
-        let new_bytes = match new_entries.get(path) {
-            Some(value) => Some(read_tree_entry_bytes(repo.store(), path, value).await?),
-            None => None,
-        };
-        if old_bytes != new_bytes {
-            changed.push(path.clone());
-        }
-    }
-
-    all_paths.clear();
-    Ok(changed)
-}
-
 /// Home contents of the conflicted files, recorded when a cascade pauses so
 /// `continue` can tell a resolution from an untouched file.
 fn read_home_contents(
@@ -868,8 +821,6 @@ pub async fn continue_after_conflict(
     }
     let repo = load_repo_direct(paths).await?;
     let config = load_config(paths).await?;
-    let internal_paths = internal_repo_paths(&config);
-    let old_machine_commit = load_scope_commit(repo.as_ref(), &state.machine_scope)?;
     let mut tx = repo.start_transaction();
     let mut scope_heads = ScopeHeads::load_existing(tx.repo_mut().base_repo(), &config.graph)?;
     let parent_commits = state
@@ -965,7 +916,6 @@ pub async fn continue_after_conflict(
                     remaining_steps,
                     description: state.description,
                     original_scope_commit_ids: state.original_scope_commit_ids,
-                    abort_restore_paths: state.abort_restore_paths,
                     paused_home_contents: read_home_contents(paths, &conflicted_paths)?,
                 },
             )?;
@@ -976,13 +926,6 @@ pub async fn continue_after_conflict(
         }
     }
 
-    let expected_changes = expected_machine_changes(
-        tx.repo_mut(),
-        &old_machine_commit,
-        &scope_heads.require(&state.machine_scope)?,
-        &internal_paths,
-    )
-    .await?;
     tx.commit("dotsync: continue cascade")
         .await
         .map_err(|err| DotsyncError::Jj {
@@ -990,20 +933,11 @@ pub async fn continue_after_conflict(
         })?;
     remove_paused_cascade_state(paths)?;
     let push = push_scope_updates(paths).await?;
-    let sync = crate::sync::sync_repo_to_home(
-        paths,
-        options,
-        &expected_changes,
-        Some(&state.machine_scope),
-    )
-    .await?;
+    let sync = crate::sync::sync_repo_to_home(paths, options, Some(&state.machine_scope)).await?;
     Ok(ContinueReport { sync, push })
 }
 
-pub async fn abort_paused_cascade(
-    paths: &DotsyncPaths,
-    options: SyncOptions,
-) -> Result<AbortReport, DotsyncError> {
+pub async fn abort_paused_cascade(paths: &DotsyncPaths) -> Result<AbortReport, DotsyncError> {
     let state = load_paused_cascade_state(paths)?;
     if state.original_scope_commit_ids.is_empty() {
         return Err(DotsyncError::Jj {
@@ -1027,15 +961,18 @@ pub async fn abort_paused_cascade(
         })?;
     remove_paused_cascade_state(paths)?;
 
-    let restore_paths = if state.abort_restore_paths.is_empty() {
-        state.paused_home_contents.keys().cloned().collect()
-    } else {
-        state.abort_restore_paths
-    };
-
-    let sync =
-        crate::sync::sync_repo_to_home(paths, options, &restore_paths, Some(&state.machine_scope))
-            .await?;
+    // Abort is a full sync of home back to the machine scope's pre-pause tip,
+    // not a selective restore: the home edit that started the cascade is
+    // exactly what abort exists to discard, so it cannot also be a reason to
+    // refuse. Drift outside the paused selection goes the same way, which is
+    // what DESIGN.md's "reverts all the config files" says and what the old
+    // selective restore quietly did not do.
+    let sync = crate::sync::sync_repo_to_home(
+        paths,
+        SyncOptions { force: true },
+        Some(&state.machine_scope),
+    )
+    .await?;
 
     Ok(AbortReport {
         aborted_scope: state.paused_scope,

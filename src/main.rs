@@ -95,9 +95,7 @@ enum Action {
     Continue {
         force: bool,
     },
-    Abort {
-        force: bool,
-    },
+    Abort,
     Status,
     Diff,
     View {
@@ -286,7 +284,10 @@ impl Action {
                 Ok(Self::Init { remote_url })
             }
             Some(Command::Continue) => Ok(Self::Continue { force: cli.force }),
-            Some(Command::Abort) => Ok(Self::Abort { force: cli.force }),
+            Some(Command::Abort) => {
+                reject_force_before(cli.force, "abort")?;
+                Ok(Self::Abort)
+            }
             Some(Command::Status) => {
                 reject_force_before(cli.force, "status")?;
                 Ok(Self::Status)
@@ -361,7 +362,7 @@ async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
         } => run_commit(scope, message, force, selection).await,
         Action::Init { remote_url } => run_init(remote_url).await,
         Action::Continue { force } => run_continue(force).await,
-        Action::Abort { force } => run_abort(force).await,
+        Action::Abort => run_abort().await,
         Action::Status => run_status().await,
         Action::Diff => run_diff().await,
         Action::View { scope, file } => run_view(scope, file).await,
@@ -372,15 +373,18 @@ async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
 /// one message explains it wherever it means nothing. Declaring it per command
 /// instead would hand the commands that reject it clap's generic 'unexpected
 /// argument' - and on `init`, clap's 'to pass --force as a value' tip, which
-/// would make the flag the remote URL. Commands that never write home have no
-/// meaning for it, and silently accepting it there would teach an agent that
-/// retrying with `--force` could change the answer.
+/// would make the flag the remote URL. A command that never chooses whether to
+/// overwrite drifted home files has no meaning for it, and silently accepting
+/// it there would teach an agent that retrying with `--force` could change the
+/// answer. `init` and `abort` write home but never make that choice: `init`
+/// has nothing of yours to overwrite, and `abort` exists precisely to discard
+/// the home edit that started the cascade.
 fn reject_force_before(force: bool, command: &str) -> Result<(), UsageError> {
     if !force {
         return Ok(());
     }
     Err(usage_error(&format!(
-        "`--force` has no meaning for `{command}`; it only affects commands that write files into your home directory: plain `dotsync`, `commit`, `continue`, and `abort`"
+        "`--force` has no meaning for `{command}`; it only decides whether to overwrite drifted files in your home directory, which is a choice made by plain `dotsync`, `commit`, and `continue`"
     )))
 }
 
@@ -459,9 +463,9 @@ async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
     }))
 }
 
-async fn run_abort(force: bool) -> Result<CliOutput, DotsyncError> {
+async fn run_abort() -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let report = abort_paused_cascade(&paths, SyncOptions { force }).await?;
+    let report = abort_paused_cascade(&paths).await?;
     Ok(CliOutput::Success(SuccessOutput {
         json: json!({
             "status": "ok",

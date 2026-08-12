@@ -1199,9 +1199,20 @@ fn abort_paused_cascade_restores_pre_pause_state_and_clears_pause() {
 
     let aborted = machine_b.run("dotsync abort");
     assert!(aborted.status.success(), "{}", render_output(&aborted));
+    // Abort reverts home, so it says what it reverted: the edit that started
+    // the cascade is gone, and that is the point of the command.
     assert_stderr_snapshot(
         &aborted,
-        "dotsync: aborted cascade at linux and synced 2 file(s)\n",
+        "\
+dotsync: overwrote 1 drifted file(s)
+- .config/app.conf (edited here since the last sync)
+--- repo
++++ system
+@@ -1 +1 @@
+-setting = \"linux\"
++setting = \"all\"
+dotsync: aborted cascade at linux and synced 2 file(s)
+",
     );
 
     assert_eq!(bookmark_revision(&machine_b, "all"), all_before_pause);
@@ -2845,6 +2856,8 @@ fn force_is_refused_with_one_message_wherever_it_is_meaningless() {
         "dotsync --force view",
         "dotsync init --force",
         "dotsync --force init",
+        "dotsync abort --force",
+        "dotsync --force abort",
     ] {
         let output = machine.run(command);
         assert_eq!(
@@ -2860,7 +2873,7 @@ fn force_is_refused_with_one_message_wherever_it_is_meaningless() {
         assert_stderr_snapshot(
             &output,
             &format!(
-                "dotsync: `--force` has no meaning for `{name}`; it only affects commands that write files into your home directory: plain `dotsync`, `commit`, `continue`, and `abort`\n"
+                "dotsync: `--force` has no meaning for `{name}`; it only decides whether to overwrite drifted files in your home directory, which is a choice made by plain `dotsync`, `commit`, and `continue`\n"
             ),
         );
     }

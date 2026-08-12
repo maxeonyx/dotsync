@@ -62,13 +62,7 @@ pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, 
     };
 
     let push = push_scope_updates(paths).await?;
-    let sync = sync_repo_to_home(
-        paths,
-        SyncOptions { force: true },
-        &[],
-        Some(&current_scope),
-    )
-    .await?;
+    let sync = sync_repo_to_home(paths, SyncOptions { force: true }, Some(&current_scope)).await?;
 
     Ok(InitReport { sync, push })
 }
