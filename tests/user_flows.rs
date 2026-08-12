@@ -1289,7 +1289,10 @@ fn continue_without_pause_returns_clear_error() {
         "continue without a paused cascade should return a normal command error\n{}",
         render_output(&continue_output)
     );
-    assert_stderr_snapshot(&continue_output, "dotsync: no paused cascade to continue\n");
+    assert_stderr_snapshot(
+        &continue_output,
+        "dotsync: there is no paused cascade on this machine\n",
+    );
 }
 
 #[test]

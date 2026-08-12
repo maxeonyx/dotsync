@@ -1,6 +1,6 @@
 use crate::UsageError;
 use dotsync::{
-    DotsyncError, ErrorReport, FileDrift, PushReport, RefusedCommitPath, UnreachableRemote,
+    DotsyncError, ErrorReport, FileDrift, PushReport, SkippedCommitPath, UnreachableRemote,
 };
 use serde_json::json;
 use similar::TextDiff;
@@ -423,7 +423,7 @@ fn listed(lines: impl ExactSizeIterator<Item = String>) -> Vec<String> {
 /// A bulk selection that recorded less than it matched has to say so: an agent
 /// that names a directory and reads "committed" would otherwise believe a
 /// change reached the scope when another machine's version is still there.
-pub(crate) fn skipped_path_notes(skipped: &[RefusedCommitPath]) -> Vec<String> {
+pub(crate) fn skipped_path_notes(skipped: &[SkippedCommitPath]) -> Vec<String> {
     if skipped.is_empty() {
         return Vec::new();
     }

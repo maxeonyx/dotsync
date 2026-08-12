@@ -22,7 +22,9 @@ use crate::cascade::{
 };
 use crate::config::{internal_repo_paths, DotsyncPaths, ALL_SCOPE, DOTSYNC_CONFIG_RELATIVE_PATH};
 use crate::drift::{classify_home_against_scope, read_home_bytes, FileState, RecordedFromHome};
-use crate::error::{CommitPathProblem, DotsyncError, RefusedCommitPath, RejectedCommitPath};
+use crate::error::{
+    CommitPathProblem, DotsyncError, RefusedCommitPath, RejectedCommitPath, SkippedCommitPath,
+};
 use crate::repo::{
     collect_managed_tree_entries, load_scope_commit, push_scope_updates, read_tree_entry_bytes,
     PushReport,
@@ -83,7 +85,7 @@ pub struct CommitReport {
     /// Paths a named directory matched that this commit left alone. Empty for
     /// every other shape of commit: a bare commit selects what changed rather
     /// than filtering a list, and a path named exactly is refused out loud.
-    pub skipped: Vec<RefusedCommitPath>,
+    pub skipped: Vec<SkippedCommitPath>,
     /// Paths recorded on the authority of `--force` rather than on the
     /// authority of a change made on this machine. Reported because a forced
     /// commit is the one shape of commit that can discard someone else's work,
@@ -97,7 +99,7 @@ impl CommitReport {
     /// A commit that found nothing to add. It creates no history of its own,
     /// but it still names the scope it targeted and reports what it published
     /// on behalf of earlier runs.
-    fn nothing_to_commit(scope: &str, skipped: Vec<RefusedCommitPath>, push: PushReport) -> Self {
+    fn nothing_to_commit(scope: &str, skipped: Vec<SkippedCommitPath>, push: PushReport) -> Self {
         Self {
             committed_scope: scope.to_string(),
             // A commit that records nothing tracks nothing.
@@ -448,7 +450,7 @@ struct Selection {
     /// because home holds no change of this machine's own at them. Reported,
     /// never silent: a bulk selection that quietly recorded less than it
     /// matched would read to an agent as a complete commit.
-    skipped: Vec<RefusedCommitPath>,
+    skipped: Vec<SkippedCommitPath>,
     /// The paths `--force` covers. These skip the merge below entirely: the
     /// point of forcing is that home wins here whatever the repo says.
     forced_paths: Vec<PathBuf>,
@@ -520,7 +522,7 @@ async fn select_changes_to_record(
                 // `--force` is the explicit claim that home wins for what this
                 // command named, so it reaches under a named directory too.
                 if !options.force && !selection.named.contains(relative) && state.blocks_commit() {
-                    skipped.push(RefusedCommitPath {
+                    skipped.push(SkippedCommitPath {
                         path: relative.clone(),
                         state,
                     });

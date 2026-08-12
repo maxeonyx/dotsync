@@ -30,8 +30,25 @@ pub struct RejectedCommitPath {
 /// whose content is not this machine's to record. Structured so that one run
 /// reports every such path, and so the explanation can name what actually
 /// happened to the file.
+///
+/// Refused, not skipped: this is a path the command named exactly, so dotsync
+/// stops and argues rather than quietly deciding for the user. The paths a
+/// bulk selection steps around are `SkippedCommitPath`, and the difference
+/// between the two is the whole of what naming a path exactly buys you.
 #[derive(Debug, Clone)]
 pub struct RefusedCommitPath {
+    pub path: PathBuf,
+    pub state: FileState,
+}
+
+/// One path a named directory matched that the commit left out, because home
+/// holds no change of this machine's own at it.
+///
+/// Not an error and not a refusal: the run succeeds, and this is what it has
+/// to say about what it did not do — so it is reported alongside the result
+/// rather than instead of one.
+#[derive(Debug, Clone)]
+pub struct SkippedCommitPath {
     pub path: PathBuf,
     pub state: FileState,
 }
@@ -209,7 +226,9 @@ pub enum DotsyncError {
     },
     #[error("paused cascade at scope `{scope}` must be resolved before starting another commit")]
     PausedCascadeInProgress { scope: String },
-    #[error("no paused cascade to continue")]
+    /// Raised by `continue` and by `abort`, so it says what is not there
+    /// rather than what the caller wanted to do with it.
+    #[error("there is no paused cascade on this machine")]
     NoPausedCascade,
     #[error("repo already exists at {path}")]
     RepoAlreadyExists { path: PathBuf },
