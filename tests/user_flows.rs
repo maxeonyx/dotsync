@@ -4438,3 +4438,53 @@ fn a_machine_that_lost_its_sync_state_still_syncs() {
     );
     assert_eq!(machine.read_file(".bashrc"), "export DOTSYNC=repo\n");
 }
+
+#[test]
+fn a_concurrent_merge_leaves_no_drift_behind() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    machine_a.write_file(
+        ".config/app.conf",
+        "alpha = 1\nbeta = 2\ngamma = 3\ndelta = 4\nepsilon = 5\n",
+    );
+    let seed = machine_a.run("dotsync commit all -m 'seed app.conf' -- .config/app.conf");
+    assert!(seed.status.success(), "{}", render_output(&seed));
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+
+    // Line-disjoint edits, so the merge succeeds. B is behind when it commits.
+    machine_a.write_file(
+        ".config/app.conf",
+        "alpha = 100\nbeta = 2\ngamma = 3\ndelta = 4\nepsilon = 5\n",
+    );
+    let commit_a = machine_a.run("dotsync commit all -m 'a changes alpha' -- .config/app.conf");
+    assert!(commit_a.status.success(), "{}", render_output(&commit_a));
+
+    machine_b.write_file(
+        ".config/app.conf",
+        "alpha = 1\nbeta = 2\ngamma = 3\ndelta = 4\nepsilon = 500\n",
+    );
+    let commit_b = machine_b.run("dotsync commit all -m 'b changes epsilon' -- .config/app.conf");
+    assert!(
+        commit_b.status.success(),
+        "a commit whose merge succeeded must not then stop on its own result\n{}",
+        render_output(&commit_b)
+    );
+
+    // Home holds only B's side until the commit's own sync writes the merge
+    // down. That sync is the one step that can do it, so it has to run.
+    let merged = "alpha = 100\nbeta = 2\ngamma = 3\ndelta = 4\nepsilon = 500\n";
+    assert_eq!(
+        machine_b.read_file(".config/app.conf"),
+        merged,
+        "the merge dotsync just pushed has to reach the home it came from"
+    );
+    assert_eq!(
+        remote_branch_file_contents(&machine_b, "all", ".config/app.conf"),
+        merged
+    );
+
+    let status_b = machine_b.run("dotsync status");
+    assert_stderr_snapshot(&status_b, "dotsync: no changes for goof-b\n");
+}
