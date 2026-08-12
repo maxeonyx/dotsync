@@ -10,7 +10,13 @@ pub struct ErrorReport {
     pub code: &'static str,
     pub message: String,
     pub drifts: Vec<FileDrift>,
-    pub current_state: Option<String>,
+    /// What dotsync found, one fact per entry.
+    ///
+    /// A list rather than a paragraph because a run that refused three paths
+    /// found three things: joining them for a person to read is a decision for
+    /// whoever is rendering, and a reader that has to split them back apart on
+    /// a newline is reading a rendering rather than an answer.
+    pub current_state: Vec<String>,
     /// What the run had already overwritten under `--force` when it stopped.
     /// Empty for every error raised before a run can overwrite anything, which
     /// is all of them except a commit that failed after writing its history.
@@ -41,8 +47,7 @@ pub struct RefusedCommitPath {
     pub state: FileState,
 }
 
-/// One path a named directory matched that the commit left out, because home
-/// holds no change of this machine's own at it.
+/// One path a named directory matched that the commit left out.
 ///
 /// Not an error and not a refusal: the run succeeds, and this is what it has
 /// to say about what it did not do — so it is reported alongside the result
@@ -50,7 +55,56 @@ pub struct RefusedCommitPath {
 #[derive(Debug, Clone)]
 pub struct SkippedCommitPath {
     pub path: PathBuf,
-    pub state: FileState,
+    pub reason: SkipReason,
+}
+
+/// Why a bulk selection left a path alone.
+#[derive(Debug, Clone)]
+pub enum SkipReason {
+    /// Home holds no change of this machine's own at the path; the state says
+    /// which of the ways that happened.
+    NotChangedHere(FileState),
+    /// The path is a symlink, or a link to a directory. Dotsync records the
+    /// content it finds at the path you name and every machine on the scope
+    /// writes that content back to that same path, and it has no answer yet
+    /// for what a link should mean under that rule — see the open question in
+    /// PLAN.md. Refused when named exactly, reported when merely matched.
+    Symlink { resolves_to: Option<PathBuf> },
+    /// A socket, a device, a fifo: something with no file content to record.
+    NotARegularFile,
+}
+
+impl SkipReason {
+    /// The code an agent branches on, in the same field as a file's state
+    /// everywhere else — because "why is this file not in the commit" is one
+    /// question whether the answer is about content or about the path.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotChangedHere(state) => state.code(),
+            Self::Symlink { .. } => "symlink",
+            Self::NotARegularFile => "not_a_regular_file",
+        }
+    }
+
+    /// The same thing in words, as a phrase that reads after a path.
+    pub fn explain(&self) -> String {
+        match self {
+            Self::NotChangedHere(state) => state.reason().to_string(),
+            Self::Symlink {
+                resolves_to: Some(target),
+            } => format!(
+                "a symlink to {}, and dotsync records the content it finds at the path you name",
+                target.display()
+            ),
+            Self::Symlink { resolves_to: None } => {
+                "a symlink, and dotsync records the content it finds at the path you name"
+                    .to_string()
+            }
+            Self::NotARegularFile => {
+                "not a regular file, so there is no content to record".to_string()
+            }
+        }
+    }
 }
 
 impl RefusedCommitPath {
@@ -179,12 +233,17 @@ pub enum DotsyncError {
     NonUtf8Path { path: PathBuf },
     #[error("{path} is a git submodule; dotsync manages regular files and symlinks only")]
     GitSubmodule { path: PathBuf },
-    #[error("cannot commit {} of the paths you named", rejected.len())]
+    /// A path in home that exists and is not a regular file: a fifo, a socket,
+    /// a device. Raised before anything opens it, because opening one can
+    /// never return.
+    #[error("{} is not a regular file, so dotsync cannot record what it holds", path.display())]
+    NotARegularFile { path: PathBuf },
+    #[error("{}", one_or_many(rejected.len(), "cannot commit the path you named", "cannot commit {n} of the paths you named"))]
     UnusableCommitPaths {
         scope: String,
         rejected: Vec<RejectedCommitPath>,
     },
-    #[error("cannot commit {} of the paths you named, because this machine did not change them", refused.len())]
+    #[error("{}", one_or_many(refused.len(), "cannot commit the path you named, because this machine did not change it", "cannot commit {n} of the paths you named, because this machine did not change them"))]
     StaleCommitPaths {
         scope: String,
         refused: Vec<RefusedCommitPath>,
@@ -201,6 +260,11 @@ pub enum DotsyncError {
         #[source]
         source: std::io::Error,
     },
+    /// The config file could not be edited to add this machine's scopes. The
+    /// parse that produced it succeeded, so this is dotsync disagreeing with
+    /// itself rather than a file a person got wrong.
+    #[error("failed to update config {path}: {message}")]
+    ConfigEdit { path: PathBuf, message: String },
     #[error("failed to parse config {path}: {source}")]
     ConfigParse {
         path: PathBuf,
@@ -215,6 +279,12 @@ pub enum DotsyncError {
     NoCurrentScope,
     #[error("scope `{scope}` does not exist in config")]
     InvalidScope { scope: String },
+    /// Asked for a file on a scope that does not hold it. An ordinary answer
+    /// to an ordinary question — a file exists on the scope that added it and
+    /// on every scope below — so it is its own error rather than an internal
+    /// failure with a jj message.
+    #[error("`{}` is not on scope `{scope}`", path.display())]
+    FileNotOnScope { scope: String, path: PathBuf },
     #[error(
         "scope `{scope}` has diverged: this machine and the remote each have commits the other does not"
     )]
@@ -223,8 +293,11 @@ pub enum DotsyncError {
         local_target: String,
         remote_target: String,
     },
-    #[error("scope `{scope}` does not have a local bookmark")]
-    MissingScopeBookmark { scope: String },
+    /// The scope graph names a scope this machine's repo has no history for.
+    /// Says what it means rather than which of jj's objects is missing:
+    /// "bookmark" is a concept dotsync exists to keep out of the user's way.
+    #[error("scope `{scope}` is configured, but this machine's repo has no history for it")]
+    ScopeNotInRepo { scope: String },
     #[error("sync state error at {path}: {message}")]
     SyncState { path: PathBuf, message: String },
     #[error("detected drift in {count} file(s)")]
@@ -266,32 +339,83 @@ pub enum DotsyncError {
         source: std::io::Error,
         original: Box<DotsyncError>,
     },
-    #[error("jj operation failed: {message}")]
+    /// Something inside dotsync's own repository handling went wrong. The
+    /// detail is jj's and is kept, because it is what a bug report needs — but
+    /// the headline is dotsync's, because the reader cannot act on jj's.
+    #[error("dotsync could not complete an internal repository operation: {message}")]
     Jj { message: String },
 }
 
 impl DotsyncError {
+    /// Whether this stop is "a paused cascade is in the way", which is the one
+    /// state with a remedy of its own: resolve the conflicted files and run
+    /// `dotsync continue`, or discard the cascade with `dotsync abort`.
+    ///
+    /// The binary turns this into exit code 3. It is a property of the state
+    /// rather than of which command met it, because it used to be neither: the
+    /// run that created the pause exited 3 and the next run that ran into it
+    /// exited 1, so an agent that had learned "3 means go and resolve" was told
+    /// its very next command had failed for some other reason. Exhaustive on
+    /// purpose — a new variant describing this state has to answer the
+    /// question rather than inherit a default.
+    pub fn is_paused_cascade(&self) -> bool {
+        match self {
+            DotsyncError::CascadePaused { .. }
+            | DotsyncError::PausedCascadeInProgress { .. }
+            | DotsyncError::UnresolvedConflict { .. }
+            | DotsyncError::PausePredatesResolutionCheck { .. } => true,
+            DotsyncError::HomeNotSet
+            | DotsyncError::NonUtf8Path { .. }
+            | DotsyncError::GitSubmodule { .. }
+            | DotsyncError::NotARegularFile { .. }
+            | DotsyncError::UnusableCommitPaths { .. }
+            | DotsyncError::StaleCommitPaths { .. }
+            | DotsyncError::Io { .. }
+            | DotsyncError::ConfigParse { .. }
+            | DotsyncError::ConfigEdit { .. }
+            | DotsyncError::MissingParent { .. }
+            | DotsyncError::ScopeCycle { .. }
+            | DotsyncError::NoCurrentScope
+            | DotsyncError::InvalidScope { .. }
+            | DotsyncError::ScopeDiverged { .. }
+            | DotsyncError::ScopeNotInRepo { .. }
+            | DotsyncError::FileNotOnScope { .. }
+            | DotsyncError::SyncState { .. }
+            | DotsyncError::DriftDetected { .. }
+            | DotsyncError::NoPausedCascade
+            | DotsyncError::RepoAlreadyExists { .. }
+            | DotsyncError::NotInitialized { .. }
+            | DotsyncError::MissingHostname
+            | DotsyncError::RemoteUnreachable { .. }
+            | DotsyncError::Jj { .. } => false,
+            // Whatever stopped the init is what the reader has to act on, and
+            // an init cannot meet a paused cascade — but saying so through the
+            // wrapped error keeps that true by construction.
+            DotsyncError::PartialInitLeftBehind { original, .. } => original.is_paused_cascade(),
+        }
+    }
+
     pub fn to_error_report(&self) -> ErrorReport {
         match self {
             DotsyncError::DriftDetected { drifts, .. } => ErrorReport {
                 code: "drift_detected",
                 message: self.to_string(),
                 drifts: drifts.clone(),
-                current_state: Some(
+                current_state: vec![
                     "managed files in home differ from the repo version for this machine scope"
                         .to_string(),
-                ),
+                ],
                 forced_overwrites: Vec::new(),
             },
             DotsyncError::InvalidScope { .. } => basic_error_report("invalid_scope", self),
             DotsyncError::ScopeDiverged { .. } => basic_error_report("scope_diverged", self),
             DotsyncError::NoCurrentScope => basic_error_report("no_current_scope", self),
-            DotsyncError::MissingScopeBookmark { .. } => {
-                basic_error_report("missing_scope_bookmark", self)
-            }
+            DotsyncError::ScopeNotInRepo { .. } => basic_error_report("scope_not_in_repo", self),
+            DotsyncError::FileNotOnScope { .. } => basic_error_report("file_not_on_scope", self),
             DotsyncError::MissingParent { .. } => basic_error_report("missing_parent", self),
             DotsyncError::ScopeCycle { .. } => basic_error_report("scope_cycle", self),
             DotsyncError::ConfigParse { .. } => basic_error_report("config_parse", self),
+            DotsyncError::ConfigEdit { .. } => basic_error_report("config_edit", self),
             DotsyncError::SyncState { .. } => basic_error_report("sync_state", self),
             DotsyncError::CascadePaused { .. } => basic_error_report("cascade_paused", self),
             DotsyncError::PausedCascadeInProgress { .. } => {
@@ -301,8 +425,10 @@ impl DotsyncError {
             DotsyncError::RepoAlreadyExists { .. } => basic_error_report("repo_exists", self),
             DotsyncError::NotInitialized { path } => ErrorReport {
                 code: "not_initialized",
+                // Command-neutral: the human rendering names the command
+                // that was run, and this message is read by whatever ran it.
                 message: format!(
-                    "Dotsync could not find its hidden repo at {}. Run `dotsync init <remote-url>` from this home directory, then rerun `dotsync status`.",
+                    "Dotsync could not find its hidden repo at {}. Run `dotsync init <remote-url>` from this home directory first.",
                     path.display()
                 ),
                 drifts: Vec::new(),
@@ -320,10 +446,13 @@ impl DotsyncError {
                 ..original.to_error_report()
             },
             DotsyncError::Io { .. } => basic_error_report("io", self),
-            DotsyncError::Jj { .. } => basic_error_report("jj", self),
+            DotsyncError::Jj { .. } => basic_error_report("internal", self),
             DotsyncError::HomeNotSet => basic_error_report("home_not_set", self),
             DotsyncError::NonUtf8Path { .. } => basic_error_report("non_utf8_path", self),
             DotsyncError::GitSubmodule { .. } => basic_error_report("git_submodule", self),
+            DotsyncError::NotARegularFile { .. } => {
+                basic_error_report("not_a_regular_file", self)
+            }
             DotsyncError::UnusableCommitPaths { .. } => {
                 basic_error_report("unusable_commit_paths", self)
             }
@@ -350,65 +479,71 @@ pub(crate) fn basic_error_report(code: &'static str, error: &DotsyncError) -> Er
     }
 }
 
-pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
+/// One message when there is one of something, another when there are several.
+/// `{n}` in the plural form is the count.
+fn one_or_many(count: usize, one: &str, many: &str) -> String {
+    if count == 1 {
+        one.to_string()
+    } else {
+        many.replace("{n}", &count.to_string())
+    }
+}
+
+pub(crate) fn error_current_state(error: &DotsyncError) -> Vec<String> {
     match error {
-        DotsyncError::InvalidScope { scope } => Some(format!("requested scope: {scope}")),
+        DotsyncError::InvalidScope { scope } => vec![format!("requested scope: {scope}")],
         DotsyncError::SyncState { path, .. } => {
-            Some(format!("sync state path: {}", path.display()))
+            vec![format!("sync state path: {}", path.display())]
         }
         DotsyncError::ScopeDiverged {
             scope,
             local_target,
             remote_target,
-        } => Some(format!(
+        } => vec![format!(
             "scope: {scope}; local target: {local_target}; remote target: {remote_target}"
-        )),
-        DotsyncError::CascadePaused { scope, .. } => Some(format!("paused scope: {scope}")),
-        DotsyncError::UnusableCommitPaths { scope, rejected } => Some(
-            rejected
-                .iter()
-                .map(|rejected| rejected.explain(scope))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
-        DotsyncError::StaleCommitPaths { refused, .. } => Some(
-            refused
-                .iter()
-                .map(RefusedCommitPath::explain)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
-        DotsyncError::PausePredatesResolutionCheck { scope } => Some(format!(
+        )],
+        DotsyncError::CascadePaused { scope, .. } => vec![format!("paused scope: {scope}")],
+        DotsyncError::UnusableCommitPaths { scope, rejected } => rejected
+            .iter()
+            .map(|rejected| rejected.explain(scope))
+            .collect(),
+        DotsyncError::StaleCommitPaths { refused, .. } => {
+            refused.iter().map(RefusedCommitPath::explain).collect()
+        }
+        DotsyncError::PausePredatesResolutionCheck { scope } => vec![format!(
             "paused scope: {scope}; the pause holds no record of what the conflicted files contained when it paused."
-        )),
-        DotsyncError::UnresolvedConflict { scope, paths } => Some(format!(
+        )],
+        DotsyncError::UnresolvedConflict { scope, paths } => vec![format!(
             "unchanged since the cascade paused at scope `{scope}`: {}",
             paths
                 .iter()
                 .map(|path| path.display().to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
-        )),
-        DotsyncError::PausedCascadeInProgress { scope } => Some(format!("paused scope: {scope}")),
-        DotsyncError::NotInitialized { path } => Some(format!(
+        )],
+        DotsyncError::PausedCascadeInProgress { scope } => vec![format!("paused scope: {scope}")],
+        DotsyncError::NotInitialized { path } => vec![format!(
             "expected repo path: {}; standard location: ~/.local/share/dotsync/repo",
             path.display()
-        )),
+        )],
         DotsyncError::HomeNotSet
         | DotsyncError::NonUtf8Path { .. }
         | DotsyncError::GitSubmodule { .. }
+        | DotsyncError::NotARegularFile { .. }
         | DotsyncError::NoPausedCascade
         | DotsyncError::Io { .. }
         | DotsyncError::ConfigParse { .. }
+        | DotsyncError::ConfigEdit { .. }
         | DotsyncError::MissingParent { .. }
         | DotsyncError::ScopeCycle { .. }
         | DotsyncError::NoCurrentScope
-        | DotsyncError::MissingScopeBookmark { .. }
+        | DotsyncError::ScopeNotInRepo { .. }
+        | DotsyncError::FileNotOnScope { .. }
         | DotsyncError::DriftDetected { .. }
         | DotsyncError::RepoAlreadyExists { .. }
         | DotsyncError::MissingHostname
         | DotsyncError::RemoteUnreachable { .. }
-        | DotsyncError::Jj { .. } => None,
+        | DotsyncError::Jj { .. } => Vec::new(),
         DotsyncError::PartialInitLeftBehind { original, .. } => error_current_state(original),
     }
 }

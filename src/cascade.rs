@@ -65,7 +65,7 @@ impl ScopeHeads {
         self.heads
             .get(scope)
             .cloned()
-            .ok_or_else(|| DotsyncError::MissingScopeBookmark {
+            .ok_or_else(|| DotsyncError::ScopeNotInRepo {
                 scope: scope.to_string(),
             })
     }

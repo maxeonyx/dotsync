@@ -71,7 +71,13 @@ pub struct FileDrift {
     pub home_bytes: Option<Vec<u8>>,
 }
 
-#[derive(Debug, Clone, Default)]
+/// What one sync wrote into home.
+///
+/// Deliberately not `Default`, for the reason `PushReport` is not: a
+/// default-constructed one carries an empty machine scope and an empty file
+/// list, which reads exactly like a sync that ran and found nothing to do. A
+/// command that did not sync says so by having no `SyncReport` at all.
+#[derive(Debug, Clone)]
 pub struct SyncReport {
     pub current_scope: String,
     pub synced_paths: Vec<PathBuf>,

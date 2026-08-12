@@ -78,3 +78,30 @@ fn render_output(output: &std::process::Output) -> String {
         String::from_utf8_lossy(&output.stderr)
     )
 }
+
+/// The exit code is the first thing a script or an agent reads, and dotsync has
+/// four of them. `--help` is where a memoryless agent looks.
+#[test]
+fn top_level_help_documents_the_exit_codes() {
+    let output = Command::new(env!("CARGO_BIN_EXE_dotsync"))
+        .arg("--help")
+        .output()
+        .expect("run dotsync --help");
+
+    assert!(output.status.success(), "{}", render_output(&output));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for expected in [
+        "Exit codes:",
+        "0  the command did what it says",
+        "1  dotsync stopped, or `dotsync diff` found changes",
+        "2  the command line was wrong",
+        "3  a paused cascade is waiting",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "top-level help missing exit-code line {expected:?}:\n{}",
+            stdout
+        );
+    }
+}

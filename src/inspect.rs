@@ -17,14 +17,25 @@ pub struct ScopeInfo {
     pub parents: Vec<String>,
 }
 
-/// What `dotsync view` was asked for, and what it found.
+/// What `view` found, and the one thing it has to say whatever it was asked.
+#[derive(Debug, Clone)]
+pub struct ViewReport {
+    /// See `StatusReport::paused_cascade`. True of the machine rather than of
+    /// the question, so every shape below carries it — `view` is the command
+    /// an agent reaches for to get its bearings, and "this machine cannot
+    /// commit anything" is the most important bearing there is.
+    pub paused_cascade: Option<String>,
+    pub found: ViewAnswer,
+}
+
+/// The answer to whichever question `view` was asked.
 ///
 /// One report rather than four entry points, because the four shapes are one
 /// question — what is checked in — asked with different arguments. They are
 /// also one run, which is what stops the overview from fetching once per
 /// scope: it holds a session, and a session fetches once.
 #[derive(Debug, Clone)]
-pub enum ViewReport {
+pub enum ViewAnswer {
     /// Every scope, and every file any of them holds.
     Overview {
         scopes: Vec<ScopeInfo>,
@@ -45,6 +56,9 @@ pub enum ViewReport {
 #[derive(Debug, Clone)]
 pub struct DiffReport {
     pub machine_scope: String,
+    /// See `StatusReport::paused_cascade`: `diff` answers the same question in
+    /// more detail, so it owes the same warning.
+    pub paused_cascade: Option<String>,
     pub drifts: Vec<FileDrift>,
 }
 
@@ -55,14 +69,25 @@ pub async fn view(
 ) -> Run<Result<ViewReport, DotsyncError>> {
     in_session(paths, async |session, _paths| {
         session.fetch().await?;
+        // Asked here rather than left to whatever fails first, because "that
+        // scope does not exist" is the same mistake `commit` already explains
+        // in full — and the answer a lookup failure gave instead was about
+        // jj's objects.
+        if let Some(scope) = scope {
+            if !session.config().graph.parents.contains_key(scope) {
+                return Err(DotsyncError::InvalidScope {
+                    scope: scope.to_string(),
+                });
+            }
+        }
 
-        Ok(match (scope, file) {
-            (Some(scope), Some(file)) => ViewReport::FileContents {
+        let found = match (scope, file) {
+            (Some(scope), Some(file)) => ViewAnswer::FileContents {
                 scope: scope.to_string(),
                 file: file.to_path_buf(),
                 contents: scope_file_contents(session, scope, file).await?,
             },
-            (Some(scope), None) => ViewReport::Scope {
+            (Some(scope), None) => ViewAnswer::Scope {
                 scope: scope.to_string(),
                 files: scope_files(session, scope)?,
             },
@@ -76,7 +101,7 @@ pub async fn view(
                         scopes.push(scope.name);
                     }
                 }
-                ViewReport::FileScopes {
+                ViewAnswer::FileScopes {
                     file: file.to_path_buf(),
                     scopes,
                 }
@@ -87,11 +112,16 @@ pub async fn view(
                 for scope in &scopes {
                     files.extend(scope_files(session, &scope.name)?);
                 }
-                ViewReport::Overview {
+                ViewAnswer::Overview {
                     scopes,
                     files: files.into_iter().collect(),
                 }
             }
+        };
+
+        Ok(ViewReport {
+            paused_cascade: crate::commit::paused_cascade_scope(session.paths())?,
+            found,
         })
     })
     .await
@@ -154,11 +184,9 @@ async fn scope_file_contents(
                 relative.display()
             ))
         })?
-        .ok_or_else(|| {
-            jj_error(format!(
-                "{} does not exist on scope {scope}",
-                relative.display()
-            ))
+        .ok_or_else(|| DotsyncError::FileNotOnScope {
+            scope: scope.to_string(),
+            path: relative.to_path_buf(),
         })?;
     read_tree_entry_bytes(session.repo().store(), relative, &value).await
 }
@@ -195,6 +223,7 @@ pub async fn diff_home(paths: &DotsyncPaths) -> Run<Result<DiffReport, DotsyncEr
 
         Ok(DiffReport {
             machine_scope,
+            paused_cascade: crate::commit::paused_cascade_scope(session.paths())?,
             drifts,
         })
     })

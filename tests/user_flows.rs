@@ -177,6 +177,41 @@ impl MachineEnvironment {
 
     /// Runs dotsync with no `HOME` in the environment, which is how dotsync
     /// finds both the home directory it manages and its hidden repo.
+    /// Runs dotsync and gives up on it after `limit`.
+    ///
+    /// For the one failure a plain `output()` cannot report: dotsync never
+    /// returning at all. A hang shows up as a test the runner kills minutes
+    /// later, with nothing said about which call blocked; a run that is killed
+    /// here fails the exit-code assertion immediately.
+    fn run_within(&self, command: &str, limit: std::time::Duration) -> Output {
+        let args = dotsync_args(command);
+        let mut child = Command::new(env!("CARGO_BIN_EXE_dotsync"))
+            .args(args)
+            .current_dir(&self.home_dir)
+            .env("HOME", &self.home_dir)
+            .env("DOTSYNC_OS", &self.os)
+            .env("DOTSYNC_HOSTNAME", &self.hostname)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn dotsync");
+
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            match child.try_wait().expect("poll dotsync") {
+                Some(_) => break,
+                None if std::time::Instant::now() >= deadline => {
+                    child
+                        .kill()
+                        .expect("kill a dotsync run that never returned");
+                    break;
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+        child.wait_with_output().expect("collect dotsync output")
+    }
+
     fn run_without_home(&self, command: &str) -> Output {
         let args = dotsync_args(command);
         let mut command = Command::new(env!("CARGO_BIN_EXE_dotsync"));
@@ -397,9 +432,11 @@ fn add_hyprland_scope(machine: &MachineEnvironment) {
 
     let config_path = clone_dir.join(".config/dotsync/config.toml");
     let original = fs::read_to_string(&config_path).expect("read remote config");
+    // Edited the way a person would: one scope entry at a time, leaving the
+    // comments dotsync wrote between them where they are.
     let updated = original.replace(
-        "linux = { parents = [\"all\"] }\nmx-xps-cy = { parents = [\"linux\"] }",
-        "linux = { parents = [\"all\"] }\nhyprland = { parents = [\"linux\"] }\nmx-xps-cy = { parents = [\"hyprland\"] }",
+        "mx-xps-cy = { parents = [\"linux\"] }",
+        "hyprland = { parents = [\"linux\"] }\nmx-xps-cy = { parents = [\"hyprland\"] }",
     );
     assert_ne!(
         updated, original,
@@ -569,6 +606,19 @@ fn symlink_at(target: &Path, link: &Path) {
     }
 }
 
+/// A named pipe: a path that exists, is not a regular file, and blocks
+/// forever if anything opens it for reading.
+fn make_fifo(path: &Path) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create parent dir");
+    }
+    let status = Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .expect("run mkfifo");
+    assert!(status.success(), "mkfifo {} failed", path.display());
+}
+
 fn write_file_at(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create parent dir");
@@ -699,7 +749,7 @@ Expected:
 This flow expects managed files in your home directory to already match the repo, unless you intentionally choose to overwrite drift.
 
 Current state found:
-Drifted files are listed below with diffs.
+The files that differ are listed under `Changed files:` below, each with what it would be replaced by.
 
 Why dotsync stopped:
 Dotsync stopped before overwriting local drift so you can inspect what would be replaced.
@@ -707,7 +757,9 @@ Dotsync stopped before overwriting local drift so you can inspect what would be 
 Correct flow:
 - If the repo is correct, rerun with `dotsync --force` to overwrite the drift after reviewing the diffs.
 - If the live file is the change you wanted, run `dotsync status`, then commit the intended path with `dotsync commit <scope> -m "message" -- <path>`.
-- .gitconfig (edited here since the last sync)
+
+Changed files:
+  M .gitconfig (edited here since the last sync)
 --- repo
 +++ system
 @@ -1,2 +1,2 @@
@@ -760,8 +812,8 @@ fn diff_shows_line_oriented_home_drift_without_syncing() {
     assert_stderr_snapshot(
         &diff_output,
         "\
-dotsync: 1 drifted managed file(s) for mx-xps-cy
-- .config/app.conf (edited here since the last sync)
+dotsync: 1 changed managed file(s) for mx-xps-cy
+  M .config/app.conf (edited here since the last sync)
 --- repo
 +++ system
 @@ -1,2 +1,2 @@
@@ -980,17 +1032,15 @@ fn drift_detected_json_contract_stays_compatible() {
     assert_eq!(json["status"], "error");
     assert_eq!(json["error"], "drift_detected");
     assert!(json["message"].as_str().is_some());
-    assert!(json["current_state"].as_str().is_some());
+    assert!(json["current_state"].is_array());
 
     let drifts = json["drifts"]
         .as_array()
         .expect("drifts should be an array");
     assert_eq!(drifts.len(), 1);
     assert_eq!(drifts[0]["path"], ".gitconfig");
-    assert_eq!(
-        drifts[0]["system_path"],
-        machine.home_dir.join(".gitconfig").display().to_string()
-    );
+    assert!(drifts[0]["state"].as_str().is_some());
+    assert!(drifts[0]["reason"].as_str().is_some());
     assert!(drifts[0]["diff"].as_str().is_some());
 }
 
@@ -1370,13 +1420,13 @@ fn abort_paused_cascade_restores_pre_pause_state_and_clears_pause() {
         &aborted,
         "\
 dotsync: overwrote 1 drifted file(s)
-- .config/app.conf (edited here since the last sync)
+  M .config/app.conf (edited here since the last sync)
 --- repo
 +++ system
 @@ -1 +1 @@
 -setting = \"linux\"
 +setting = \"all\"
-dotsync: aborted cascade at linux and synced 2 file(s)
+dotsync: aborted the cascade paused at linux and synced 2 file(s)
 ",
     );
 
@@ -2425,8 +2475,8 @@ fn continue_refuses_a_pause_that_predates_the_resolution_check() {
     let continued = machine.run("dotsync continue");
     assert_eq!(
         continued.status.code(),
-        Some(1),
-        "continue must refuse a pause it cannot verify\n{}",
+        Some(3),
+        "continue must refuse a pause it cannot verify, and the cascade is still paused\n{}",
         render_output(&continued)
     );
     let stderr = String::from_utf8_lossy(&continued.stderr).into_owned();
@@ -2459,8 +2509,8 @@ fn continue_refuses_a_conflicted_file_that_was_never_resolved() {
     let continued = machine_b.run("dotsync continue");
     assert_eq!(
         continued.status.code(),
-        Some(1),
-        "continue must refuse an unresolved conflict\n{}",
+        Some(3),
+        "continue must refuse an unresolved conflict, and the cascade is still paused\n{}",
         render_output(&continued)
     );
     assert_stderr_snapshot(
@@ -2653,8 +2703,8 @@ fn commit_while_cascade_paused_is_blocked_without_mutating_scope() {
 
     assert_eq!(
         blocked.status.code(),
-        Some(1),
-        "commit while a cascade is paused should be blocked\n{}",
+        Some(3),
+        "commit while a cascade is paused should be blocked, with the code that means a pause is waiting\n{}",
         render_output(&blocked)
     );
     assert_stderr_snapshot(
@@ -2817,7 +2867,8 @@ fn noop_commit_names_the_scope_it_targeted() {
 
     // The report for a commit that found nothing was default-constructed, so
     // it did not carry the scope the agent had just named - and the message
-    // interpolated the empty string into "committed  and synced".
+    // interpolated the empty string into "committed  and synced". It now names
+    // the scope, and says what it did instead of claiming a commit.
     let commit_output = machine.run("dotsync commit mx-xps-cy -m noop");
     assert_eq!(
         commit_output.status.code(),
@@ -2827,7 +2878,7 @@ fn noop_commit_names_the_scope_it_targeted() {
     );
     assert_stderr_snapshot(
         &commit_output,
-        "dotsync: committed mx-xps-cy and synced 0 file(s)\n",
+        "dotsync: nothing to record on `mx-xps-cy`; no commit was made and home was not synced\n",
     );
 }
 
@@ -2860,20 +2911,20 @@ What dotsync does:
 Dotsync stores dotfiles in a scope DAG so shared config can live on shared ancestor scopes and machine-specific config can stay isolated on leaf scopes.
 
 This flow:
-This commit flow records your repo change on the scope you name and then cascades it through descendant scopes.
+This flow resolves the scope you named against the scope graph, which dotsync reads from `.config/dotsync/config.toml` on the `all` scope.
 
 Expected:
-It expects the scope you name to exist in the configured scope DAG.
+It expects the scope you name to exist in that graph.
 
 Current state found:
 scope `nonexistent` does not exist in config
 
 Why dotsync stopped:
-Dotsync stopped because it cannot place this change onto a scope that is not configured.
+Dotsync stopped because there is no such scope: it can neither place a change on one nor show you what one holds.
 
 Correct flow:
-- choose a real configured scope from the DAG.
-- Pick the root-est appropriate ancestor scope that should own the change.
+- run `dotsync view` to list the scopes that do exist.
+- then name one of those. For a commit, pick the root-est appropriate ancestor scope that should own the change.
 "
     );
 }
@@ -2895,14 +2946,24 @@ fn status_before_init_matches_full_recovery_message() {
     let expected = format!(
         "dotsync: not initialized
 
-What happened:
-Dotsync could not find its hidden repo at {}.
+What dotsync does:
+Dotsync keeps your config in a hidden repo at ~/.local/share/dotsync/repo and syncs the scopes this machine belongs to into your home directory. Every command works against that repo.
 
-What to do:
-- Run `dotsync init <remote-url>` from this home directory.
-- Then rerun `dotsync status`.
+This flow:
+This flow opened that repo to find out what this machine's scopes hold.
 
-The remote URL is the git remote that stores your dotsync repo.
+Expected:
+It expects `dotsync init <remote-url>` to have been run in this home directory already, which is what creates the repo.
+
+Current state found:
+expected repo path: {}; standard location: ~/.local/share/dotsync/repo
+
+Why dotsync stopped:
+There is nothing to compare your home directory against, so dotsync cannot answer for it.
+
+Correct flow:
+- run `dotsync init <remote-url>` from this home directory. The remote URL is the git remote that stores your dotsync repo.
+- then rerun `dotsync status`.
 ",
         machine.repo_dir.display()
     );
@@ -2922,7 +2983,7 @@ fn status_before_init_json_matches_recovery_message() {
         render_output(&status_output)
     );
 
-    let expected = r#"{"current_state":"expected repo path: {repo}; standard location: ~/.local/share/dotsync/repo","drifts":[],"error":"not_initialized","forced_overwrites":[],"message":"Dotsync could not find its hidden repo at {repo}. Run `dotsync init <remote-url>` from this home directory, then rerun `dotsync status`.","status":"error"}
+    let expected = r#"{"current_state":["expected repo path: {repo}; standard location: ~/.local/share/dotsync/repo"],"drifts":[],"error":"not_initialized","forced_overwrites":[],"message":"Dotsync could not find its hidden repo at {repo}. Run `dotsync init <remote-url>` from this home directory first.","status":"error"}
 "#
     .replace("{repo}", &machine.repo_dir.display().to_string());
     let stdout = String::from_utf8_lossy(&status_output.stdout);
@@ -3238,27 +3299,15 @@ fn status_json_contract() {
     assert_eq!(json["command"], "status");
     assert_eq!(json["machine_scope"], "mx-xps-cy");
 
-    let groups = json["groups"]
+    let changes = json["changes"]
         .as_array()
-        .expect("groups should be an array");
+        .expect("changes should be an array");
     assert!(
-        !groups.is_empty(),
-        "expected at least one status group\n{}",
-        render_output(&status_output)
-    );
-
-    let first_group = &groups[0];
-    assert_eq!(first_group["scope"], serde_json::Value::Null);
-
-    let files = first_group["files"]
-        .as_array()
-        .expect("group files should be an array");
-    assert!(
-        files.iter().any(|file| {
-            file["path"]
+        changes.iter().any(|change| {
+            change["path"]
                 .as_str()
                 .is_some_and(|path| path.contains(".bashrc"))
-                && file["status"] == "modified"
+                && change["state"] == "modified"
         }),
         "expected .bashrc modified entry\n{}",
         render_output(&status_output)
@@ -4178,12 +4227,12 @@ dotsync: 1 incoming file(s) for goof-a — plain `dotsync` applies these
     );
     let json = parse_stdout_json(&status_json);
     assert_eq!(
-        json["changed_count"],
-        0,
+        json["changes"].as_array().map(Vec::len),
+        Some(0),
         "a file this machine has not changed is not a change\n{}",
         render_output(&status_json)
     );
-    assert_eq!(json["incoming_count"], 1);
+    assert_eq!(json["incoming"].as_array().map(Vec::len), Some(1));
 
     let diff_a = machine_a.run("dotsync diff");
     assert_eq!(
@@ -5515,4 +5564,1016 @@ fn a_symlinked_selection_path_is_refused_whether_it_is_a_file_or_a_directory() {
     machine.write_file(".bashrc", "export DOTSYNC=1\n");
     let real = machine.run("dotsync commit all -m 'real file' -- .bashrc");
     assert!(real.status.success(), "{}", render_output(&real));
+}
+
+/// A commit that records nothing ran no sync, so it has no sync to report. The
+/// empty `machine_scope` it used to print came from a default-constructed sync
+/// report, and the headline claimed a commit that never happened.
+#[test]
+fn a_commit_that_records_nothing_says_so_instead_of_reporting_an_empty_sync() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_file(".apprc", "ui_theme = dark\n");
+    let recorded = machine.run("dotsync --output json commit all -m 'add apprc' -- .apprc");
+    assert!(recorded.status.success(), "{}", render_output(&recorded));
+    let json = parse_stdout_json(&recorded);
+    assert_eq!(
+        json["outcome"],
+        "committed",
+        "a commit that recorded something must say which of the two things it did\n{}",
+        render_output(&recorded)
+    );
+    assert_eq!(json["machine_scope"], "mx-xps-cy");
+
+    let again = machine.run("dotsync --output json commit all -m 'add apprc again' -- .apprc");
+    assert_eq!(again.status.code(), Some(0), "{}", render_output(&again));
+    let json = parse_stdout_json(&again);
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["command"], "commit");
+    assert_eq!(
+        json["outcome"],
+        "nothing_to_commit",
+        "a commit that recorded nothing must be distinguishable from one that did\n{}",
+        render_output(&again)
+    );
+    assert_eq!(json["scope"], "all");
+    assert_eq!(
+        json["machine_scope"],
+        "mx-xps-cy",
+        "the machine scope is known whether or not there was anything to commit\n{}",
+        render_output(&again)
+    );
+    assert!(
+        json.get("synced_files").is_none(),
+        "a commit that never ran a sync must not report an empty one\n{}",
+        render_output(&again)
+    );
+
+    let human = machine.run("dotsync commit all -m 'add apprc again' -- .apprc");
+    assert_stderr_snapshot(
+        &human,
+        "dotsync: nothing to record on `all`; no commit was made and home was not synced\n",
+    );
+}
+
+/// One value, one field. `scope` and `machine_scope` used to be byte-identical
+/// on every command that only syncs, so a reader could not tell which question
+/// `scope` answered without knowing which command produced it.
+#[test]
+fn every_command_that_only_syncs_names_the_machine_scope_once() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.run(&format!(
+        "dotsync --output json init {}",
+        machine
+            .remote_dir
+            .to_str()
+            .expect("remote path should be valid UTF-8")
+    ));
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+    let json = parse_stdout_json(&init_output);
+    assert_eq!(json["command"], "init");
+    assert_eq!(json["machine_scope"], "mx-xps-cy");
+    assert!(
+        json.get("scope").is_none(),
+        "`scope` on init only ever repeated the machine scope\n{}",
+        render_output(&init_output)
+    );
+
+    let sync_output = machine.run("dotsync --output json");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+    let json = parse_stdout_json(&sync_output);
+    assert_eq!(json["command"], "sync");
+    assert_eq!(json["machine_scope"], "mx-xps-cy");
+    assert!(
+        json.get("scope").is_none(),
+        "`scope` on sync only ever repeated the machine scope\n{}",
+        render_output(&sync_output)
+    );
+}
+
+/// `diff` is `status`'s changes with the diffs shown, so the two commands have
+/// to use one vocabulary for one file. They used to disagree on the field name
+/// (`status` vs `state`), on the word for the population, and `status` wrapped
+/// its files in a `groups` array that never held more than one group.
+#[test]
+fn status_and_diff_describe_the_same_change_with_the_same_words() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+    machine.write_file(".bashrc", "export DOTSYNC=modified\n");
+
+    let status_output = machine.run("dotsync --output json status");
+    assert!(
+        status_output.status.success(),
+        "{}",
+        render_output(&status_output)
+    );
+    let status_json = parse_stdout_json(&status_output);
+    assert!(
+        status_json.get("groups").is_none(),
+        "the group that never grouped anything is gone\n{}",
+        render_output(&status_output)
+    );
+    let status_change = &status_json["changes"][0];
+    assert_eq!(status_change["path"], ".bashrc");
+    assert!(status_change["state"].as_str().is_some());
+    assert!(status_change["reason"].as_str().is_some());
+
+    let diff_output = machine.run("dotsync --output json diff");
+    assert_eq!(
+        diff_output.status.code(),
+        Some(1),
+        "{}",
+        render_output(&diff_output)
+    );
+    let diff_json = parse_stdout_json(&diff_output);
+    assert!(
+        diff_json.get("drifts").is_none(),
+        "`diff` reports the same changes `status` does, under the same name\n{}",
+        render_output(&diff_output)
+    );
+    let diff_change = &diff_json["changes"][0];
+    assert_eq!(diff_change["path"], status_change["path"]);
+    assert_eq!(diff_change["state"], status_change["state"]);
+    assert_eq!(diff_change["reason"], status_change["reason"]);
+    assert!(
+        diff_change["diff"].as_str().is_some(),
+        "the diff is what `diff` adds to the same answer\n{}",
+        render_output(&diff_output)
+    );
+
+    let status_stderr = String::from_utf8_lossy(&status_output.stderr).into_owned();
+    let diff_stderr = String::from_utf8_lossy(&diff_output.stderr).into_owned();
+    assert_eq!(
+        status_stderr.lines().next(),
+        diff_stderr.lines().next(),
+        "one machine, one moment, one file: both commands say it the same way\nstatus:\n{status_stderr}\ndiff:\n{diff_stderr}"
+    );
+    assert_eq!(
+        status_stderr.lines().nth(1),
+        diff_stderr.lines().nth(1),
+        "and they name the file the same way too\nstatus:\n{status_stderr}\ndiff:\n{diff_stderr}"
+    );
+}
+
+/// A run that found three problems found three things, not one paragraph. The
+/// human rendering joins them; the machine-readable one must not have to be
+/// split back apart on a newline.
+#[test]
+fn a_run_that_stops_lists_each_thing_it_found_separately() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    let output =
+        machine.run("dotsync --output json commit all -m x -- /etc/passwd ../outside typo.conf");
+    assert_eq!(output.status.code(), Some(1), "{}", render_output(&output));
+
+    let json = parse_stdout_json(&output);
+    let current_state = json["current_state"].as_array().unwrap_or_else(|| {
+        panic!(
+            "current_state should be an array\n{}",
+            render_output(&output)
+        )
+    });
+    assert_eq!(
+        current_state.len(),
+        3,
+        "one entry per path the run refused\n{}",
+        render_output(&output)
+    );
+    assert!(
+        current_state
+            .iter()
+            .all(|entry| entry.as_str().is_some_and(|text| !text.contains('\n'))),
+        "each entry is one fact, not a joined paragraph\n{}",
+        render_output(&output)
+    );
+
+    let not_initialized = harness
+        .machine("machine-b", "linux", "mx-vps-fd")
+        .run("dotsync --output json status");
+    let json = parse_stdout_json(&not_initialized);
+    assert!(
+        json["current_state"].is_array(),
+        "every error carries the same shape of state, whether it has one fact or three\n{}",
+        render_output(&not_initialized)
+    );
+}
+
+/// One path is one path. The JSON message counted with the plural wording
+/// whatever the count was, so an agent read "1 of the paths you named" for a
+/// command that named exactly one.
+#[test]
+fn naming_one_unusable_path_reads_as_one_path() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    let unusable = machine.run("dotsync --output json commit all -m x -- typo.conf");
+    assert_eq!(
+        unusable.status.code(),
+        Some(1),
+        "{}",
+        render_output(&unusable)
+    );
+    assert_eq!(
+        parse_stdout_json(&unusable)["message"],
+        "cannot commit the path you named",
+        "{}",
+        render_output(&unusable)
+    );
+
+    let two = machine.run("dotsync --output json commit all -m x -- typo.conf other-typo.conf");
+    assert_eq!(two.status.code(), Some(1), "{}", render_output(&two));
+    assert_eq!(
+        parse_stdout_json(&two)["message"],
+        "cannot commit 2 of the paths you named",
+        "{}",
+        render_output(&two)
+    );
+}
+
+/// A named directory that holds a symlink used to record everything else and
+/// say nothing about the link, so an agent reading `newly_tracked` would
+/// believe the whole directory reached the scope.
+#[test]
+fn a_symlink_under_a_named_directory_is_reported_rather_than_silently_skipped() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    let outside = harness.root_dir.join("outside/nvim-init.lua");
+    write_file_at(&outside, "vim.o.number = true\n");
+    machine.write_file(".config/app/settings.conf", "theme = dark\n");
+    symlink_at(&outside, &machine.home_dir.join(".config/app/linked.lua"));
+
+    let commit = machine.run("dotsync --output json commit all -m 'app config' -- .config/app/");
+    assert_eq!(commit.status.code(), Some(0), "{}", render_output(&commit));
+
+    let json = parse_stdout_json(&commit);
+    let skipped = json["skipped_paths"].as_array().unwrap_or_else(|| {
+        panic!(
+            "skipped_paths should be an array\n{}",
+            render_output(&commit)
+        )
+    });
+    let linked = skipped
+        .iter()
+        .find(|entry| entry["path"] == ".config/app/linked.lua")
+        .unwrap_or_else(|| {
+            panic!(
+                "a symlink the directory matched must be reported, not dropped\n{}",
+                render_output(&commit)
+            )
+        });
+    assert_eq!(linked["state"], "symlink");
+    assert!(
+        linked["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("symlink")),
+        "the reason has to say what dotsync would have had to do with it\n{}",
+        render_output(&commit)
+    );
+
+    let stderr = String::from_utf8_lossy(&commit.stderr).into_owned();
+    assert!(
+        stderr.contains(".config/app/linked.lua"),
+        "and a human reader has to be told too\n{stderr}"
+    );
+
+    assert_eq!(
+        remote_branch_file_contents(&machine, "all", ".config/app/settings.conf"),
+        "theme = dark\n",
+        "the real file under the directory is still recorded"
+    );
+    assert!(
+        !bookmark_has_file(&machine, "all", ".config/app/linked.lua"),
+        "and the link itself is not"
+    );
+}
+
+/// A paused cascade is one state with one remedy, so it is one exit code
+/// wherever a command meets it. It used to be 3 for the run that created the
+/// pause and 1 for the next run that ran into it, which teaches an agent that
+/// its own next command is a different kind of failure.
+#[test]
+fn a_paused_cascade_is_the_same_answer_whichever_command_meets_it() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
+    let commit_base = machine_a.run("dotsync commit all -m 'add base config' -- .config/app.conf");
+    assert!(
+        commit_base.status.success(),
+        "{}",
+        render_output(&commit_base)
+    );
+    machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
+    let commit_linux =
+        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
+    assert!(
+        commit_linux.status.success(),
+        "{}",
+        render_output(&commit_linux)
+    );
+
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
+    let conflict =
+        machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
+    assert_eq!(
+        conflict.status.code(),
+        Some(3),
+        "the run that pauses reports the pause\n{}",
+        render_output(&conflict)
+    );
+
+    machine_b.write_file(".config/other.conf", "other = true\n");
+    let blocked = machine_b.run("dotsync commit goof-b -m 'try another' -- .config/other.conf");
+    assert_eq!(
+        blocked.status.code(),
+        Some(3),
+        "and so does the next run that meets it\n{}",
+        render_output(&blocked)
+    );
+
+    let unresolved = machine_b.run("dotsync continue");
+    assert_eq!(
+        unresolved.status.code(),
+        Some(3),
+        "a continue that finds nothing resolved is still the same paused cascade\n{}",
+        render_output(&unresolved)
+    );
+
+    let aborted = machine_b.run("dotsync --output json abort");
+    assert!(aborted.status.success(), "{}", render_output(&aborted));
+    let json = parse_stdout_json(&aborted);
+    assert_eq!(
+        json["paused_scope"],
+        "linux",
+        "abort names the scope the cascade was paused at, and says which scope that is\n{}",
+        render_output(&aborted)
+    );
+    assert!(
+        json.get("aborted_scope").is_none(),
+        "the scope was paused, not aborted; the cascade was aborted\n{}",
+        render_output(&aborted)
+    );
+    assert!(
+        json.get("scope").is_none(),
+        "one value, one field\n{}",
+        render_output(&aborted)
+    );
+}
+
+/// dotsync abstracts jj away entirely, which has to include the words it uses
+/// when it stops. `bookmark` is a jj concept an agent has never been told
+/// about, and a file that is simply not on a scope is an ordinary answer rather
+/// than a backend failure.
+#[test]
+fn a_user_never_meets_the_backends_vocabulary() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    let bad_scope = machine.run("dotsync --output json view --scope nosuchscope");
+    assert_eq!(
+        bad_scope.status.code(),
+        Some(1),
+        "{}",
+        render_output(&bad_scope)
+    );
+    let stderr = String::from_utf8_lossy(&bad_scope.stderr).into_owned();
+    assert!(
+        !stderr.contains("bookmark"),
+        "a scope that does not exist is a scope that does not exist\n{stderr}"
+    );
+    assert_eq!(
+        parse_stdout_json(&bad_scope)["error"],
+        "invalid_scope",
+        "and it is the same mistake `commit` already teaches about\n{}",
+        render_output(&bad_scope)
+    );
+
+    let missing_file = machine.run("dotsync --output json view --scope all --file .nosuchfile");
+    assert_eq!(
+        missing_file.status.code(),
+        Some(1),
+        "{}",
+        render_output(&missing_file)
+    );
+    let stderr = String::from_utf8_lossy(&missing_file.stderr).into_owned();
+    assert!(
+        !stderr.contains("jj operation failed"),
+        "a file that is not on a scope is not an internal failure\n{stderr}"
+    );
+    let json = parse_stdout_json(&missing_file);
+    assert_eq!(
+        json["error"],
+        "file_not_on_scope",
+        "and an agent branching on the code can tell it from a broken repo\n{}",
+        render_output(&missing_file)
+    );
+}
+
+/// The comments in this file are load-bearing: they are how an agent with no
+/// memory of this machine learns that hyprland config goes on `hyprland` and
+/// not on `linux`. `init` used to generate the scope list with no comments at
+/// all, so the mechanism DESIGN.md and the dotfiles skill both send agents to
+/// produced nothing to read.
+#[test]
+fn init_writes_a_config_whose_comments_teach_scope_choice() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    let config = machine.read_file(".config/dotsync/config.toml");
+    for expected in [
+        "Every scope is a branch",
+        "root-est scope",
+        "`all` — every machine",
+        "`linux` — every machine whose OS is linux",
+        "`mx-xps-cy` — only the machine called mx-xps-cy",
+    ] {
+        assert!(
+            config.contains(expected),
+            "the generated config must explain the scopes it created; missing {expected:?}:\n{config}"
+        );
+    }
+    assert!(
+        config.matches("What belongs here:").count() >= 3,
+        "every scope needs somewhere to write what it is for:\n{config}"
+    );
+
+    let status = machine.run("dotsync status");
+    assert!(
+        status.status.success(),
+        "and the commented file still has to be the file dotsync reads\n{}",
+        render_output(&status)
+    );
+}
+
+/// A second machine joining adds its own scope to the shared config. It used to
+/// re-render that file from the parsed scope graph, which threw away every
+/// comment anyone had written — so the load-bearing comments survived exactly
+/// until the next machine ran `init`.
+#[test]
+fn a_machine_joining_keeps_the_comments_already_in_the_config() {
+    let harness = TestHarness::new();
+    let machine_a = harness.machine("machine-a", "linux", "goof-a");
+
+    let init_a = machine_a.init();
+    assert!(init_a.status.success(), "{}", render_output(&init_a));
+
+    let described = machine_a.read_file(".config/dotsync/config.toml").replace(
+        "[sync]",
+        "# hand-written: hyprland and fish config live on `linux`.\n[sync]",
+    );
+    machine_a.write_file(".config/dotsync/config.toml", &described);
+    let commit =
+        machine_a.run("dotsync commit all -m 'describe linux' -- .config/dotsync/config.toml");
+    assert!(commit.status.success(), "{}", render_output(&commit));
+
+    let machine_b = harness.machine("machine-b", "linux", "goof-b");
+    let init_b = machine_b.init();
+    assert!(init_b.status.success(), "{}", render_output(&init_b));
+
+    let joined = machine_b.read_file(".config/dotsync/config.toml");
+    assert!(
+        joined.contains("# hand-written: hyprland and fish config live on `linux`."),
+        "joining a remote must not throw away what the config says:\n{joined}"
+    );
+    assert!(
+        joined.contains("goof-b = { parents = [\"linux\"] }"),
+        "while still adding the joining machine's scope:\n{joined}"
+    );
+    assert!(
+        joined.contains("`goof-b` — only the machine called goof-b"),
+        "with the same explanation init writes for a scope it creates:\n{joined}"
+    );
+}
+
+/// A forced sync is the one thing plain `dotsync` does that cannot be undone:
+/// it throws away what is in home. The notes on stderr said so and the payload
+/// did not, so the machine-readable half of the run was the less honest one.
+#[test]
+fn a_forced_sync_says_which_home_files_it_overwrote() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
+    let clean = machine.run("dotsync --output json");
+    assert!(clean.status.success(), "{}", render_output(&clean));
+    assert_eq!(
+        parse_stdout_json(&clean)["overwritten_files"]
+            .as_array()
+            .map(Vec::len),
+        Some(0),
+        "a sync that overwrote nothing says so, rather than saying nothing\n{}",
+        render_output(&clean)
+    );
+
+    machine.write_file(".bashrc", "export DOTSYNC=mine\n");
+    let forced = machine.run("dotsync --force --output json");
+    assert!(forced.status.success(), "{}", render_output(&forced));
+    let json = parse_stdout_json(&forced);
+    assert_eq!(
+        json["overwritten_files"],
+        serde_json::json!([".bashrc"]),
+        "the file whose contents this run discarded has to be in the payload\n{}",
+        render_output(&forced)
+    );
+    assert_eq!(machine.read_file(".bashrc"), "export DOTSYNC=repo\n");
+}
+
+/// An unknown command with `--output json` after it emitted nothing at all on
+/// stdout: clap's external-subcommand catch-all swallows every trailing
+/// argument, so the flag never reached the parsed value the emitter reads. An
+/// empty stdout and exit 2 is indistinguishable from a crash, for the one
+/// mistake an agent makes most.
+#[test]
+fn an_unknown_command_honors_the_json_contract_wherever_the_flag_sits() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    for command in ["dotsync --output json bogus", "dotsync bogus --output json"] {
+        let output = machine.run(command);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{command}\n{}",
+            render_output(&output)
+        );
+        let json = parse_stdout_json(&output);
+        assert_eq!(json["status"], "error", "{command}");
+        assert_eq!(json["error"], "usage", "{command}");
+        assert!(
+            json["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("bogus")),
+            "{command}\n{}",
+            render_output(&output)
+        );
+    }
+}
+
+/// Every error payload carries the same three collections, so error handling
+/// has one shape — PLAN says so. Usage errors carried none of them, which is
+/// the one error an agent hits before it has learned anything else.
+#[test]
+fn a_usage_error_has_the_same_shape_as_every_other_error() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let output = machine.run("dotsync --output json bogus");
+    assert_eq!(output.status.code(), Some(2), "{}", render_output(&output));
+
+    let json = parse_stdout_json(&output);
+    for field in ["current_state", "drifts", "forced_overwrites"] {
+        assert_eq!(
+            json[field].as_array().map(Vec::len),
+            Some(0),
+            "a usage error must carry `{field}` like every other error\n{}",
+            render_output(&output)
+        );
+    }
+}
+
+/// The drift stop lists the files it stopped on, and used to list them as `- `
+/// bullets printed straight after the `Correct flow:` bullets — so the files
+/// read as more instructions. They are also the same files `status` and `diff`
+/// report, and were rendered in a third shape.
+#[test]
+fn the_drift_stop_lists_files_the_way_status_does_and_apart_from_its_instructions() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+    machine.write_file(".bashrc", "export DOTSYNC=mine\n");
+
+    let stopped = machine.run("dotsync");
+    assert_eq!(
+        stopped.status.code(),
+        Some(1),
+        "{}",
+        render_output(&stopped)
+    );
+    let stderr = String::from_utf8_lossy(&stopped.stderr).into_owned();
+
+    let status_output = machine.run("dotsync status");
+    let status_stderr = String::from_utf8_lossy(&status_output.stderr).into_owned();
+    let status_line = status_stderr
+        .lines()
+        .find(|line| line.contains(".bashrc"))
+        .expect("status names the changed file");
+    assert!(
+        stderr.contains(status_line),
+        "the stop names the file the way `status` does\nstop:\n{stderr}\nstatus line: {status_line:?}"
+    );
+
+    let (instructions, files) = stderr
+        .split_once("Correct flow:")
+        .expect("the stop teaches a correct flow");
+    assert!(
+        !instructions.contains("- .bashrc"),
+        "the file list must not be rendered as instruction bullets\n{stderr}"
+    );
+    assert!(
+        files.contains("Changed files:"),
+        "the file list needs a heading of its own so it is not read as more instructions\n{stderr}"
+    );
+}
+
+/// `dotsync status` is the reflex diagnostic. On a machine where a cascade is
+/// paused — which is a machine that cannot commit anything at all — it
+/// reported "no changes", and nothing anywhere else said otherwise once the
+/// original pause message had scrolled away.
+#[test]
+fn status_and_diff_say_a_cascade_is_paused() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
+    let base = machine_a.run("dotsync commit all -m 'add base' -- .config/app.conf");
+    assert!(base.status.success(), "{}", render_output(&base));
+    machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
+    let linux = machine_a.run("dotsync commit linux -m 'linux flavour' -- .config/app.conf");
+    assert!(linux.status.success(), "{}", render_output(&linux));
+
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
+    let conflict = machine_b.run("dotsync commit all -m 'shared change' -- .config/app.conf");
+    assert_eq!(
+        conflict.status.code(),
+        Some(3),
+        "{}",
+        render_output(&conflict)
+    );
+
+    // Home now holds exactly what the pause left there, so both commands would
+    // otherwise report a clean machine.
+    machine_b.write_file(".config/app.conf", "setting = \"linux\"\n");
+
+    for command in ["dotsync status", "dotsync diff"] {
+        let output = machine_b.run(command);
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            stderr.contains("paused") && stderr.contains("linux"),
+            "`{command}` must say a cascade is paused, and where\n{stderr}"
+        );
+        assert!(
+            stderr.contains("dotsync continue") || stderr.contains("dotsync abort"),
+            "`{command}` must point at the way out\n{stderr}"
+        );
+    }
+
+    for command in ["dotsync --output json status", "dotsync --output json diff"] {
+        let output = machine_b.run(command);
+        assert_eq!(
+            parse_stdout_json(&output)["paused_cascade"],
+            "linux",
+            "`{command}` must report the pause in the payload too\n{}",
+            render_output(&output)
+        );
+    }
+}
+
+/// "Then rerun `dotsync status`" was the advice whatever you had run, so an
+/// agent that ran `dotsync commit` was told to finish by running something
+/// else. The message was also the one structured error written in a shape of
+/// its own.
+#[test]
+fn the_not_initialized_stop_names_the_command_you_ran() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let output = machine.run("dotsync commit all -m 'add bashrc' -- .bashrc");
+    assert_eq!(output.status.code(), Some(1), "{}", render_output(&output));
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        stderr.contains("rerun `dotsync commit`"),
+        "the advice must name the command that was run\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("rerun `dotsync status`"),
+        "and must not name a command the agent never ran\n{stderr}"
+    );
+    for section in [
+        "What dotsync does:",
+        "This flow:",
+        "Expected:",
+        "Current state found:",
+        "Why dotsync stopped:",
+        "Correct flow:",
+    ] {
+        assert!(
+            stderr.contains(section),
+            "not-initialized must be laid out like every other teaching error; missing {section:?}\n{stderr}"
+        );
+    }
+}
+
+/// `repo already exists at <path>` was a one-line dead end: it named a
+/// directory the agent is told never to touch, and said nothing about what to
+/// do with an already-initialized machine.
+#[test]
+fn init_on_an_initialized_machine_says_what_to_run_instead() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    let again = machine.init();
+    assert_eq!(again.status.code(), Some(1), "{}", render_output(&again));
+    let stderr = String::from_utf8_lossy(&again.stderr).into_owned();
+    assert!(
+        stderr.contains("already initialized"),
+        "the stop has to say what state the machine is in\n{stderr}"
+    );
+    assert!(
+        stderr.contains("run `dotsync`") && stderr.contains("dotsync status"),
+        "and what to run instead\n{stderr}"
+    );
+    assert!(
+        stderr.contains("Correct flow:"),
+        "laid out like every other teaching error\n{stderr}"
+    );
+}
+
+/// A named path that is not a regular file used to hang the process: `fs::read`
+/// on a FIFO blocks until somebody writes to the other end, and nothing ever
+/// does. A directory selection already steps around one and says so; naming it
+/// exactly has to be refused, and every other read of home has to refuse it
+/// too, because a tracked path can become one at any time.
+#[test]
+fn a_named_path_that_is_not_a_regular_file_is_refused_rather_than_read() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    make_fifo(&machine.home_dir.join(".pipe"));
+
+    let named = machine.run_within(
+        "dotsync commit all -m 'pipe' -- .pipe",
+        std::time::Duration::from_secs(20),
+    );
+    assert_eq!(
+        named.status.code(),
+        Some(1),
+        "naming a fifo must be refused, not read\n{}",
+        render_output(&named)
+    );
+    let stderr = String::from_utf8_lossy(&named.stderr).into_owned();
+    assert!(
+        stderr.contains("not a regular file"),
+        "and the refusal has to say why\n{stderr}"
+    );
+
+    // The same file where dotsync reads home without being asked: a path the
+    // scope already tracks, replaced in home by a fifo.
+    machine.write_file(".bashrc", "export DOTSYNC=1\n");
+    let tracked = machine.run("dotsync commit all -m 'bashrc' -- .bashrc");
+    assert!(tracked.status.success(), "{}", render_output(&tracked));
+    machine.delete_file(".bashrc");
+    make_fifo(&machine.home_dir.join(".bashrc"));
+
+    let status = machine.run_within("dotsync status", std::time::Duration::from_secs(20));
+    assert_eq!(
+        status.status.code(),
+        Some(1),
+        "reading home must stop rather than block forever\n{}",
+        render_output(&status)
+    );
+    assert!(
+        String::from_utf8_lossy(&status.stderr).contains("not a regular file"),
+        "{}",
+        render_output(&status)
+    );
+}
+
+/// `dotsync view --file` on a path no scope holds printed the two headings and
+/// nothing between them, which reads exactly like a bug — and is the answer to
+/// the commonest reason for asking: a typo.
+#[test]
+fn view_says_when_no_scope_holds_a_file() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    let output = machine.run("dotsync view --file .nosuchfile");
+    assert_eq!(output.status.code(), Some(0), "{}", render_output(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        stdout.contains("No scope holds .nosuchfile"),
+        "an empty answer has to say it is an answer\n{stdout}"
+    );
+}
+
+/// Every command a stop tells you to rerun has to be a command dotsync knows.
+///
+/// The advice was built from the identifier the JSON payload uses for the
+/// command, and for plain sync those are not the same string: the payload says
+/// `"sync"`, but bare `dotsync` *is* the sync command and `dotsync sync` is not
+/// a subcommand at all. So a fresh machine's very first interaction ended by
+/// naming an invocation that exits 2 — the same defect this advice exists to
+/// fix, inverted, on the reflex command.
+#[test]
+fn every_command_the_advice_names_is_a_command_dotsync_knows() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let sync = machine.run("dotsync");
+    assert_eq!(sync.status.code(), Some(1), "{}", render_output(&sync));
+    let sync_stderr = String::from_utf8_lossy(&sync.stderr).into_owned();
+    assert!(
+        sync_stderr.contains("then rerun `dotsync`."),
+        "bare `dotsync` is how you run a sync; there is nothing to add to it\n{sync_stderr}"
+    );
+
+    let commit = machine.run("dotsync commit all -m 'add bashrc' -- .bashrc");
+    let commit_stderr = String::from_utf8_lossy(&commit.stderr).into_owned();
+
+    for stderr in [&sync_stderr, &commit_stderr] {
+        let advice = stderr
+            .split_once("Correct flow:")
+            .expect("the stop teaches a correct flow")
+            .1;
+        let invocations = quoted_dotsync_invocations(advice);
+        assert!(
+            !invocations.is_empty(),
+            "the advice has to name something to run\n{stderr}"
+        );
+        for invocation in invocations {
+            let attempt = machine.run(&invocation);
+            let attempt_stderr = String::from_utf8_lossy(&attempt.stderr).into_owned();
+            assert!(
+                !attempt_stderr.contains("unknown command"),
+                "the advice named `{invocation}`, which dotsync does not recognise\n{attempt_stderr}"
+            );
+        }
+    }
+}
+
+/// The dotsync invocations a message quotes in backticks, skipping the ones
+/// holding a `<placeholder>` for the reader to fill in.
+fn quoted_dotsync_invocations(text: &str) -> Vec<String> {
+    text.split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|quoted| quoted.starts_with("dotsync") && !quoted.contains('<'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// `view` is the third read-only diagnostic, and the only one that stayed
+/// silent about a paused cascade — so an agent that reached for the command
+/// whose whole job is orientation was the one agent not told that this machine
+/// cannot commit anything.
+#[test]
+fn view_says_a_cascade_is_paused() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
+    let base = machine_a.run("dotsync commit all -m 'add base' -- .config/app.conf");
+    assert!(base.status.success(), "{}", render_output(&base));
+    machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
+    let linux = machine_a.run("dotsync commit linux -m 'linux flavour' -- .config/app.conf");
+    assert!(linux.status.success(), "{}", render_output(&linux));
+
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
+    let conflict = machine_b.run("dotsync commit all -m 'shared change' -- .config/app.conf");
+    assert_eq!(
+        conflict.status.code(),
+        Some(3),
+        "{}",
+        render_output(&conflict)
+    );
+
+    // Every shape `view` answers in, because the pause is true of the machine
+    // rather than of the question asked.
+    for command in [
+        "dotsync view",
+        "dotsync view --scope all",
+        "dotsync view --file .config/app.conf",
+    ] {
+        let output = machine_b.run(command);
+        assert!(output.status.success(), "{}", render_output(&output));
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            stderr.contains("paused") && stderr.contains("linux"),
+            "`{command}` must say a cascade is paused, and where\n{stderr}"
+        );
+
+        let json_output = machine_b.run(&format!("{command} --output json"));
+        assert_eq!(
+            parse_stdout_json(&json_output)["paused_cascade"],
+            "linux",
+            "`{command}` must report the pause in the payload too\n{}",
+            render_output(&json_output)
+        );
+    }
 }

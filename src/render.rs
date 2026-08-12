@@ -1,10 +1,140 @@
-use crate::UsageError;
+use crate::{HumanOutput, SuccessOutput, UsageError};
 use dotsync::{
-    DotsyncError, ErrorReport, FileDrift, PushReport, SkippedCommitPath, UnreachableRemote,
+    DotsyncError, ErrorReport, FileChange, FileDrift, FileState, PushReport, SkipReason,
+    SkippedCommitPath, SyncReport, UnreachableRemote,
 };
 use serde_json::json;
 use similar::TextDiff;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Output for a command whose job is to bring home up to its machine scope:
+/// `init`, plain `dotsync`, `continue`, and `abort`. They differ in what they
+/// did to get there and in nothing else they report, so they answer in one
+/// shape rather than in four copies of it.
+///
+/// `push` is `None` only for `abort`, which is the one of the four that
+/// publishes nothing — so a command that does publish cannot quietly omit what
+/// it left unpublished.
+pub(crate) fn synced_output(
+    command: &str,
+    headline: String,
+    sync: &SyncReport,
+    push: Option<&PushReport>,
+) -> SuccessOutput {
+    let mut json = json!({
+        "status": "ok",
+        "command": command,
+        "machine_scope": sync.current_scope,
+        "synced_files": display_paths(&sync.synced_paths),
+        // The one thing a sync does that cannot be undone. A drift that
+        // reached this report is a drift the run was allowed to overwrite —
+        // anything else stopped it — so this is exactly the home content this
+        // run discarded. Named for what happened to the file rather than for
+        // the flag, because `init` and `abort` do it without one, and because
+        // `commit`'s `forced_overwrites` is the opposite direction: paths
+        // recorded over another machine's change.
+        "overwritten_files": display_paths(
+            &sync.drifts.iter().map(|drift| drift.repo_path.clone()).collect::<Vec<_>>(),
+        ),
+    });
+    if let Some(push) = push {
+        json["unpushed_scopes"] = json!(push.unpushed_scopes());
+    }
+    SuccessOutput {
+        json,
+        human: HumanOutput::Message(headline),
+        notes: success_notes(&sync.drifts, push),
+        exit_code: 0,
+    }
+}
+
+pub(crate) fn display_paths(paths: &[PathBuf]) -> Vec<String> {
+    paths.iter().map(|path| display_path(path)).collect()
+}
+
+/// What a read-only command says about a cascade it found paused.
+///
+/// A note rather than part of the answer, so it reaches a caller in both
+/// output formats and arrives before the answer it qualifies: on a machine
+/// with a paused cascade, "no changes" is true and misleading at once, because
+/// nothing can be committed and nothing is being published.
+pub(crate) fn paused_cascade_notes(paused_cascade: Option<&String>) -> Vec<String> {
+    let Some(scope) = paused_cascade else {
+        return Vec::new();
+    };
+    vec![
+        format!("dotsync: a cascade is paused at scope `{scope}`; this machine cannot commit and is publishing nothing until it is resolved"),
+        "dotsync: edit the conflicted files in home to the merged contents you want and run `dotsync continue`, or run `dotsync abort` to discard the cascade.".to_string(),
+    ]
+}
+
+/// One changed file, for a machine. The same object wherever dotsync reports a
+/// file that differs from what the scopes hold: `status`, `diff`, and the
+/// drift a run stopped on. `state` is the code to branch on; `reason` is the
+/// same thing in words, so nothing has to keep a table of codes to read it.
+pub(crate) fn change_json(path: &Path, state: FileState) -> serde_json::Value {
+    json!({
+        "path": display_path(path),
+        "state": state.code(),
+        "reason": state.reason(),
+    })
+}
+
+pub(crate) fn changes_json(changes: &[FileChange]) -> Vec<serde_json::Value> {
+    changes
+        .iter()
+        .map(|change| change_json(&change.path, change.state))
+        .collect()
+}
+
+/// The same object a changed file gets, because "why is this path not in the
+/// commit" is the same question `status` answers about a file — and a reason
+/// that is about the path rather than its content is still a reason.
+pub(crate) fn skipped_paths_json(skipped: &[SkippedCommitPath]) -> Vec<serde_json::Value> {
+    skipped
+        .iter()
+        .map(|skipped| {
+            json!({
+                "path": display_path(&skipped.path),
+                "state": skipped.reason.code(),
+                "reason": skipped.reason.explain(),
+            })
+        })
+        .collect()
+}
+
+/// One changed file, for a person: a marker to scan for, the path, and the
+/// reason in words so the marker never has to be guessed at. `status` and
+/// `diff` are answering the same question, so they say it the same way.
+pub(crate) fn render_change_line(path: &Path, state: FileState) -> String {
+    format!(
+        "  {} {} ({})",
+        change_marker(state),
+        display_path(path),
+        state.reason()
+    )
+}
+
+fn change_marker(state: FileState) -> &'static str {
+    match state {
+        FileState::EditedInHome | FileState::EditedInHomeButRemovedFromRepo => "M",
+        FileState::DeletedInHome | FileState::DeletedInHomeTipAlsoChanged => "D",
+        FileState::DivergedEdit
+        | FileState::IncomingNewCollidesWithUntrackedHome
+        | FileState::NoSyncRecord => "C",
+        FileState::IncomingNew => "A",
+        FileState::StaleNotYours => "U",
+        FileState::RemovedFromRepo => "R",
+        // Not reported: `status` and `diff` only ever render drift and incoming
+        // changes.
+        FileState::UntrackedInHome
+        | FileState::IncomingNewAlreadyMatchesHome
+        | FileState::AlreadyApplied
+        | FileState::InSync
+        | FileState::RemovedEverywhere
+        | FileState::AbsentEverywhere => " ",
+    }
+}
 
 pub(crate) fn render_error_json(error: &ErrorReport) -> serde_json::Value {
     json!({
@@ -17,22 +147,30 @@ pub(crate) fn render_error_json(error: &ErrorReport) -> serde_json::Value {
     })
 }
 
+/// A usage error in the shape every other error has.
+///
+/// The three collections are always empty here — a run that never started
+/// found no state, overwrote nothing and stopped on no drift — but they are
+/// present, because "every error payload has one shape" is only useful to a
+/// caller if it is true of the first error it ever meets.
 pub(crate) fn render_usage_error_json(error: &UsageError) -> serde_json::Value {
     json!({
         "status": "error",
         "error": "usage",
         "message": error.message,
+        "current_state": Vec::<String>::new(),
+        "drifts": Vec::<serde_json::Value>::new(),
+        "forced_overwrites": Vec::<String>::new(),
     })
 }
 
+/// A changed file with the two sides shown. Exactly the object `status`
+/// reports for the same file, plus the diff — which is the whole of what
+/// `diff` adds to `status`.
 pub(crate) fn render_drift_json(drift: &FileDrift) -> serde_json::Value {
-    json!({
-        "path": display_path(&drift.repo_path),
-        "system_path": display_path(&drift.system_path),
-        "state": drift.state.code(),
-        "reason": drift.state.reason(),
-        "diff": render_drift_diff(drift),
-    })
+    let mut json = change_json(&drift.repo_path, drift.state);
+    json["diff"] = json!(render_drift_diff(drift));
+    json
 }
 
 /// A unified diff of what the repo holds against what home holds.
@@ -67,19 +205,31 @@ fn drift_side_text(bytes: Option<&[u8]>) -> Option<String> {
     }
 }
 
-pub(crate) fn render_error_human(error: &DotsyncError) -> String {
+/// The facts a stop found, as one block for a person to read. Empty means the
+/// error's own message is all there is to say.
+fn current_state_text(report: &ErrorReport) -> String {
+    if report.current_state.is_empty() {
+        report.message.clone()
+    } else {
+        report.current_state.join("\n")
+    }
+}
+
+/// `invocation` is what the user typed, when they typed something dotsync
+/// recognises — the words, not the name the payload uses for the command. A
+/// stop that ends by naming the command to rerun has to name theirs, and has
+/// to name one that runs: before this, every one of them said `dotsync
+/// status`, and the first fix said `dotsync sync`, which is not a command.
+pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>) -> String {
     let error_report = error.to_error_report();
 
     match error {
         DotsyncError::ScopeDiverged { scope, .. } => render_structured_error(
             &format!("scope `{scope}` has diverged from the remote"),
-            "Dotsync fetches remote scope bookmarks before syncing or committing so each machine picks up scope history published by the other machines.",
-            "This fetch flow fast-forwards a scope when the remote has simply moved ahead, and leaves the scope alone when this machine holds commits it has not pushed yet.",
+            "Dotsync fetches each scope's published history before syncing or committing, so every machine picks up what the others have recorded.",
+            "This fetch flow fast-forwards a scope when the remote has simply moved ahead, and leaves the scope alone when this machine holds commits it has not published yet.",
             "It expects the local and remote positions of a scope to be on one line of history, so that one of them is an ancestor of the other.",
-            error_report
-                .current_state
-                .as_deref()
-                .unwrap_or(&error_report.message),
+            &current_state_text(&error_report),
             "This machine and the remote both have commits on this scope that the other does not, so neither side can be fast-forwarded onto the other.",
             &[
                 "Nothing has been lost or changed: your local commits are intact and still unpushed.",
@@ -91,7 +241,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             "Dotsync keeps its hidden repo as the source of truth for your home-directory config: the repo is the source of truth, and dotsync syncs committed repo state into the live system.",
             "This sync flow compares managed files in your home directory against the repo version for this machine scope before copying anything.",
             "This flow expects managed files in your home directory to already match the repo, unless you intentionally choose to overwrite drift.",
-            "Drifted files are listed below with diffs.",
+            "The files that differ are listed under `Changed files:` below, each with what it would be replaced by.",
             "Dotsync stopped before overwriting local drift so you can inspect what would be replaced.",
             &[
                 "If the repo is correct, rerun with `dotsync --force` to overwrite the drift after reviewing the diffs.",
@@ -103,10 +253,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config.",
             "This commit flow was merging the scoped change through the scope DAG and reached a branch where the same file had incompatible edits.",
             "It expects you to edit the conflicted file in home to the merged contents you want, then run `dotsync continue` to create the merge commit and resume the cascade.",
-            error_report
-                .current_state
-                .as_deref()
-                .unwrap_or(&error_report.message),
+            &current_state_text(&error_report),
             &error_report.message,
             &[
                 "edit each conflicted file at its real path in home so it holds the merged contents you want; the file has to change, because dotsync reads the resolution back out of it.",
@@ -120,10 +267,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config. Where two branches changed one file differently, the cascade pauses and asks you for the merged contents.",
             "This continue flow reads each conflicted file back out of your home directory and records what it finds there as the resolution. To tell a resolution from an untouched file, it compares them against what they held when the cascade paused.",
             "It expects the paused cascade to have recorded those contents.",
-            error_report
-                .current_state
-                .as_deref()
-                .unwrap_or(&error_report.message),
+            &current_state_text(&error_report),
             "This cascade was paused by an older dotsync, which recorded nothing to compare against. Continuing would record whatever is in home as the resolution without being able to tell whether anything was resolved, and that silently discards the other scope's version.",
             &[
                 "run `dotsync abort` to discard the paused cascade; it reverts the conflicted files in home to this machine's scope state.",
@@ -135,10 +279,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config. Where two branches changed one file differently, the cascade pauses and asks you for the merged contents.",
             "This continue flow reads each conflicted file back out of your home directory and records what it finds there as the resolution.",
             "It expects those files to have changed since the cascade paused, because the resolution is the contents you write into them.",
-            error_report
-                .current_state
-                .as_deref()
-                .unwrap_or(&error_report.message),
+            &current_state_text(&error_report),
             "Dotsync does not yet write the two conflicting versions into home, so an unchanged file is not a resolution - it is only the version that happened to already be there. Recording it would silently discard the other scope's version.",
             &[
                 &format!(
@@ -160,10 +301,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config.",
             "This commit flow was about to start a new scoped commit, but a previous cascade is still paused for conflict resolution.",
             "It expects exactly one cascade to be active at a time so commit history, conflict resolution, and home sync state stay aligned.",
-            error_report
-                .current_state
-                .as_deref()
-                .unwrap_or(&error_report.message),
+            &current_state_text(&error_report),
             "Dotsync stopped before fetching, committing, or syncing because starting another commit would hide the real paused-cascade task and may mutate unrelated scope state.",
             &[
                 "edit each conflicted file at its real path in home so it holds the merged contents you want; the file has to change, because dotsync reads the resolution back out of it.",
@@ -222,10 +360,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 "Dotsync records the home files you name onto a scope branch, then cascades that scope so every machine sharing it receives the change. Every file on a scope is written back into home on each of those machines.",
                 "This commit flow resolves each path you name against your home directory, checks that it is a config file dotsync may record, and commits the ones that changed.",
                 "It expects every path you name to be a config file inside your home directory, named relative to it, and to exist either in home or on the target scope already.",
-                error_report
-                    .current_state
-                    .as_deref()
-                    .unwrap_or(&error_report.message),
+                &current_state_text(&error_report),
                 "Dotsync stopped before recording anything. A commit records every path you named or none of them, so fixing the paths above and rerunning the same command is safe.",
                 &steps.iter().map(String::as_str).collect::<Vec<_>>(),
             )
@@ -239,10 +374,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             "Dotsync records the home files you name onto a scope branch and cascades them to every machine sharing it. Plain `dotsync` goes the other way, writing what the scopes hold back into home.",
             "This commit flow reads each path you named across three sides: what dotsync last synced to this machine, what is in home now, and what the scopes hold now.",
             "It expects the paths you name to hold a change you made in home since the last sync.",
-            error_report
-                .current_state
-                .as_deref()
-                .unwrap_or(&error_report.message),
+            &current_state_text(&error_report),
             "Recording these would put older bytes back on the scope and cascade them, silently reverting whoever published the change that is already there.",
             &[
                 "run `dotsync` to bring this machine up to date; the incoming change is written into home, and an incoming deletion removes the file.",
@@ -252,16 +384,44 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 ),
             ],
         ),
+        // Raised by every command that takes a scope name, so it teaches about
+        // scopes rather than about whichever command the reader happened to be
+        // running: `view --scope` used to get a bare one-liner for the mistake
+        // `commit` explained in full.
         DotsyncError::InvalidScope { .. } => render_structured_error(
             "invalid scope",
             "Dotsync stores dotfiles in a scope DAG so shared config can live on shared ancestor scopes and machine-specific config can stay isolated on leaf scopes.",
-            "This commit flow records your repo change on the scope you name and then cascades it through descendant scopes.",
-            "It expects the scope you name to exist in the configured scope DAG.",
+            "This flow resolves the scope you named against the scope graph, which dotsync reads from `.config/dotsync/config.toml` on the `all` scope.",
+            "It expects the scope you name to exist in that graph.",
             &error_report.message,
-            "Dotsync stopped because it cannot place this change onto a scope that is not configured.",
+            "Dotsync stopped because there is no such scope: it can neither place a change on one nor show you what one holds.",
             &[
-                "choose a real configured scope from the DAG.",
-                "Pick the root-est appropriate ancestor scope that should own the change.",
+                "run `dotsync view` to list the scopes that do exist.",
+                "then name one of those. For a commit, pick the root-est appropriate ancestor scope that should own the change.",
+            ],
+        ),
+        DotsyncError::NotARegularFile { .. } => render_structured_error(
+            "that is not a regular file",
+            "Dotsync records the bytes it finds at a path and writes those same bytes back to that path on every machine sharing the scope.",
+            "This flow read your home directory to see what each managed path holds now.",
+            "It expects every path it reads to be a regular file, or a link to one.",
+            &error_report.message,
+            "There are no bytes to read: a fifo, a socket or a device is a thing to talk to, not a thing to copy. Dotsync stops rather than opening it, because opening one waits forever for something that is never going to write to it.",
+            &[
+                "leave it out of the commit, or move it out of the directory you named. A directory selection steps around one on its own and says so.",
+                "if this path is one dotsync already tracks, put the real file back — or commit the deletion once it is gone.",
+            ],
+        ),
+        DotsyncError::FileNotOnScope { .. } => render_structured_error(
+            "that file is not on that scope",
+            "Dotsync stores dotfiles in a scope DAG, and a file lives on the scope it was committed to. Every scope below that one inherits it through the cascade, so the same file is visible on many scopes and absent from the ones above it.",
+            "This view flow reads the file out of the tree that one scope holds.",
+            "It expects that scope to hold the file — the scope it was committed to, or one below it.",
+            &error_report.message,
+            "Dotsync stopped rather than printing nothing: empty output would read exactly like an empty file.",
+            &[
+                "run `dotsync view --file <path>` to see which scopes hold it.",
+                "run `dotsync view --scope <scope>` to see what that scope does hold.",
             ],
         ),
         DotsyncError::SyncState { .. } => render_structured_error(
@@ -299,12 +459,37 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             original,
         } => format!(
             "{}\n\nAlso:\nDotsync could not remove the partly created repo at {}: {source}. Delete that directory before running `dotsync init` again.",
-            render_error_human(original),
+            render_error_human(original, invocation),
             path.display()
         ),
-        DotsyncError::NotInitialized { path } => format!(
-            "dotsync: not initialized\n\nWhat happened:\nDotsync could not find its hidden repo at {}.\n\nWhat to do:\n- Run `dotsync init <remote-url>` from this home directory.\n- Then rerun `dotsync status`.\n\nThe remote URL is the git remote that stores your dotsync repo.",
-            path.display()
+        DotsyncError::NotInitialized { .. } => render_structured_error(
+            "not initialized",
+            "Dotsync keeps your config in a hidden repo at ~/.local/share/dotsync/repo and syncs the scopes this machine belongs to into your home directory. Every command works against that repo.",
+            "This flow opened that repo to find out what this machine's scopes hold.",
+            "It expects `dotsync init <remote-url>` to have been run in this home directory already, which is what creates the repo.",
+            &current_state_text(&error_report),
+            "There is nothing to compare your home directory against, so dotsync cannot answer for it.",
+            &[
+                "run `dotsync init <remote-url>` from this home directory. The remote URL is the git remote that stores your dotsync repo.",
+                &format!("then rerun `{}`.", invocation.unwrap_or("dotsync")),
+            ],
+        ),
+        // Naming the repo path in the summary would be pointing an agent at
+        // the one directory it is told never to touch; what it needs is that
+        // this machine is already set up, and which command does the thing it
+        // was reaching for.
+        DotsyncError::RepoAlreadyExists { .. } => render_structured_error(
+            "already initialized",
+            "Dotsync keeps your config in a hidden repo at ~/.local/share/dotsync/repo, created once per machine by `dotsync init` and used by every command after that.",
+            "This init flow clones the remote into that repo and works out which scopes this machine belongs to.",
+            "It expects to be the thing that creates the repo, so it refuses to run over one that exists.",
+            &error_report.message,
+            "Cloning over an existing repo would discard whatever this machine has committed but not published.",
+            &[
+                "run `dotsync` to sync this machine, which is what `init` would have finished by doing.",
+                "run `dotsync status` to see what this machine has changed, and `dotsync view` to see the scopes it knows about.",
+                "to point this machine at a different remote, move the existing repo aside by hand first — dotsync has no command for that yet.",
+            ],
         ),
         DotsyncError::HomeNotSet
         | DotsyncError::NonUtf8Path { .. }
@@ -312,11 +497,11 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
         | DotsyncError::NoPausedCascade
         | DotsyncError::Io { .. }
         | DotsyncError::ConfigParse { .. }
+        | DotsyncError::ConfigEdit { .. }
         | DotsyncError::MissingParent { .. }
         | DotsyncError::ScopeCycle { .. }
         | DotsyncError::NoCurrentScope
-        | DotsyncError::MissingScopeBookmark { .. }
-        | DotsyncError::RepoAlreadyExists { .. }
+        | DotsyncError::ScopeNotInRepo { .. }
         | DotsyncError::MissingHostname
         | DotsyncError::Jj { .. } => format!("dotsync: {}", error_report.message),
     }
@@ -438,16 +623,33 @@ pub(crate) fn skipped_path_notes(skipped: &[SkippedCommitPath]) -> Vec<String> {
         return Vec::new();
     }
     let mut notes = vec![format!(
-        "dotsync: did not record {} file(s) under the paths you named, because this machine has not changed them",
+        "dotsync: did not record {} file(s) under the paths you named",
         skipped.len()
     )];
     notes.extend(listed(skipped.iter().map(|skipped| {
-        format!("{} ({})", skipped.path.display(), skipped.state.reason())
+        format!("{} ({})", skipped.path.display(), skipped.reason.explain())
     })));
-    notes.push(
-        "dotsync: run `dotsync` to bring them up to date, or name one exactly to be told what happened to it."
-            .to_string(),
-    );
+    // One line of advice per kind of skip that has any, because the remedies
+    // are not the same: a file another machine changed is a sync away, and a
+    // link is not.
+    if skipped
+        .iter()
+        .any(|skipped| matches!(skipped.reason, SkipReason::NotChangedHere(_)))
+    {
+        notes.push(
+            "dotsync: run `dotsync` to bring those up to date, or name one exactly to be told what happened to it."
+                .to_string(),
+        );
+    }
+    if skipped
+        .iter()
+        .any(|skipped| matches!(skipped.reason, SkipReason::Symlink { .. }))
+    {
+        notes.push(
+            "dotsync: a link cannot be recorded on a scope; move the file it points at into home if you want it managed."
+                .to_string(),
+        );
+    }
     notes
 }
 
@@ -455,12 +657,12 @@ pub(crate) fn skipped_path_notes(skipped: &[SkippedCommitPath]) -> Vec<String> {
 /// and what did not reach the remote. `push` is `None` only for commands that
 /// do not publish at all, so a publishing command cannot quietly omit this.
 pub(crate) fn success_notes(drifts: &[FileDrift], push: Option<&PushReport>) -> Vec<String> {
-    let mut notes = push.map(notes_for_push).unwrap_or_default();
+    let mut notes = push.map(push_notes).unwrap_or_default();
     notes.extend(notes_for_drifts(drifts));
     notes
 }
 
-fn notes_for_push(push: &PushReport) -> Vec<String> {
+pub(crate) fn push_notes(push: &PushReport) -> Vec<String> {
     match push {
         PushReport::UpToDate => Vec::new(),
         PushReport::Refused {
@@ -508,22 +710,27 @@ fn notes_for_drifts(drifts: &[FileDrift]) -> Vec<String> {
         "dotsync: overwrote {} drifted file(s)",
         drifts.len()
     )];
-    notes.extend(drifts.iter().flat_map(render_drift_human));
+    notes.extend(render_drifts_human(drifts));
     notes
 }
 
+/// Changed files with their two sides shown: the same line `status` and `diff`
+/// give each file, then the diff under it.
+///
+/// One renderer, because these are the same files those commands report. A
+/// drift stop used to render them as `- path (reason)`, which is also how the
+/// teaching errors render their instruction bullets — so the files a run
+/// stopped on read as more things to do.
 pub(crate) fn render_drifts_human(drifts: &[FileDrift]) -> Vec<String> {
-    drifts.iter().flat_map(render_drift_human).collect()
-}
-
-/// The path, why it is drift, and the diff. Naming the reason matters when
-/// more than home moved: "deleted here" and "deleted here, and changed in the
-/// repo on another machine" call for different resolutions.
-fn render_drift_human(drift: &FileDrift) -> [String; 2] {
-    [
-        format!("- {} ({})", drift.repo_path.display(), drift.state.reason()),
-        render_drift_diff(drift),
-    ]
+    drifts
+        .iter()
+        .flat_map(|drift| {
+            [
+                render_change_line(&drift.repo_path, drift.state),
+                render_drift_diff(drift),
+            ]
+        })
+        .collect()
 }
 
 pub(crate) fn display_path(path: &Path) -> String {

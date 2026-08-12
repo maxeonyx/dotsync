@@ -1,6 +1,6 @@
 [package]
 name = "dotsync"
-version = "0.3.17"
+version = "0.3.18"
 edition = "2021"
 description = "Agent-first dotfile sync with scope branches and merge cascades"
 license = "MIT"
@@ -17,6 +17,7 @@ similar = { version = "3.1.2", default-features = false, features = ["text"] }
 thiserror = "2.0"
 tokio = { version = "1.44", features = ["macros", "rt"] }
 toml = "0.8"
+toml_edit = "0.22"
 
 [dev-dependencies]
 assert_cmd = "2"

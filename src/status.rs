@@ -16,6 +16,14 @@ use crate::sync::{load_sync_state, resolve_current_scope};
 #[derive(Debug, Clone)]
 pub struct StatusReport {
     pub machine_scope: String,
+    /// The scope a cascade is paused at, if one is.
+    ///
+    /// Reported by the read-only commands because a paused cascade is the one
+    /// state where a machine that looks completely clean cannot commit
+    /// anything at all, and the message that said so scrolled away one command
+    /// ago. `status` is the reflex diagnostic; answering "no changes" here is
+    /// answering a different question than the one being asked.
+    pub paused_cascade: Option<String>,
     /// Home holds something dotsync did not put there. Someone has to choose.
     pub changes: Vec<FileChange>,
     /// The repo moved and home did not. Plain `dotsync` applies these.
@@ -56,6 +64,7 @@ pub async fn status(paths: &DotsyncPaths) -> Run<Result<StatusReport, DotsyncErr
 
         Ok(StatusReport {
             machine_scope,
+            paused_cascade: crate::commit::paused_cascade_scope(session.paths())?,
             changes: file_changes(FileState::is_drift),
             incoming: file_changes(FileState::is_incoming),
         })
