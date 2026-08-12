@@ -1895,6 +1895,107 @@ Correct flow:
 }
 
 #[test]
+fn continue_refuses_a_conflicted_file_that_was_never_resolved() {
+    let harness = TestHarness::new();
+    let machine_a = harness.machine("machine-a", "linux", "goof-a");
+    let machine_b = harness.machine("machine-b", "linux", "goof-b");
+
+    let init_a = machine_a.init();
+    assert!(init_a.status.success(), "{}", render_output(&init_a));
+    let init_b = machine_b.init();
+    assert!(init_b.status.success(), "{}", render_output(&init_b));
+    let sync_a_after_join = machine_a.run("dotsync --force");
+    assert!(
+        sync_a_after_join.status.success(),
+        "{}",
+        render_output(&sync_a_after_join)
+    );
+
+    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
+    let commit_base = machine_a.run("dotsync commit all -m 'add base config' -- .config/app.conf");
+    assert!(
+        commit_base.status.success(),
+        "{}",
+        render_output(&commit_base)
+    );
+
+    machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
+    let commit_linux =
+        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
+    assert!(
+        commit_linux.status.success(),
+        "{}",
+        render_output(&commit_linux)
+    );
+
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+
+    machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
+    let conflict =
+        machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
+    assert_eq!(
+        conflict.status.code(),
+        Some(3),
+        "{}",
+        render_output(&conflict)
+    );
+
+    // The pause tells the agent to resolve the conflicted file in home, but
+    // dotsync never wrote the two conflicting versions there, so the file is
+    // exactly as the agent left it. Taking that as the resolution silently
+    // deletes the `linux` version, and reports success doing it.
+    let continued = machine_b.run("dotsync continue");
+    assert_eq!(
+        continued.status.code(),
+        Some(1),
+        "continue must refuse an unresolved conflict\n{}",
+        render_output(&continued)
+    );
+    assert_stderr_snapshot(
+        &continued,
+        "\
+dotsync: conflict not resolved
+
+What dotsync does:
+Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config. Where two branches changed one file differently, the cascade pauses and asks you for the merged contents.
+
+This flow:
+This continue flow reads each conflicted file back out of your home directory and records what it finds there as the resolution.
+
+Expected:
+It expects those files to have changed since the cascade paused, because the resolution is the contents you write into them.
+
+Current state found:
+unchanged since the cascade paused at scope `linux`: .config/app.conf
+
+Why dotsync stopped:
+Dotsync does not yet write the two conflicting versions into home, so an unchanged file is not a resolution - it is only the version that happened to already be there. Recording it would silently discard the other scope's version.
+
+Correct flow:
+- read the version dotsync would discard with `dotsync view --scope linux --file .config/app.conf`, and compare it against the file in home.
+- write the merged contents into the file in home, then run `dotsync continue`.
+- if home already holds exactly the contents you want, run `dotsync abort`, commit those contents to `linux` directly, then redo the original commit.
+",
+    );
+
+    assert_eq!(
+        read_bookmark_file_contents(&machine_b, "linux", ".config/app.conf"),
+        "setting = \"linux\"\n",
+        "the refused continue must not have discarded the linux version"
+    );
+
+    // The guard is not a wedge: a real resolution still finishes the cascade.
+    machine_b.write_file(".config/app.conf", "setting = \"all+linux\"\n");
+    let resolved = machine_b.run("dotsync continue");
+    assert!(resolved.status.success(), "{}", render_output(&resolved));
+    assert_eq!(
+        read_bookmark_file_contents(&machine_b, "linux", ".config/app.conf"),
+        "setting = \"all+linux\"\n"
+    );
+}
+
+#[test]
 fn continue_preserves_non_conflicting_parent_changes_from_paused_merge() {
     let harness = TestHarness::new();
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
