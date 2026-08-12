@@ -55,6 +55,17 @@ pub async fn view(
 ) -> Run<Result<ViewReport, DotsyncError>> {
     in_session(paths, async |session, _paths| {
         session.fetch().await?;
+        // Asked here rather than left to whatever fails first, because "that
+        // scope does not exist" is the same mistake `commit` already explains
+        // in full — and the answer a lookup failure gave instead was about
+        // jj's objects.
+        if let Some(scope) = scope {
+            if !session.config().graph.parents.contains_key(scope) {
+                return Err(DotsyncError::InvalidScope {
+                    scope: scope.to_string(),
+                });
+            }
+        }
 
         Ok(match (scope, file) {
             (Some(scope), Some(file)) => ViewReport::FileContents {
@@ -154,11 +165,9 @@ async fn scope_file_contents(
                 relative.display()
             ))
         })?
-        .ok_or_else(|| {
-            jj_error(format!(
-                "{} does not exist on scope {scope}",
-                relative.display()
-            ))
+        .ok_or_else(|| DotsyncError::FileNotOnScope {
+            scope: scope.to_string(),
+            path: relative.to_path_buf(),
         })?;
     read_tree_entry_bytes(session.repo().store(), relative, &value).await
 }

@@ -269,6 +269,12 @@ pub enum DotsyncError {
     NoCurrentScope,
     #[error("scope `{scope}` does not exist in config")]
     InvalidScope { scope: String },
+    /// Asked for a file on a scope that does not hold it. An ordinary answer
+    /// to an ordinary question — a file exists on the scope that added it and
+    /// on every scope below — so it is its own error rather than an internal
+    /// failure with a jj message.
+    #[error("`{}` is not on scope `{scope}`", path.display())]
+    FileNotOnScope { scope: String, path: PathBuf },
     #[error(
         "scope `{scope}` has diverged: this machine and the remote each have commits the other does not"
     )]
@@ -277,8 +283,11 @@ pub enum DotsyncError {
         local_target: String,
         remote_target: String,
     },
-    #[error("scope `{scope}` does not have a local bookmark")]
-    MissingScopeBookmark { scope: String },
+    /// The scope graph names a scope this machine's repo has no history for.
+    /// Says what it means rather than which of jj's objects is missing:
+    /// "bookmark" is a concept dotsync exists to keep out of the user's way.
+    #[error("scope `{scope}` is configured, but this machine's repo has no history for it")]
+    ScopeNotInRepo { scope: String },
     #[error("sync state error at {path}: {message}")]
     SyncState { path: PathBuf, message: String },
     #[error("detected drift in {count} file(s)")]
@@ -320,7 +329,10 @@ pub enum DotsyncError {
         source: std::io::Error,
         original: Box<DotsyncError>,
     },
-    #[error("jj operation failed: {message}")]
+    /// Something inside dotsync's own repository handling went wrong. The
+    /// detail is jj's and is kept, because it is what a bug report needs — but
+    /// the headline is dotsync's, because the reader cannot act on jj's.
+    #[error("dotsync could not complete an internal repository operation: {message}")]
     Jj { message: String },
 }
 
@@ -354,7 +366,8 @@ impl DotsyncError {
             | DotsyncError::NoCurrentScope
             | DotsyncError::InvalidScope { .. }
             | DotsyncError::ScopeDiverged { .. }
-            | DotsyncError::MissingScopeBookmark { .. }
+            | DotsyncError::ScopeNotInRepo { .. }
+            | DotsyncError::FileNotOnScope { .. }
             | DotsyncError::SyncState { .. }
             | DotsyncError::DriftDetected { .. }
             | DotsyncError::NoPausedCascade
@@ -385,9 +398,8 @@ impl DotsyncError {
             DotsyncError::InvalidScope { .. } => basic_error_report("invalid_scope", self),
             DotsyncError::ScopeDiverged { .. } => basic_error_report("scope_diverged", self),
             DotsyncError::NoCurrentScope => basic_error_report("no_current_scope", self),
-            DotsyncError::MissingScopeBookmark { .. } => {
-                basic_error_report("missing_scope_bookmark", self)
-            }
+            DotsyncError::ScopeNotInRepo { .. } => basic_error_report("scope_not_in_repo", self),
+            DotsyncError::FileNotOnScope { .. } => basic_error_report("file_not_on_scope", self),
             DotsyncError::MissingParent { .. } => basic_error_report("missing_parent", self),
             DotsyncError::ScopeCycle { .. } => basic_error_report("scope_cycle", self),
             DotsyncError::ConfigParse { .. } => basic_error_report("config_parse", self),
@@ -419,7 +431,7 @@ impl DotsyncError {
                 ..original.to_error_report()
             },
             DotsyncError::Io { .. } => basic_error_report("io", self),
-            DotsyncError::Jj { .. } => basic_error_report("jj", self),
+            DotsyncError::Jj { .. } => basic_error_report("internal", self),
             DotsyncError::HomeNotSet => basic_error_report("home_not_set", self),
             DotsyncError::NonUtf8Path { .. } => basic_error_report("non_utf8_path", self),
             DotsyncError::GitSubmodule { .. } => basic_error_report("git_submodule", self),
@@ -505,7 +517,8 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Vec<String> {
         | DotsyncError::MissingParent { .. }
         | DotsyncError::ScopeCycle { .. }
         | DotsyncError::NoCurrentScope
-        | DotsyncError::MissingScopeBookmark { .. }
+        | DotsyncError::ScopeNotInRepo { .. }
+        | DotsyncError::FileNotOnScope { .. }
         | DotsyncError::DriftDetected { .. }
         | DotsyncError::RepoAlreadyExists { .. }
         | DotsyncError::MissingHostname

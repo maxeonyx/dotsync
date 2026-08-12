@@ -358,7 +358,7 @@ pub(crate) fn load_scope_commit(
         .get_local_bookmark(RefNameBuf::from(scope).as_ref())
         .as_normal()
         .cloned()
-        .ok_or_else(|| DotsyncError::MissingScopeBookmark {
+        .ok_or_else(|| DotsyncError::ScopeNotInRepo {
             scope: scope.to_string(),
         })?;
     repo.store()

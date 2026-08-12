@@ -186,8 +186,8 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
     match error {
         DotsyncError::ScopeDiverged { scope, .. } => render_structured_error(
             &format!("scope `{scope}` has diverged from the remote"),
-            "Dotsync fetches remote scope bookmarks before syncing or committing so each machine picks up scope history published by the other machines.",
-            "This fetch flow fast-forwards a scope when the remote has simply moved ahead, and leaves the scope alone when this machine holds commits it has not pushed yet.",
+            "Dotsync fetches each scope's published history before syncing or committing, so every machine picks up what the others have recorded.",
+            "This fetch flow fast-forwards a scope when the remote has simply moved ahead, and leaves the scope alone when this machine holds commits it has not published yet.",
             "It expects the local and remote positions of a scope to be on one line of history, so that one of them is an ancestor of the other.",
             &current_state_text(&error_report),
             "This machine and the remote both have commits on this scope that the other does not, so neither side can be fast-forwarded onto the other.",
@@ -344,16 +344,32 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 ),
             ],
         ),
+        // Raised by every command that takes a scope name, so it teaches about
+        // scopes rather than about whichever command the reader happened to be
+        // running: `view --scope` used to get a bare one-liner for the mistake
+        // `commit` explained in full.
         DotsyncError::InvalidScope { .. } => render_structured_error(
             "invalid scope",
             "Dotsync stores dotfiles in a scope DAG so shared config can live on shared ancestor scopes and machine-specific config can stay isolated on leaf scopes.",
-            "This commit flow records your repo change on the scope you name and then cascades it through descendant scopes.",
-            "It expects the scope you name to exist in the configured scope DAG.",
+            "This flow resolves the scope you named against the scope graph, which dotsync reads from `.config/dotsync/config.toml` on the `all` scope.",
+            "It expects the scope you name to exist in that graph.",
             &error_report.message,
-            "Dotsync stopped because it cannot place this change onto a scope that is not configured.",
+            "Dotsync stopped because there is no such scope: it can neither place a change on one nor show you what one holds.",
             &[
-                "choose a real configured scope from the DAG.",
-                "Pick the root-est appropriate ancestor scope that should own the change.",
+                "run `dotsync view` to list the scopes that do exist.",
+                "then name one of those. For a commit, pick the root-est appropriate ancestor scope that should own the change.",
+            ],
+        ),
+        DotsyncError::FileNotOnScope { .. } => render_structured_error(
+            "that file is not on that scope",
+            "Dotsync stores dotfiles in a scope DAG, and a file lives on the scope it was committed to. Every scope below that one inherits it through the cascade, so the same file is visible on many scopes and absent from the ones above it.",
+            "This view flow reads the file out of the tree that one scope holds.",
+            "It expects that scope to hold the file — the scope it was committed to, or one below it.",
+            &error_report.message,
+            "Dotsync stopped rather than printing nothing: empty output would read exactly like an empty file.",
+            &[
+                "run `dotsync view --file <path>` to see which scopes hold it.",
+                "run `dotsync view --scope <scope>` to see what that scope does hold.",
             ],
         ),
         DotsyncError::SyncState { .. } => render_structured_error(
@@ -407,7 +423,7 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
         | DotsyncError::MissingParent { .. }
         | DotsyncError::ScopeCycle { .. }
         | DotsyncError::NoCurrentScope
-        | DotsyncError::MissingScopeBookmark { .. }
+        | DotsyncError::ScopeNotInRepo { .. }
         | DotsyncError::RepoAlreadyExists { .. }
         | DotsyncError::MissingHostname
         | DotsyncError::Jj { .. } => format!("dotsync: {}", error_report.message),

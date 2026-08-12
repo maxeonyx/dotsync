@@ -2859,20 +2859,20 @@ What dotsync does:
 Dotsync stores dotfiles in a scope DAG so shared config can live on shared ancestor scopes and machine-specific config can stay isolated on leaf scopes.
 
 This flow:
-This commit flow records your repo change on the scope you name and then cascades it through descendant scopes.
+This flow resolves the scope you named against the scope graph, which dotsync reads from `.config/dotsync/config.toml` on the `all` scope.
 
 Expected:
-It expects the scope you name to exist in the configured scope DAG.
+It expects the scope you name to exist in that graph.
 
 Current state found:
 scope `nonexistent` does not exist in config
 
 Why dotsync stopped:
-Dotsync stopped because it cannot place this change onto a scope that is not configured.
+Dotsync stopped because there is no such scope: it can neither place a change on one nor show you what one holds.
 
 Correct flow:
-- choose a real configured scope from the DAG.
-- Pick the root-est appropriate ancestor scope that should own the change.
+- run `dotsync view` to list the scopes that do exist.
+- then name one of those. For a commit, pick the root-est appropriate ancestor scope that should own the change.
 "
     );
 }
