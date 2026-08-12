@@ -841,6 +841,17 @@ fn unusable_commit_path(
     internal_paths: &BTreeSet<PathBuf>,
     repo_relative: Option<&Path>,
 ) -> Option<CommitPathProblem> {
+    // Everything dotsync manages lives in home, so naming home itself names
+    // everything — including the files that are on this machine precisely
+    // because they are not shared. Checked before the absolute-path rule so
+    // that both ways of saying it get the same answer.
+    let names_home_root = selection_path
+        .components()
+        .all(|component| matches!(component, Component::CurDir))
+        || selection_path == paths.home_dir;
+    if names_home_root {
+        return Some(CommitPathProblem::HomeRoot);
+    }
     // An absolute path resolves against the filesystem root, not against home,
     // so it can never name a repo-relative file.
     if selection_path.is_absolute() {

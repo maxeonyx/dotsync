@@ -62,6 +62,8 @@ impl RefusedCommitPath {
 
 #[derive(Debug, Clone)]
 pub enum CommitPathProblem {
+    /// Your whole home directory, however it was named.
+    HomeRoot,
     Absolute,
     EscapesHome,
     /// Matched neither a file in home nor a file already on the target scope.
@@ -83,6 +85,9 @@ impl RejectedCommitPath {
     pub(crate) fn explain(&self, scope: &str) -> String {
         let path = self.path.display();
         match &self.problem {
+            CommitPathProblem::HomeRoot => format!(
+                "`{path}` is your whole home directory. Dotsync would walk all of it and put every file it found on scope `{scope}` — ssh keys, credentials, browser profiles — and every machine sharing that scope would then have them written into its own home."
+            ),
             CommitPathProblem::Absolute => format!(
                 "`{path}` is an absolute path, and dotsync resolves every commit path against your home directory."
             ),
@@ -124,6 +129,11 @@ impl RejectedCommitPath {
     /// scope graph.
     pub fn is_scope_graph(&self) -> bool {
         matches!(self.problem, CommitPathProblem::ScopeGraphOutsideAllScope)
+    }
+
+    /// Read by the binary's renderer to say what to name instead of home.
+    pub fn is_home_root(&self) -> bool {
+        matches!(self.problem, CommitPathProblem::HomeRoot)
     }
 }
 
