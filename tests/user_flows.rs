@@ -760,8 +760,8 @@ fn diff_shows_line_oriented_home_drift_without_syncing() {
     assert_stderr_snapshot(
         &diff_output,
         "\
-dotsync: 1 drifted managed file(s) for mx-xps-cy
-- .config/app.conf (edited here since the last sync)
+dotsync: 1 changed managed file(s) for mx-xps-cy
+  M .config/app.conf (edited here since the last sync)
 --- repo
 +++ system
 @@ -1,2 +1,2 @@
@@ -987,10 +987,8 @@ fn drift_detected_json_contract_stays_compatible() {
         .expect("drifts should be an array");
     assert_eq!(drifts.len(), 1);
     assert_eq!(drifts[0]["path"], ".gitconfig");
-    assert_eq!(
-        drifts[0]["system_path"],
-        machine.home_dir.join(".gitconfig").display().to_string()
-    );
+    assert!(drifts[0]["state"].as_str().is_some());
+    assert!(drifts[0]["reason"].as_str().is_some());
     assert!(drifts[0]["diff"].as_str().is_some());
 }
 
@@ -1376,7 +1374,7 @@ dotsync: overwrote 1 drifted file(s)
 @@ -1 +1 @@
 -setting = \"linux\"
 +setting = \"all\"
-dotsync: aborted cascade at linux and synced 2 file(s)
+dotsync: aborted the cascade paused at linux and synced 2 file(s)
 ",
     );
 
@@ -2817,7 +2815,8 @@ fn noop_commit_names_the_scope_it_targeted() {
 
     // The report for a commit that found nothing was default-constructed, so
     // it did not carry the scope the agent had just named - and the message
-    // interpolated the empty string into "committed  and synced".
+    // interpolated the empty string into "committed  and synced". It now names
+    // the scope, and says what it did instead of claiming a commit.
     let commit_output = machine.run("dotsync commit mx-xps-cy -m noop");
     assert_eq!(
         commit_output.status.code(),
@@ -2827,7 +2826,7 @@ fn noop_commit_names_the_scope_it_targeted() {
     );
     assert_stderr_snapshot(
         &commit_output,
-        "dotsync: committed mx-xps-cy and synced 0 file(s)\n",
+        "dotsync: nothing to record on `mx-xps-cy`; no commit was made and home was not synced\n",
     );
 }
 
@@ -3238,27 +3237,15 @@ fn status_json_contract() {
     assert_eq!(json["command"], "status");
     assert_eq!(json["machine_scope"], "mx-xps-cy");
 
-    let groups = json["groups"]
+    let changes = json["changes"]
         .as_array()
-        .expect("groups should be an array");
+        .expect("changes should be an array");
     assert!(
-        !groups.is_empty(),
-        "expected at least one status group\n{}",
-        render_output(&status_output)
-    );
-
-    let first_group = &groups[0];
-    assert_eq!(first_group["scope"], serde_json::Value::Null);
-
-    let files = first_group["files"]
-        .as_array()
-        .expect("group files should be an array");
-    assert!(
-        files.iter().any(|file| {
-            file["path"]
+        changes.iter().any(|change| {
+            change["path"]
                 .as_str()
                 .is_some_and(|path| path.contains(".bashrc"))
-                && file["status"] == "modified"
+                && change["state"] == "modified"
         }),
         "expected .bashrc modified entry\n{}",
         render_output(&status_output)
@@ -4178,12 +4165,12 @@ dotsync: 1 incoming file(s) for goof-a — plain `dotsync` applies these
     );
     let json = parse_stdout_json(&status_json);
     assert_eq!(
-        json["changed_count"],
-        0,
+        json["changes"].as_array().map(Vec::len),
+        Some(0),
         "a file this machine has not changed is not a change\n{}",
         render_output(&status_json)
     );
-    assert_eq!(json["incoming_count"], 1);
+    assert_eq!(json["incoming"].as_array().map(Vec::len), Some(1));
 
     let diff_a = machine_a.run("dotsync diff");
     assert_eq!(

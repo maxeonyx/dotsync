@@ -1,10 +1,105 @@
-use crate::UsageError;
+use crate::{HumanOutput, SuccessOutput, UsageError};
 use dotsync::{
-    DotsyncError, ErrorReport, FileDrift, PushReport, SkippedCommitPath, UnreachableRemote,
+    DotsyncError, ErrorReport, FileChange, FileDrift, FileState, PushReport, SkippedCommitPath,
+    SyncReport, UnreachableRemote,
 };
 use serde_json::json;
 use similar::TextDiff;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Output for a command whose job is to bring home up to its machine scope:
+/// `init`, plain `dotsync`, `continue`, and `abort`. They differ in what they
+/// did to get there and in nothing else they report, so they answer in one
+/// shape rather than in four copies of it.
+///
+/// `push` is `None` only for `abort`, which is the one of the four that
+/// publishes nothing — so a command that does publish cannot quietly omit what
+/// it left unpublished.
+pub(crate) fn synced_output(
+    command: &str,
+    headline: String,
+    sync: &SyncReport,
+    push: Option<&PushReport>,
+) -> SuccessOutput {
+    let mut json = json!({
+        "status": "ok",
+        "command": command,
+        "machine_scope": sync.current_scope,
+        "synced_files": display_paths(&sync.synced_paths),
+    });
+    if let Some(push) = push {
+        json["unpushed_scopes"] = json!(push.unpushed_scopes());
+    }
+    SuccessOutput {
+        json,
+        human: HumanOutput::Message(headline),
+        notes: success_notes(&sync.drifts, push),
+        exit_code: 0,
+    }
+}
+
+pub(crate) fn display_paths(paths: &[PathBuf]) -> Vec<String> {
+    paths.iter().map(|path| display_path(path)).collect()
+}
+
+/// One changed file, for a machine. The same object wherever dotsync reports a
+/// file that differs from what the scopes hold: `status`, `diff`, and the
+/// drift a run stopped on. `state` is the code to branch on; `reason` is the
+/// same thing in words, so nothing has to keep a table of codes to read it.
+pub(crate) fn change_json(path: &Path, state: FileState) -> serde_json::Value {
+    json!({
+        "path": display_path(path),
+        "state": state.code(),
+        "reason": state.reason(),
+    })
+}
+
+pub(crate) fn changes_json(changes: &[FileChange]) -> Vec<serde_json::Value> {
+    changes
+        .iter()
+        .map(|change| change_json(&change.path, change.state))
+        .collect()
+}
+
+pub(crate) fn skipped_paths_json(skipped: &[SkippedCommitPath]) -> Vec<serde_json::Value> {
+    skipped
+        .iter()
+        .map(|skipped| change_json(&skipped.path, skipped.state))
+        .collect()
+}
+
+/// One changed file, for a person: a marker to scan for, the path, and the
+/// reason in words so the marker never has to be guessed at. `status` and
+/// `diff` are answering the same question, so they say it the same way.
+pub(crate) fn render_change_line(path: &Path, state: FileState) -> String {
+    format!(
+        "  {} {} ({})",
+        change_marker(state),
+        display_path(path),
+        state.reason()
+    )
+}
+
+fn change_marker(state: FileState) -> &'static str {
+    match state {
+        FileState::EditedInHome | FileState::EditedInHomeButRemovedFromRepo => "M",
+        FileState::DeletedInHome | FileState::DeletedInHomeTipAlsoChanged => "D",
+        FileState::DivergedEdit
+        | FileState::IncomingNewCollidesWithUntrackedHome
+        | FileState::NoSyncRecord => "C",
+        FileState::IncomingNew => "A",
+        FileState::StaleNotYours => "U",
+        FileState::RemovedFromRepo => "R",
+        // Not reported: `status` and `diff` only ever render drift and incoming
+        // changes.
+        FileState::UntrackedInHome
+        | FileState::IncomingNewAlreadyMatchesHome
+        | FileState::AlreadyApplied
+        | FileState::InSync
+        | FileState::RemovedEverywhere
+        | FileState::AbsentEverywhere => " ",
+    }
+}
 
 pub(crate) fn render_error_json(error: &ErrorReport) -> serde_json::Value {
     json!({
@@ -25,14 +120,13 @@ pub(crate) fn render_usage_error_json(error: &UsageError) -> serde_json::Value {
     })
 }
 
+/// A changed file with the two sides shown. Exactly the object `status`
+/// reports for the same file, plus the diff — which is the whole of what
+/// `diff` adds to `status`.
 pub(crate) fn render_drift_json(drift: &FileDrift) -> serde_json::Value {
-    json!({
-        "path": display_path(&drift.repo_path),
-        "system_path": display_path(&drift.system_path),
-        "state": drift.state.code(),
-        "reason": drift.state.reason(),
-        "diff": render_drift_diff(drift),
-    })
+    let mut json = change_json(&drift.repo_path, drift.state);
+    json["diff"] = json!(render_drift_diff(drift));
+    json
 }
 
 /// A unified diff of what the repo holds against what home holds.
@@ -455,12 +549,12 @@ pub(crate) fn skipped_path_notes(skipped: &[SkippedCommitPath]) -> Vec<String> {
 /// and what did not reach the remote. `push` is `None` only for commands that
 /// do not publish at all, so a publishing command cannot quietly omit this.
 pub(crate) fn success_notes(drifts: &[FileDrift], push: Option<&PushReport>) -> Vec<String> {
-    let mut notes = push.map(notes_for_push).unwrap_or_default();
+    let mut notes = push.map(push_notes).unwrap_or_default();
     notes.extend(notes_for_drifts(drifts));
     notes
 }
 
-fn notes_for_push(push: &PushReport) -> Vec<String> {
+pub(crate) fn push_notes(push: &PushReport) -> Vec<String> {
     match push {
         PushReport::UpToDate => Vec::new(),
         PushReport::Refused {

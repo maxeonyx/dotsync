@@ -77,37 +77,57 @@ struct PausedCascadeStep {
 #[derive(Debug, Clone)]
 pub struct CommitReport {
     pub committed_scope: String,
+    /// This machine's own scope. Known before the commit decides whether it has
+    /// anything to record, so both outcomes can name it — the empty string a
+    /// no-op commit used to report came from standing in a default sync report
+    /// for the sync it never ran.
+    pub machine_scope: String,
+    /// Paths a named directory matched that this commit left alone. Empty for
+    /// every other shape of commit: a bare commit selects what changed rather
+    /// than filtering a list, and a path named exactly is refused out loud.
+    pub skipped: Vec<SkippedCommitPath>,
+    pub push: PushReport,
+    /// What the commit recorded, or `None` when it found nothing to record.
+    ///
+    /// A commit with nothing to record writes no history, so it also runs no
+    /// cascade and no home sync — and therefore has no synced files, no newly
+    /// tracked files and no forced overwrites, rather than empty lists of them.
+    pub recorded: Option<RecordedCommit>,
+}
+
+/// The half of a commit report that only exists when the commit recorded
+/// something.
+#[derive(Debug, Clone)]
+pub struct RecordedCommit {
     /// Paths this commit put on the scope for the first time. Every machine
     /// sharing that scope will have them written into its home directory, so a
     /// run that adds files says which ones rather than reading like a run that
     /// changed a line.
     pub newly_tracked: Vec<PathBuf>,
-    /// Paths a named directory matched that this commit left alone. Empty for
-    /// every other shape of commit: a bare commit selects what changed rather
-    /// than filtering a list, and a path named exactly is refused out loud.
-    pub skipped: Vec<SkippedCommitPath>,
     /// Paths recorded on the authority of `--force` rather than on the
     /// authority of a change made on this machine. Reported because a forced
     /// commit is the one shape of commit that can discard someone else's work,
     /// and a run that does that has to say so.
     pub forced_overwrites: Vec<PathBuf>,
     pub sync: SyncReport,
-    pub push: PushReport,
 }
 
 impl CommitReport {
     /// A commit that found nothing to add. It creates no history of its own,
     /// but it still names the scope it targeted and reports what it published
     /// on behalf of earlier runs.
-    fn nothing_to_commit(scope: &str, skipped: Vec<SkippedCommitPath>, push: PushReport) -> Self {
+    fn nothing_to_commit(
+        scope: &str,
+        machine_scope: &str,
+        skipped: Vec<SkippedCommitPath>,
+        push: PushReport,
+    ) -> Self {
         Self {
             committed_scope: scope.to_string(),
-            // A commit that records nothing tracks nothing.
-            newly_tracked: Vec::new(),
+            machine_scope: machine_scope.to_string(),
             skipped,
-            forced_overwrites: Vec::new(),
-            sync: SyncReport::default(),
             push,
+            recorded: None,
         }
     }
 }
@@ -140,9 +160,12 @@ pub struct ContinueReport {
     pub push: PushReport,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AbortReport {
-    pub aborted_scope: String,
+    /// The scope the cascade was paused at. It is not the scope that was
+    /// aborted — the cascade was — and it is not the scope the discarded commit
+    /// was made on either, which is why it says which of the three it is.
+    pub paused_scope: String,
     pub sync: SyncReport,
 }
 
@@ -205,6 +228,7 @@ async fn commit_in_session(
     if selected_paths.is_empty() {
         return Ok(CommitReport::nothing_to_commit(
             &options.scope,
+            &machine_scope,
             skipped,
             pending_push,
         ));
@@ -328,6 +352,7 @@ async fn commit_in_session(
     if new_tree.tree_ids() == base_commit.tree().tree_ids() {
         return Ok(CommitReport::nothing_to_commit(
             &options.scope,
+            &machine_scope,
             skipped,
             pending_push,
         ));
@@ -430,11 +455,14 @@ async fn commit_in_session(
 
     Ok(CommitReport {
         committed_scope: options.scope,
-        newly_tracked,
+        machine_scope,
         skipped,
-        forced_overwrites,
-        sync,
         push,
+        recorded: Some(RecordedCommit {
+            newly_tracked,
+            forced_overwrites,
+            sync,
+        }),
     })
 }
 
@@ -1301,7 +1329,7 @@ async fn abort_in_session(
     .await?;
 
     Ok(AbortReport {
-        aborted_scope: state.paused_scope,
+        paused_scope: state.paused_scope,
         sync,
     })
 }

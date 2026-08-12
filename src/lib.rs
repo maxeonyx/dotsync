@@ -15,7 +15,7 @@ mod sync;
 pub use crate::bootstrap::{init, InitReport};
 pub use crate::commit::{
     abort_paused_cascade, commit_and_sync, continue_after_conflict, AbortReport, CommitFailure,
-    CommitOptions, CommitReport, ContinueReport,
+    CommitOptions, CommitReport, ContinueReport, RecordedCommit,
 };
 pub use crate::config::DotsyncPaths;
 pub use crate::drift::FileState;
