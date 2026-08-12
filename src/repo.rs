@@ -178,7 +178,17 @@ pub(crate) fn sync_local_bookmarks_from_remote(
     Ok(())
 }
 
-pub(crate) async fn push_scope_updates(paths: &DotsyncPaths) -> Result<(), DotsyncError> {
+/// What a push actually achieved. A remote that refuses an update is not a
+/// dead end — the scope stays local-ahead and the next run pushes it again —
+/// but the run must say so, or the user is left believing a change reached the
+/// remote when it did not.
+#[derive(Debug, Clone, Default)]
+pub struct PushReport {
+    pub unpushed_scopes: Vec<String>,
+    pub reason: Option<String>,
+}
+
+pub(crate) async fn push_scope_updates(paths: &DotsyncPaths) -> Result<PushReport, DotsyncError> {
     let repo = load_repo_direct(paths).await?;
     let settings = default_settings()?;
     let subprocess_options = GitSubprocessOptions::from_settings(&settings)
@@ -204,11 +214,15 @@ pub(crate) async fn push_scope_updates(paths: &DotsyncPaths) -> Result<(), Dotsy
         .collect();
 
     if updates.is_empty() {
-        return Ok(());
+        return Ok(PushReport::default());
     }
 
+    let attempted: Vec<String> = updates
+        .iter()
+        .map(|(name, _)| name.as_str().to_string())
+        .collect();
     let mut tx = repo.start_transaction();
-    git::push_branches(
+    let stats = git::push_branches(
         tx.repo_mut(),
         subprocess_options,
         "origin".as_ref(),
@@ -222,7 +236,23 @@ pub(crate) async fn push_scope_updates(paths: &DotsyncPaths) -> Result<(), Dotsy
     tx.commit("dotsync: push scope updates")
         .await
         .map_err(|err| jj_error(format!("commit push operation: {err}")))?;
-    Ok(())
+
+    let pushed: Vec<&str> = stats
+        .pushed
+        .iter()
+        .map(|reference| reference.as_str().trim_start_matches("refs/heads/"))
+        .collect();
+    Ok(PushReport {
+        unpushed_scopes: attempted
+            .into_iter()
+            .filter(|scope| !pushed.contains(&scope.as_str()))
+            .collect(),
+        reason: stats
+            .rejected
+            .iter()
+            .chain(stats.remote_rejected.iter())
+            .find_map(|(_, reason)| reason.clone()),
+    })
 }
 
 pub(crate) fn load_scope_commit(

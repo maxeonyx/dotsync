@@ -348,14 +348,15 @@ async fn run_init(remote_url: InitRemote) -> Result<CliOutput, DotsyncError> {
             "command": "init",
             "scope": report.current_scope,
             "machine_scope": report.current_scope,
-            "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>()
+            "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
+            "unpushed_scopes": report.sync.push.unpushed_scopes,
         }),
         human: format!(
             "dotsync: initialized {} and synced {} file(s)",
             report.current_scope,
             report.sync.synced_paths.len()
         ),
-        notes: Vec::new(),
+        notes: render::success_notes(&report.sync.drifts, &report.sync.push),
         stdout: None,
         exit_code: 0,
     }))
@@ -393,7 +394,7 @@ async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
                 "dotsync: resumed cascade and synced {} file(s)",
                 report.sync.synced_paths.len()
             ),
-            notes: render::success_notes_for_drifts(&report.sync.drifts),
+            notes: render::success_notes(&report.sync.drifts, &report.sync.push),
             stdout: None,
             exit_code: 0,
         })),
@@ -417,7 +418,7 @@ async fn run_abort(force: bool) -> Result<CliOutput, DotsyncError> {
                 report.aborted_scope,
                 report.sync.synced_paths.len()
             ),
-            notes: render::success_notes_for_drifts(&report.sync.drifts),
+            notes: render::success_notes(&report.sync.drifts, &report.sync.push),
             stdout: None,
             exit_code: 0,
         })),
@@ -433,14 +434,15 @@ async fn run_sync(force: bool) -> Result<CliOutput, DotsyncError> {
             "command": "sync",
             "scope": report.current_scope,
             "machine_scope": report.current_scope,
-            "synced_files": report.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>()
+            "synced_files": report.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
+            "unpushed_scopes": report.push.unpushed_scopes,
         }),
         human: format!(
             "dotsync: synced {} file(s) for {}",
             report.synced_paths.len(),
             report.current_scope
         ),
-        notes: render::success_notes_for_drifts(&report.drifts),
+        notes: render::success_notes(&report.drifts, &report.push),
         stdout: None,
         exit_code: 0,
     }))
@@ -560,14 +562,15 @@ async fn run_commit(
                 "command": "commit",
                 "scope": report.committed_scope,
                 "machine_scope": report.sync.current_scope,
-                "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>()
+                "synced_files": report.sync.synced_paths.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
+                "unpushed_scopes": report.sync.push.unpushed_scopes,
             }),
             human: format!(
                 "dotsync: committed {} and synced {} file(s)",
                 report.committed_scope,
                 report.sync.synced_paths.len()
             ),
-            notes: render::success_notes_for_drifts(&report.sync.drifts),
+            notes: render::success_notes(&report.sync.drifts, &report.sync.push),
             stdout: None,
             exit_code: 0,
         })),

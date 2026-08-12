@@ -326,8 +326,8 @@ pub async fn commit_and_sync(
 
     // Push as soon as the history exists: the home sync below can legitimately
     // stop on drift, and a stop must never strand committed scope history.
-    push_scope_updates(paths).await?;
-    let sync = crate::sync::sync_repo_to_home(
+    let push = push_scope_updates(paths).await?;
+    let mut sync = crate::sync::sync_repo_to_home(
         paths,
         SyncOptions {
             force: options.force,
@@ -336,6 +336,7 @@ pub async fn commit_and_sync(
         Some(&machine_scope),
     )
     .await?;
+    sync.push = push;
 
     Ok(CommandOutcome::Success(CommitReport {
         committed_scope: options.scope,
@@ -876,14 +877,15 @@ pub async fn continue_after_conflict(
             message: format!("commit continued cascade: {err}"),
         })?;
     remove_paused_cascade_state(paths)?;
-    push_scope_updates(paths).await?;
-    let sync = crate::sync::sync_repo_to_home(
+    let push = push_scope_updates(paths).await?;
+    let mut sync = crate::sync::sync_repo_to_home(
         paths,
         options,
         &expected_changes,
         Some(&state.machine_scope),
     )
     .await?;
+    sync.push = push;
     Ok(CommandOutcome::Success(ContinueReport {
         cascaded_scopes,
         sync,

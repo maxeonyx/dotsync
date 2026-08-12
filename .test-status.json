@@ -30,7 +30,7 @@
     "dotsync::user_flows$explicit_commit_command_adds_file_to_scope_and_syncs": "passing",
     "dotsync::user_flows$init_creates_no_visible_git_directory": "passing",
     "dotsync::user_flows$init_without_remote_noninteractive_matches_full_recovery_message": "passing",
-    "dotsync::user_flows$interrupted_push_reports_that_scope_updates_were_not_pushed": "pending",
+    "dotsync::user_flows$interrupted_push_reports_that_scope_updates_were_not_pushed": "passing",
     "dotsync::user_flows$invalid_state_file_returns_clear_error": "passing",
     "dotsync::user_flows$invalid_sync_state_human_error_stands_alone": "passing",
     "dotsync::user_flows$missing_state_file_disables_deletion": "passing",

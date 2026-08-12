@@ -1,5 +1,5 @@
 use crate::UsageError;
-use dotsync::{DotsyncError, ErrorReport, FileDrift};
+use dotsync::{DotsyncError, ErrorReport, FileDrift, PushReport};
 use serde_json::json;
 use std::path::Path;
 
@@ -172,7 +172,34 @@ pub(crate) fn render_structured_error(
     )
 }
 
-pub(crate) fn success_notes_for_drifts(drifts: &[FileDrift]) -> Vec<String> {
+/// Notes printed to stderr alongside a successful run: what was overwritten,
+/// and what did not reach the remote.
+pub(crate) fn success_notes(drifts: &[FileDrift], push: &PushReport) -> Vec<String> {
+    let mut notes = notes_for_push(push);
+    notes.extend(notes_for_drifts(drifts));
+    notes
+}
+
+fn notes_for_push(push: &PushReport) -> Vec<String> {
+    if push.unpushed_scopes.is_empty() {
+        return Vec::new();
+    }
+
+    let reason = push
+        .reason
+        .as_ref()
+        .map(|reason| format!(" ({reason})"))
+        .unwrap_or_default();
+    vec![
+        format!(
+            "dotsync: could not push {}{reason}",
+            push.unpushed_scopes.join(", ")
+        ),
+        "dotsync: those scopes are committed here but not published, so the remote does not have this change yet. Run `dotsync` again to publish them.".to_string(),
+    ]
+}
+
+fn notes_for_drifts(drifts: &[FileDrift]) -> Vec<String> {
     if drifts.is_empty() {
         return Vec::new();
     }
