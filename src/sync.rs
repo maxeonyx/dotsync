@@ -13,7 +13,7 @@ use crate::error::DotsyncError;
 use crate::machine::detect_machine;
 use crate::repo::{
     collect_managed_tree_entries, fetch_origin, load_repo_direct, load_scope_commit,
-    read_tree_entry_bytes,
+    push_scope_updates, read_tree_entry_bytes,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -50,6 +50,9 @@ pub(crate) struct SyncState {
 pub async fn sync(paths: &DotsyncPaths, options: SyncOptions) -> Result<SyncReport, DotsyncError> {
     let repo = load_repo_direct(paths).await?;
     let _repo = fetch_origin(repo).await?;
+    // Publish before touching home: scope commits left behind by an
+    // interrupted run must reach the remote even if the home sync stops.
+    push_scope_updates(paths).await?;
     sync_repo_to_home(paths, options, &[], None).await
 }
 
