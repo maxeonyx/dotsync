@@ -32,6 +32,22 @@ impl TestHarness {
         }
     }
 
+    /// Puts the remote out of reach, the way a machine off the network finds
+    /// it: the configured URL is unchanged and nothing local is touched, there
+    /// is simply nothing at the other end.
+    fn disconnect_remote(&self) {
+        fs::rename(&self.remote_dir, self.disconnected_remote_dir())
+            .expect("move the remote out of reach");
+    }
+
+    fn reconnect_remote(&self) {
+        fs::rename(self.disconnected_remote_dir(), &self.remote_dir).expect("put the remote back");
+    }
+
+    fn disconnected_remote_dir(&self) -> PathBuf {
+        self.root_dir.join("remote-disconnected.git")
+    }
+
     fn machine(&self, name: &str, os: &str, hostname: &str) -> MachineEnvironment {
         MachineEnvironment::new(
             self.root_dir.join(name),
@@ -4773,4 +4789,177 @@ dotsync: recorded 1 file(s) over an incoming change, because you passed `--force
 dotsync: committed all and synced 2 file(s)
 ",
     );
+}
+
+// DESIGN.md, "The convergence model": "Offline is just deferred convergence.
+// If fetch fails due to network, dotsync skips it and proceeds against
+// last-known remote state." A machine that cannot reach the remote is in an
+// ordinary state, not a broken one — so no command refuses to run because of
+// it, and every command says which state it is reporting against.
+
+#[test]
+fn read_only_commands_report_against_the_last_fetched_state_when_the_remote_is_unreachable() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    machine.write_file(".bashrc", "export DOTSYNC=edited-here\n");
+    harness.disconnect_remote();
+
+    let status_output = machine.run("dotsync status");
+    assert_eq!(
+        status_output.status.code(),
+        Some(0),
+        "status must report against the last-fetched state rather than fail\n{}",
+        render_output(&status_output)
+    );
+    let status_stderr = String::from_utf8_lossy(&status_output.stderr).into_owned();
+    assert!(
+        status_stderr.contains("could not reach the remote"),
+        "status must say which state it is reporting against\n{status_stderr}"
+    );
+    assert!(
+        status_stderr.contains(".bashrc"),
+        "status must still report the local edit\n{status_stderr}"
+    );
+
+    let diff_output = machine.run("dotsync diff");
+    assert_eq!(
+        diff_output.status.code(),
+        Some(1),
+        "diff must still answer, and still exit 1 for drift\n{}",
+        render_output(&diff_output)
+    );
+    let diff_stderr = String::from_utf8_lossy(&diff_output.stderr).into_owned();
+    assert!(
+        diff_stderr.contains("could not reach the remote"),
+        "diff must say which state it is reporting against\n{diff_stderr}"
+    );
+    assert!(
+        diff_stderr.contains("export DOTSYNC=edited-here"),
+        "diff must still show the drift\n{diff_stderr}"
+    );
+
+    let view_output = machine.run("dotsync view");
+    assert_eq!(
+        view_output.status.code(),
+        Some(0),
+        "view must still list what is checked in\n{}",
+        render_output(&view_output)
+    );
+    assert!(
+        String::from_utf8_lossy(&view_output.stdout).contains(".bashrc"),
+        "{}",
+        render_output(&view_output)
+    );
+    assert!(
+        String::from_utf8_lossy(&view_output.stderr).contains("could not reach the remote"),
+        "{}",
+        render_output(&view_output)
+    );
+
+    let json_output = machine.run("dotsync --output json status");
+    assert_eq!(
+        json_output.status.code(),
+        Some(0),
+        "{}",
+        render_output(&json_output)
+    );
+    let json = parse_stdout_json(&json_output);
+    assert_eq!(json["status"], "ok");
+    assert!(
+        json["remote_unreachable"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "the JSON report must carry why the remote was out of reach\n{}",
+        render_output(&json_output)
+    );
+}
+
+#[test]
+fn work_done_offline_reaches_the_remote_on_the_next_online_run() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    harness.disconnect_remote();
+    machine.write_file(".config/offline.conf", "mode = offline\n");
+
+    let commit_output = machine
+        .run("dotsync --output json commit linux -m 'add offline conf' -- .config/offline.conf");
+    assert_eq!(
+        commit_output.status.code(),
+        Some(0),
+        "a commit made offline is ordinary local-ahead work, not a failure\n{}",
+        render_output(&commit_output)
+    );
+    let commit_stderr = String::from_utf8_lossy(&commit_output.stderr).into_owned();
+    assert!(
+        commit_stderr.contains("could not reach the remote"),
+        "the commit must say it could not reach the remote\n{commit_stderr}"
+    );
+    let commit_json = parse_stdout_json(&commit_output);
+    let unpushed = commit_json["unpushed_scopes"]
+        .as_array()
+        .expect("unpushed_scopes should be an array");
+    assert!(
+        unpushed.iter().any(|scope| scope == "linux"),
+        "the commit must report what did not reach the remote\n{}",
+        render_output(&commit_output)
+    );
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "mx-xps-cy", ".config/offline.conf"),
+        "mode = offline\n",
+        "the cascade must land locally even though nothing can be published"
+    );
+
+    // Plain `dotsync` offline is the same story: it syncs home from what is
+    // already here and leaves the unpublished scopes for the next online run.
+    let offline_sync = machine.run("dotsync");
+    assert_eq!(
+        offline_sync.status.code(),
+        Some(0),
+        "plain sync must work offline\n{}",
+        render_output(&offline_sync)
+    );
+
+    harness.reconnect_remote();
+    let online_sync = machine.run("dotsync");
+    assert_eq!(
+        online_sync.status.code(),
+        Some(0),
+        "{}",
+        render_output(&online_sync)
+    );
+    assert!(
+        !String::from_utf8_lossy(&online_sync.stderr).contains("could not reach the remote"),
+        "a run that reached the remote must not claim otherwise\n{}",
+        render_output(&online_sync)
+    );
+    for scope in ["linux", "mx-xps-cy"] {
+        assert_eq!(
+            remote_branch_file_contents(&machine, scope, ".config/offline.conf"),
+            "mode = offline\n",
+            "the next online run must publish what was committed offline on `{scope}`"
+        );
+    }
 }
