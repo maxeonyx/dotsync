@@ -140,7 +140,7 @@ All commands emit JSON on stdout when `--output json` is passed. Human-readable 
 }
 ```
 
-`unpushed_scopes` is emitted by every command that publishes (`init`, sync, `commit`, `continue`) and lists scopes that are committed on this machine but not on the remote — because the remote refused them, or because publishing was withheld while a cascade is paused. Empty means everything this run had to publish reached the remote. `abort` does not publish and does not emit the field.
+`unpushed_scopes` is emitted by every command that publishes (`init`, sync, `commit`, `continue`) and lists scopes that are committed on this machine but not on the remote — because the remote refused them, or because publishing was withheld while a cascade is paused. Empty means the remote has every scope commit this machine holds: not just the work this run created, but anything earlier runs left unpublished, which every publishing command republishes even when it has nothing of its own to add. `abort` does not publish and does not emit the field.
 
 ### Error (exit code 1)
 ```json
