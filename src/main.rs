@@ -70,7 +70,7 @@ struct Cli {
     command: Option<Command>,
 
     /// Output format
-    #[arg(long = "output", value_enum, default_value = "human")]
+    #[arg(long = "output", value_enum, default_value = "human", global = true)]
     output_format: OutputFormat,
 
     /// Proceed even when drift is detected
@@ -187,11 +187,14 @@ enum CliOutput {
 
 #[tokio::main]
 async fn main() {
-    if try_handle_version_request() {
+    if try_handle_version_json_request() {
         return;
     }
 
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => std::process::exit(emit_clap_error(error)),
+    };
     let output_format = cli.output_format;
     let outcome = match Action::try_from_cli(cli, detect_cli_context()) {
         Ok(action) => dispatch(action).await,
@@ -211,40 +214,69 @@ fn detect_cli_context() -> CliContext {
     }
 }
 
-fn try_handle_version_request() -> bool {
+/// `<tool> --version --json` is the agent-tools workspace contract for
+/// machine-readable version reporting, enforced across every tool by the
+/// `version-artifacts` concern. Clap cannot express it: `--version` prints and
+/// exits inside clap, so `--json` never reaches a handler. Plain `--version`
+/// is clap's own.
+fn try_handle_version_json_request() -> bool {
     let args: Vec<String> = env::args().skip(1).collect();
-
-    if is_version_json_request(&args) {
-        println!(
-            "{}",
-            json!({
-                "package": "dotsync",
-                "binary": "dotsync",
-                "version": env!("CARGO_PKG_VERSION"),
-            })
-        );
-        return true;
-    }
-
-    if is_version_request(&args) {
-        println!("dotsync {}", env!("CARGO_PKG_VERSION"));
-        return true;
-    }
-
-    false
-}
-
-fn is_version_request(args: &[String]) -> bool {
-    args.len() == 1 && matches!(args[0].as_str(), "--version" | "-V")
-}
-
-fn is_version_json_request(args: &[String]) -> bool {
-    args.iter()
+    let is_version_json_request = args
+        .iter()
         .any(|arg| matches!(arg.as_str(), "--version" | "-V"))
         && args.iter().any(|arg| arg == "--json")
         && args
             .iter()
-            .all(|arg| matches!(arg.as_str(), "--version" | "-V" | "--json"))
+            .all(|arg| matches!(arg.as_str(), "--version" | "-V" | "--json"));
+    if !is_version_json_request {
+        return false;
+    }
+
+    println!(
+        "{}",
+        json!({
+            "package": "dotsync",
+            "binary": "dotsync",
+            "version": env!("CARGO_PKG_VERSION"),
+        })
+    );
+    true
+}
+
+/// Clap exits the process itself on a parse failure, which used to happen
+/// before `main` had read `--output` — so every clap-generated usage error
+/// broke the documented JSON contract. Reading the format straight out of
+/// argv is the only way to honor it: there is no parsed `Cli` to ask.
+fn emit_clap_error(error: clap::Error) -> i32 {
+    if !error.use_stderr() {
+        // `--help` and `--version` arrive here as errors; they render on
+        // stdout and exit 0.
+        let _ = error.print();
+        return error.exit_code();
+    }
+
+    let message = error.render().to_string();
+    eprint!("{message}");
+    if matches!(output_format_from_args(), OutputFormat::Json) {
+        println!(
+            "{}",
+            render::render_usage_error_json(&usage_error(message.trim_end()))
+        );
+    }
+    error.exit_code()
+}
+
+fn output_format_from_args() -> OutputFormat {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let requested_json = args.iter().enumerate().any(|(index, arg)| {
+        arg == "--output=json"
+            || (arg == "--output" && args.get(index + 1).is_some_and(|value| value == "json"))
+    });
+    if requested_json {
+        OutputFormat::Json
+    } else {
+        OutputFormat::Human
+    }
 }
 
 impl Action {
