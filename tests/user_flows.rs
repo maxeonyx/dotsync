@@ -313,6 +313,80 @@ fn merge_remote_scope_into(machine: &MachineEnvironment, source: &str, target: &
     git_push(&clone_dir, target);
 }
 
+// Push-failure fixture helpers: a `pre-receive` hook that always rejects makes
+// the shared fake remote refuse pushes while still serving fetches, which is
+// how these tests reproduce the issue #19 incident (cascade lands locally, the
+// push never happens).
+fn block_remote_pushes(machine: &MachineEnvironment) {
+    let hook_path = machine.remote_dir.join("hooks/pre-receive");
+    write_file_at(&hook_path, "#!/bin/sh\nexit 1\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755))
+            .expect("make pre-receive hook executable");
+    }
+}
+
+fn allow_remote_pushes(machine: &MachineEnvironment) {
+    fs::remove_file(machine.remote_dir.join("hooks/pre-receive")).expect("remove pre-receive hook");
+}
+
+fn remote_branch_revision(machine: &MachineEnvironment, branch: &str) -> String {
+    let output = git_in(&machine.remote_dir, &["rev-parse", branch]);
+    assert!(output.status.success(), "{}", render_output(&output));
+    String::from_utf8(output.stdout)
+        .expect("git rev-parse output should be utf-8")
+        .trim()
+        .to_string()
+}
+
+fn remote_branch_file_contents(
+    machine: &MachineEnvironment,
+    branch: &str,
+    relative: &str,
+) -> String {
+    let output = git_in(
+        &machine.remote_dir,
+        &["show", &format!("{branch}:{relative}")],
+    );
+    assert!(output.status.success(), "{}", render_output(&output));
+    String::from_utf8(output.stdout).expect("remote file contents should be utf-8")
+}
+
+/// Reproduces the issue #19 wedge: `dotsync commit` writes its commit and
+/// cascade transaction, then the push fails, leaving every local scope
+/// bookmark ahead of the remote. Pushes are allowed again before returning, so
+/// the machine is in the exact state a user finds it in the morning after: a
+/// perfectly coherent local repo with unpushed scope commits.
+///
+/// The exit code of the interrupted run is deliberately not asserted — how
+/// dotsync reports a rejected push is a separate question from how it recovers
+/// from one, and the wedged state is the same either way.
+fn interrupt_push_after_cascade(machine: &MachineEnvironment, relative: &str, contents: &str) {
+    machine.write_file(relative, contents);
+    block_remote_pushes(machine);
+
+    machine.run(&format!(
+        "dotsync commit all -m 'add dev-certs helper' -- {relative}"
+    ));
+
+    allow_remote_pushes(machine);
+
+    for scope in ["all", "linux", "mx-xps-cy"] {
+        assert_eq!(
+            read_bookmark_file_contents(machine, scope, relative),
+            contents,
+            "expected the cascade to have landed locally on `{scope}` before the push failed"
+        );
+        assert_ne!(
+            bookmark_revision(machine, scope),
+            remote_branch_revision(machine, scope),
+            "expected local `{scope}` to be ahead of the remote after the failed push"
+        );
+    }
+}
+
 fn init_bare_remote(remote_dir: &Path) {
     if let Some(parent) = remote_dir.parent() {
         fs::create_dir_all(parent).expect("create remote parent dir");
@@ -2308,6 +2382,290 @@ fn status_ignores_unmanaged_files() {
     );
 
     assert_stderr_snapshot(&status_output, "dotsync: no changes for mx-xps-cy\n");
+}
+
+// Issue #19: an interrupted push leaves local scope bookmarks ahead of the
+// remote. That is normal VCS state — unpushed commits — and no dotsync command
+// may treat it as a fetch conflict.
+
+#[test]
+fn status_works_while_local_scopes_are_ahead_of_remote() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    interrupt_push_after_cascade(
+        &machine,
+        ".config/fish/dev-certs.fish",
+        "set -gx DEV_CERTS 1\n",
+    );
+
+    let status_output = machine.run("dotsync status");
+    assert_eq!(
+        status_output.status.code(),
+        Some(0),
+        "`dotsync status` must keep working while local scopes are unpushed: {}",
+        render_output(&status_output)
+    );
+    assert!(
+        !render_output(&status_output).contains("fetch would overwrite"),
+        "unpushed local scopes are not a fetch conflict: {}",
+        render_output(&status_output)
+    );
+}
+
+#[test]
+fn view_works_while_local_scopes_are_ahead_of_remote() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    interrupt_push_after_cascade(
+        &machine,
+        ".config/fish/dev-certs.fish",
+        "set -gx DEV_CERTS 1\n",
+    );
+
+    let view_output = machine.run("dotsync view");
+    assert_eq!(
+        view_output.status.code(),
+        Some(0),
+        "`dotsync view` must keep working while local scopes are unpushed: {}",
+        render_output(&view_output)
+    );
+    assert!(
+        String::from_utf8_lossy(&view_output.stdout).contains(".config/fish/dev-certs.fish"),
+        "`dotsync view` should show the locally committed file: {}",
+        render_output(&view_output)
+    );
+}
+
+#[test]
+fn diff_works_while_local_scopes_are_ahead_of_remote() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    interrupt_push_after_cascade(
+        &machine,
+        ".config/fish/dev-certs.fish",
+        "set -gx DEV_CERTS 1\n",
+    );
+
+    let diff_output = machine.run("dotsync diff");
+    assert_eq!(
+        diff_output.status.code(),
+        Some(0),
+        "`dotsync diff` must keep working while local scopes are unpushed, and home matches the repo here: {}",
+        render_output(&diff_output)
+    );
+}
+
+#[test]
+fn plain_sync_pushes_scopes_left_unpushed_by_an_interrupted_commit() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    interrupt_push_after_cascade(
+        &machine,
+        ".config/fish/dev-certs.fish",
+        "set -gx DEV_CERTS 1\n",
+    );
+
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "running dotsync again is the documented remedy for an interrupted push: {}",
+        render_output(&sync_output)
+    );
+
+    for scope in ["all", "linux", "mx-xps-cy"] {
+        assert_eq!(
+            remote_branch_revision(&machine, scope),
+            bookmark_revision(&machine, scope),
+            "`dotsync` should have pushed the pending `{scope}` bookmark"
+        );
+    }
+    assert_eq!(
+        remote_branch_file_contents(&machine, "all", ".config/fish/dev-certs.fish"),
+        "set -gx DEV_CERTS 1\n"
+    );
+}
+
+#[test]
+fn commit_pushes_scopes_left_unpushed_by_an_interrupted_commit() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    interrupt_push_after_cascade(
+        &machine,
+        ".config/fish/dev-certs.fish",
+        "set -gx DEV_CERTS 1\n",
+    );
+
+    machine.write_file(".config/fish/aliases.fish", "alias ll 'ls -l'\n");
+    let commit_output =
+        machine.run("dotsync commit all -m 'add aliases' -- .config/fish/aliases.fish");
+    assert!(
+        commit_output.status.success(),
+        "a later commit must work on a machine with unpushed scopes: {}",
+        render_output(&commit_output)
+    );
+
+    for scope in ["all", "linux", "mx-xps-cy"] {
+        assert_eq!(
+            remote_branch_revision(&machine, scope),
+            bookmark_revision(&machine, scope),
+            "`dotsync commit` should have pushed the pending `{scope}` bookmark"
+        );
+    }
+    assert_eq!(
+        remote_branch_file_contents(&machine, "all", ".config/fish/dev-certs.fish"),
+        "set -gx DEV_CERTS 1\n",
+        "the stranded commit must reach the remote too, not just the new one"
+    );
+    assert_eq!(
+        remote_branch_file_contents(&machine, "all", ".config/fish/aliases.fish"),
+        "alias ll 'ls -l'\n"
+    );
+}
+
+#[test]
+fn drift_stop_during_commit_does_not_strand_unpushed_history() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(
+        &machine,
+        "mx-xps-cy",
+        ".gitconfig",
+        "[user]\nname = \"Repo\"\n",
+    );
+    let sync_output = machine.run("dotsync");
+    assert!(
+        sync_output.status.success(),
+        "{}",
+        render_output(&sync_output)
+    );
+
+    // Unrelated drift that the commit does not select: the home sync will stop
+    // on it after the cascade transaction has already created history.
+    machine.write_file(".gitconfig", "[user]\nname = \"Drifted\"\n");
+    machine.write_file(".config/fish/dev-certs.fish", "set -gx DEV_CERTS 1\n");
+
+    let commit_output =
+        machine.run("dotsync commit all -m 'add dev-certs helper' -- .config/fish/dev-certs.fish");
+    assert_eq!(
+        commit_output.status.code(),
+        Some(1),
+        "the unrelated drift should still stop the home sync: {}",
+        render_output(&commit_output)
+    );
+    assert!(
+        render_output(&commit_output).contains("drift"),
+        "the stop should be the drift stop, not something else: {}",
+        render_output(&commit_output)
+    );
+
+    for scope in ["all", "linux", "mx-xps-cy"] {
+        assert_eq!(
+            remote_branch_revision(&machine, scope),
+            bookmark_revision(&machine, scope),
+            "push must happen before the home sync, so a drift stop cannot strand `{scope}` history"
+        );
+    }
+}
+
+#[test]
+fn diverged_scope_bookmark_is_reported_as_divergence_not_as_overwrite() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    interrupt_push_after_cascade(
+        &machine,
+        ".config/fish/dev-certs.fish",
+        "set -gx DEV_CERTS 1\n",
+    );
+    // Another machine pushes to `all` while this machine holds unpushed work on
+    // it, so `all` genuinely diverges while `linux` and `mx-xps-cy` are merely
+    // local-ahead.
+    seed_remote_scope_file(
+        &machine,
+        "all",
+        ".config/other-machine.conf",
+        "from another machine\n",
+    );
+
+    let sync_output = machine.run("dotsync");
+    assert_eq!(
+        sync_output.status.code(),
+        Some(1),
+        "true divergence is still an error until the convergence pass lands: {}",
+        render_output(&sync_output)
+    );
+
+    // The exact wording is the implementer's choice, but the error must name
+    // divergence and the diverged scope, and must not reuse the phrasing that
+    // misdescribed ordinary unpushed work as a fetch conflict.
+    let rendered = render_output(&sync_output);
+    assert!(
+        rendered.to_lowercase().contains("diverge"),
+        "a diverged scope must be described as divergence: {rendered}"
+    );
+    assert!(
+        rendered.contains("`all`"),
+        "the diverged scope must be named: {rendered}"
+    );
+    assert!(
+        !rendered.contains("fetch would overwrite"),
+        "unpushed local work is not a fetch overwrite: {rendered}"
+    );
 }
 
 fn parse_stdout_json(output: &Output) -> serde_json::Value {
