@@ -50,7 +50,7 @@
     "dotsync::user_flows$missing_home_is_reported_as_an_environment_error": "passing",
     "dotsync::user_flows$missing_state_file_disables_deletion": "passing",
     "dotsync::user_flows$multiple_machines_can_contribute_to_all_without_losing_changes": "passing",
-    "dotsync::user_flows$noop_commit_names_the_scope_it_targeted": "pending",
+    "dotsync::user_flows$noop_commit_names_the_scope_it_targeted": "passing",
     "dotsync::user_flows$output_format_is_accepted_after_the_subcommand": "passing",
     "dotsync::user_flows$paused_cascade_withholds_publishing_until_it_is_resolved": "passing",
     "dotsync::user_flows$plain_sync_pushes_scopes_left_unpushed_by_an_interrupted_commit": "passing",

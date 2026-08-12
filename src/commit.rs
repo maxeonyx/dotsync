@@ -81,10 +81,11 @@ pub struct CommitReport {
 
 impl CommitReport {
     /// A commit that found nothing to add. It creates no history of its own,
-    /// but it still reports what it published on behalf of earlier runs.
-    fn nothing_to_commit(push: PushReport) -> Self {
+    /// but it still names the scope it targeted and reports what it published
+    /// on behalf of earlier runs.
+    fn nothing_to_commit(scope: &str, push: PushReport) -> Self {
         Self {
-            committed_scope: String::new(),
+            committed_scope: scope.to_string(),
             sync: SyncReport::default(),
             push,
         }
@@ -156,7 +157,10 @@ pub async fn commit_and_sync(
     .await?;
 
     if selected_paths.is_empty() {
-        return Ok(CommitReport::nothing_to_commit(pending_push));
+        return Ok(CommitReport::nothing_to_commit(
+            &options.scope,
+            pending_push,
+        ));
     }
 
     let mut tx = repo.start_transaction();
@@ -176,7 +180,10 @@ pub async fn commit_and_sync(
         })?;
 
         if new_tree.tree_ids() == base_tree.tree_ids() {
-            return Ok(CommitReport::nothing_to_commit(pending_push));
+            return Ok(CommitReport::nothing_to_commit(
+                &options.scope,
+                pending_push,
+            ));
         }
 
         tx.repo_mut()
