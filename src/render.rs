@@ -299,8 +299,9 @@ pub(crate) fn render_structured_error(
 }
 
 /// What a run overwrote under `--force`, said out loud. A forced overwrite is
-/// the one thing a run can do that discards somebody else's work, so it is
-/// reported whether the run went on to succeed or to stop.
+/// the one thing a run can do that discards somebody else's work, so both
+/// exits report it: the run that stopped afterwards, and the run that
+/// finished and left the revert standing on the remote.
 pub(crate) fn forced_overwrite_notes(forced_overwrites: &[std::path::PathBuf]) -> Vec<String> {
     if forced_overwrites.is_empty() {
         return Vec::new();

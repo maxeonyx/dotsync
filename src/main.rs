@@ -663,7 +663,13 @@ async fn run_commit(
             report.committed_scope,
             report.sync.synced_paths.len()
         ),
-        notes: render::success_notes(&report.sync.drifts, Some(&report.push)),
+        notes: render::forced_overwrite_notes(&report.forced_overwrites)
+            .into_iter()
+            .chain(render::success_notes(
+                &report.sync.drifts,
+                Some(&report.push),
+            ))
+            .collect(),
         stdout: None,
         exit_code: 0,
     }))
