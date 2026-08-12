@@ -26,6 +26,16 @@ pub(crate) fn synced_output(
         "command": command,
         "machine_scope": sync.current_scope,
         "synced_files": display_paths(&sync.synced_paths),
+        // The one thing a sync does that cannot be undone. A drift that
+        // reached this report is a drift the run was allowed to overwrite —
+        // anything else stopped it — so this is exactly the home content this
+        // run discarded. Named for what happened to the file rather than for
+        // the flag, because `init` and `abort` do it without one, and because
+        // `commit`'s `forced_overwrites` is the opposite direction: paths
+        // recorded over another machine's change.
+        "overwritten_files": display_paths(
+            &sync.drifts.iter().map(|drift| drift.repo_path.clone()).collect::<Vec<_>>(),
+        ),
     });
     if let Some(push) = push {
         json["unpushed_scopes"] = json!(push.unpushed_scopes());

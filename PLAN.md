@@ -196,15 +196,15 @@ The envelope is two fields: `status` is `"ok"` or `"error"`, and `command` names
 ### `dotsync` (sync), `init`, `continue`
 
 ```json
-{"status":"ok","command":"sync","machine_scope":"box1","synced_files":[".config/dotsync/config.toml"],"unpushed_scopes":[]}
+{"status":"ok","command":"sync","machine_scope":"box1","synced_files":[".config/dotsync/config.toml"],"overwritten_files":[],"unpushed_scopes":[]}
 ```
 
-One machine scope under one name: `scope` used to repeat `machine_scope` here and was deleted. `unpushed_scopes` lists scopes committed on this machine but not on the remote — the remote refused them, publishing was withheld while a cascade is paused, or the remote was out of reach. Empty means the remote has every scope commit this machine holds, including anything earlier runs left behind, which every publishing command republishes even when it has nothing of its own to add.
+One machine scope under one name: `scope` used to repeat `machine_scope` here and was deleted. `overwritten_files` lists home files whose contents this run discarded in favour of the repo — everything `--force` overwrote, and everything `init` and `abort` overwrote without being asked. It is the opposite direction from `commit`'s `forced_overwrites`, which is what a commit recorded *over* another machine's change, and both exist because a run that destroys something has to say so in the payload as well as in the notes. `unpushed_scopes` lists scopes committed on this machine but not on the remote — the remote refused them, publishing was withheld while a cascade is paused, or the remote was out of reach. Empty means the remote has every scope commit this machine holds, including anything earlier runs left behind, which every publishing command republishes even when it has nothing of its own to add.
 
 ### `abort`
 
 ```json
-{"status":"ok","command":"abort","machine_scope":"box2","paused_scope":"linux","synced_files":[".config/app.conf"]}
+{"status":"ok","command":"abort","machine_scope":"box2","paused_scope":"linux","synced_files":[".config/app.conf"],"overwritten_files":[".config/app.conf"]}
 ```
 
 `abort` publishes nothing, so it has no `unpushed_scopes`. `paused_scope` is where the cascade had stopped — not the scope the discarded commit was on, and not something that was itself aborted.
