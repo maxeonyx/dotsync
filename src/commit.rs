@@ -740,6 +740,12 @@ fn expand_selection_paths(
         .strip_prefix(&paths.home_dir)
         .ok()
         .map(|p| p.to_path_buf());
+    // Every guard below asks "is this path inside somewhere it may not be",
+    // and a symlink is a way of writing a path that is not where it looks.
+    // Resolving home and the repo root once means those questions get asked
+    // about the file that will actually be read, not about the string.
+    let home = Canonical::of(&paths.home_dir);
+    let repo_root = Canonical::of(&paths.repo_root);
 
     let mut rejected = Vec::new();
     for named in selection_paths {
@@ -755,6 +761,7 @@ fn expand_selection_paths(
             .collect::<PathBuf>();
         if let Some(problem) = unusable_commit_path(
             paths,
+            &home,
             selection_path,
             internal_paths,
             repo_relative.as_deref(),
@@ -775,11 +782,11 @@ fn expand_selection_paths(
         if is_directory_selection {
             if home_path.exists() {
                 collect_home_directory_files(
-                    &paths.home_dir,
+                    &home,
                     &home_path,
                     &mut matched,
                     internal_paths,
-                    &paths.repo_root,
+                    &repo_root,
                 )?;
             }
             matched.extend(
@@ -851,6 +858,7 @@ impl SelectedPaths {
 /// for what they do or do not resolve to.
 fn unusable_commit_path(
     paths: &DotsyncPaths,
+    home: &Canonical,
     selection_path: &Path,
     internal_paths: &BTreeSet<PathBuf>,
     repo_relative: Option<&Path>,
@@ -897,15 +905,60 @@ fn unusable_commit_path(
             });
         }
     }
+    // Last, because it is the only one that touches the filesystem. A path
+    // that does not resolve to itself under home went through a link on the
+    // way — as the last component or as any component above it — so what
+    // dotsync would read is not what was named.
+    if let Some(resolves_to) = home.resolves_elsewhere(selection_path) {
+        return Some(CommitPathProblem::Symlink { resolves_to });
+    }
     None
 }
 
+/// A directory as the filesystem really has it, with the links followed once.
+///
+/// Falls back to the path as given when it cannot be resolved, which is only
+/// reachable before `init` has created the repo — every guard that uses this
+/// runs against paths that exist.
+struct Canonical(PathBuf);
+
+impl Canonical {
+    fn of(path: &Path) -> Self {
+        Self(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+
+    fn contains(&self, path: &Path) -> bool {
+        path.canonicalize()
+            .is_ok_and(|resolved| resolved.starts_with(&self.0))
+    }
+
+    /// Where `relative` really leads, if that is not where it says.
+    ///
+    /// A path that does not exist yet resolves to nothing and is not a link;
+    /// whether it names anything at all is a question the caller asks next.
+    fn resolves_elsewhere(&self, relative: &Path) -> Option<PathBuf> {
+        let resolved = self.0.join(relative).canonicalize().ok()?;
+        (resolved != self.0.join(relative)).then_some(resolved)
+    }
+}
+
+/// Every real file at or under `current`, as paths relative to home.
+///
+/// Symlinks are skipped rather than followed: `DirEntry::file_type` does not
+/// follow them, so a linked directory is neither recursed into nor recorded.
+/// The repo-root and internal-path guards below compare resolved paths, so
+/// that no route into this walk — however the caller's path was spelled — can
+/// reach dotsync's own state.
 fn collect_home_directory_files(
-    home_root: &Path,
+    home_root: &Canonical,
     current: &Path,
     expanded: &mut BTreeSet<PathBuf>,
     internal_paths: &BTreeSet<PathBuf>,
-    repo_root: &Path,
+    repo_root: &Canonical,
 ) -> Result<(), DotsyncError> {
     for entry in fs::read_dir(current).map_err(|source| DotsyncError::Io {
         path: current.to_path_buf(),
@@ -923,7 +976,7 @@ fn collect_home_directory_files(
 
         if file_type.is_dir() {
             // Never recurse into the dotsync repo directory itself
-            if path.starts_with(repo_root) {
+            if repo_root.contains(&path) {
                 continue;
             }
             collect_home_directory_files(home_root, &path, expanded, internal_paths, repo_root)?;
@@ -934,17 +987,17 @@ fn collect_home_directory_files(
             continue;
         }
 
-        let relative = path
-            .strip_prefix(home_root)
-            .map_err(|source| DotsyncError::Jj {
-                message: format!(
-                    "failed to make home path {} relative to {}: {source}",
-                    path.display(),
-                    home_root.display()
-                ),
-            })?;
+        // Relative to home as the filesystem has it, so that a walk which
+        // started somewhere aliased still names files the way every other part
+        // of dotsync does — or names nothing, if it left home entirely.
+        let Ok(resolved) = path.canonicalize() else {
+            continue;
+        };
+        let Ok(relative) = resolved.strip_prefix(home_root.path()) else {
+            continue;
+        };
         let relative = relative.to_path_buf();
-        if internal_paths.contains(&relative) {
+        if internal_paths.contains(&relative) || repo_root.contains(&path) {
             continue;
         }
         expanded.insert(relative);

@@ -81,6 +81,10 @@ impl RefusedCommitPath {
 pub enum CommitPathProblem {
     /// Your whole home directory, however it was named.
     HomeRoot,
+    /// The path is a symlink, or reaches its file through one.
+    Symlink {
+        resolves_to: PathBuf,
+    },
     Absolute,
     EscapesHome,
     /// Matched neither a file in home nor a file already on the target scope.
@@ -104,6 +108,10 @@ impl RejectedCommitPath {
         match &self.problem {
             CommitPathProblem::HomeRoot => format!(
                 "`{path}` is your whole home directory. Dotsync would walk all of it and put every file it found on scope `{scope}` — ssh keys, credentials, browser profiles — and every machine sharing that scope would then have them written into its own home."
+            ),
+            CommitPathProblem::Symlink { resolves_to } => format!(
+                "`{path}` is a symlink, or reaches its file through one: it resolves to {}. Dotsync records the content it finds at the path you name, and every machine on scope `{scope}` writes that content back to that same path — so a link is either somebody else's file being published under your path, or a later sync writing through the link to somewhere dotsync does not manage.",
+                resolves_to.display()
             ),
             CommitPathProblem::Absolute => format!(
                 "`{path}` is an absolute path, and dotsync resolves every commit path against your home directory."
@@ -151,6 +159,11 @@ impl RejectedCommitPath {
     /// Read by the binary's renderer to say what to name instead of home.
     pub fn is_home_root(&self) -> bool {
         matches!(self.problem, CommitPathProblem::HomeRoot)
+    }
+
+    /// Read by the binary's renderer to explain what dotsync does with links.
+    pub fn is_symlink(&self) -> bool {
+        matches!(self.problem, CommitPathProblem::Symlink { .. })
     }
 }
 

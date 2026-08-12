@@ -179,6 +179,16 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
             steps.push(
                 "do not use `~/`, absolute paths, or `..`; dotsync resolves every path against your home directory already, and records it verbatim.".to_string(),
             );
+            if rejected.iter().any(|rejected| rejected.is_symlink()) {
+                steps.push(
+                    "name the real file instead of the link, if it lives in your home directory."
+                        .to_string(),
+                );
+                steps.push(
+                    "config kept outside home and linked into place cannot be committed yet; dotsync has no answer for what a scope should hold for such a path, so it refuses rather than guessing."
+                        .to_string(),
+                );
+            }
             if rejected.iter().any(|rejected| rejected.is_home_root()) {
                 steps.push(
                     "name the directories or files you actually mean: `dotsync commit <scope> -m \"message\" -- .config/fish/ .bashrc`. Dotsync will not sweep a whole home directory onto a scope."
