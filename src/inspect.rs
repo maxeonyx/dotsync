@@ -45,6 +45,9 @@ pub enum ViewReport {
 #[derive(Debug, Clone)]
 pub struct DiffReport {
     pub machine_scope: String,
+    /// See `StatusReport::paused_cascade`: `diff` answers the same question in
+    /// more detail, so it owes the same warning.
+    pub paused_cascade: Option<String>,
     pub drifts: Vec<FileDrift>,
 }
 
@@ -204,6 +207,7 @@ pub async fn diff_home(paths: &DotsyncPaths) -> Run<Result<DiffReport, DotsyncEr
 
         Ok(DiffReport {
             machine_scope,
+            paused_cascade: crate::commit::paused_cascade_scope(session.paths())?,
             drifts,
         })
     })

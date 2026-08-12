@@ -52,6 +52,22 @@ pub(crate) fn display_paths(paths: &[PathBuf]) -> Vec<String> {
     paths.iter().map(|path| display_path(path)).collect()
 }
 
+/// What a read-only command says about a cascade it found paused.
+///
+/// A note rather than part of the answer, so it reaches a caller in both
+/// output formats and arrives before the answer it qualifies: on a machine
+/// with a paused cascade, "no changes" is true and misleading at once, because
+/// nothing can be committed and nothing is being published.
+pub(crate) fn paused_cascade_notes(paused_cascade: Option<&String>) -> Vec<String> {
+    let Some(scope) = paused_cascade else {
+        return Vec::new();
+    };
+    vec![
+        format!("dotsync: a cascade is paused at scope `{scope}`; this machine cannot commit and is publishing nothing until it is resolved"),
+        "dotsync: edit the conflicted files in home to the merged contents you want and run `dotsync continue`, or run `dotsync abort` to discard the cascade.".to_string(),
+    ]
+}
+
 /// One changed file, for a machine. The same object wherever dotsync reports a
 /// file that differs from what the scopes hold: `status`, `diff`, and the
 /// drift a run stopped on. `state` is the code to branch on; `reason` is the

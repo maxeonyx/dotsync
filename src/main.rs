@@ -644,15 +644,19 @@ async fn run_status() -> Result<CliOutput, DotsyncError> {
     let run = status(&paths).await;
     Ok(output_of(run, |report| {
         SuccessOutput::message(
-            json!({
-                "status": "ok",
-                "command": "status",
-                "machine_scope": report.machine_scope,
-                "changes": render::changes_json(&report.changes),
-                "incoming": render::changes_json(&report.incoming),
-            }),
+            with_paused_cascade(
+                json!({
+                    "status": "ok",
+                    "command": "status",
+                    "machine_scope": report.machine_scope,
+                    "changes": render::changes_json(&report.changes),
+                    "incoming": render::changes_json(&report.incoming),
+                }),
+                report.paused_cascade.as_ref(),
+            ),
             render_status_human(&report),
         )
+        .with_notes(render::paused_cascade_notes(report.paused_cascade.as_ref()))
     }))
 }
 
@@ -666,18 +670,22 @@ async fn run_diff() -> Result<CliOutput, DotsyncError> {
         // The same changes `status` lists, under the same name, with the diffs
         // shown. That is the whole difference between the two commands.
         ..SuccessOutput::message(
-            json!({
-                "status": "ok",
-                "command": "diff",
-                "machine_scope": report.machine_scope,
-                "changes": report
-                    .drifts
-                    .iter()
-                    .map(render::render_drift_json)
-                    .collect::<Vec<_>>(),
-            }),
+            with_paused_cascade(
+                json!({
+                    "status": "ok",
+                    "command": "diff",
+                    "machine_scope": report.machine_scope,
+                    "changes": report
+                        .drifts
+                        .iter()
+                        .map(render::render_drift_json)
+                        .collect::<Vec<_>>(),
+                }),
+                report.paused_cascade.as_ref(),
+            ),
             render_diff_human(&report),
         )
+        .with_notes(render::paused_cascade_notes(report.paused_cascade.as_ref()))
     }))
 }
 
@@ -805,6 +813,20 @@ fn render_commit_success(report: dotsync::CommitReport) -> SuccessOutput {
             ))
             .collect(),
     )
+}
+
+/// Adds the pause to a read-only command's payload, and only when there is
+/// one — the same shape as `remote_unreachable`, and for the same reason: a
+/// run with nothing to say about a pause and a run on a machine with no pause
+/// are the same answer to whoever reads this field.
+fn with_paused_cascade(
+    mut json: serde_json::Value,
+    paused_cascade: Option<&String>,
+) -> serde_json::Value {
+    if let Some(scope) = paused_cascade {
+        json["paused_cascade"] = json!(scope);
+    }
+    json
 }
 
 fn discover_paths() -> Result<DotsyncPaths, DotsyncError> {

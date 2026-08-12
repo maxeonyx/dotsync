@@ -98,7 +98,7 @@
     "dotsync::user_flows$selected_add_modify_and_delete_are_applied_without_touching_unselected_changes": "passing",
     "dotsync::user_flows$shared_scope_conflict_pauses_and_continue_applies_resolution_to_machine_homes": "passing",
     "dotsync::user_flows$status_and_diff_describe_the_same_change_with_the_same_words": "passing",
-    "dotsync::user_flows$status_and_diff_say_a_cascade_is_paused": "pending",
+    "dotsync::user_flows$status_and_diff_say_a_cascade_is_paused": "passing",
     "dotsync::user_flows$status_before_init_json_matches_recovery_message": "passing",
     "dotsync::user_flows$status_before_init_matches_full_recovery_message": "passing",
     "dotsync::user_flows$status_clean_shows_no_changes": "passing",
