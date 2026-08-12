@@ -102,14 +102,26 @@ pub(crate) async fn fetch_origin(
 }
 
 /// Reconciles every local scope bookmark against the remote bookmark it
-/// tracks. Per DESIGN.md "The convergence model" there are exactly four cases:
+/// tracks. DESIGN.md "The convergence model" describes four cases; this loop
+/// decides six things per scope, because two of them are about the local
+/// bookmark existing at all, and divergence is detected in two different
+/// places:
 ///
+/// - no local bookmark: a scope another machine published — create it
+/// - conflicted local bookmark: jj's import already tried to reconcile this
+///   scope and could not, which *is* divergence — error (never reset it, or
+///   the local commits are orphaned and the home files that came with them are
+///   deleted by the following sync)
 /// - local == remote: nothing to do
 /// - local behind remote: fast-forward the local bookmark
 /// - local ahead of remote: unpushed local work — keep it, the caller publishes
 ///   it when it pushes
-/// - diverged: both sides have commits the other lacks, which dotsync cannot
-///   merge yet
+/// - neither is an ancestor of the other: divergence that the import did not
+///   turn into a conflicted bookmark — for example when the remote bookmark is
+///   not tracked, so the import left the local one alone — error
+///
+/// Erroring leaves the whole fetch transaction uncommitted, so a diverged
+/// repo is unchanged by the attempt and reports the same thing next run.
 pub(crate) fn sync_local_bookmarks_from_remote(
     mut_repo: &mut MutableRepo,
     remote_name: &jj_lib::ref_name::RemoteName,
