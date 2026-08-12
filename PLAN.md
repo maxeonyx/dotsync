@@ -75,7 +75,6 @@ Two independent smell reviews (product surface driven live in a sandbox; impleme
 - Item 2: divergence-as-merge, push retry loop, rejection classification. (Item 2's first-commit deletion slot is consumed by Wave 0.)
 - Item 3: DL-2's root fix — "resolved" must be a property of content, not of having run `continue`; the interim Wave-0 guard is deleted with the pause file. Note: the exit-3 pause JSON contract documented below **does not exist in the code today** (actual output is the generic error JSON; `conflicted_files` is stringly-joined into the message) — item 3 *builds* the contract rather than changes it.
 - Item 4: read-only commands never mutate (in-memory merge reporting), `status` reports unpushed scopes.
-- Upstream (tdd-ratchet): there is no "retired" test status, so 19 of the ratchet-tracked tests (24%) are `assert!(true)` tombstones — deletion isn't expressible. File and fix in the tdd-ratchet repo, then delete the tombstones here. Until then the tombstone macro stays (workspace rule: never make red green by faking; equally, never fake green — this is currently fake green).
 - Windows path-separator suspect: `collect_home_directory_files` builds relatives with `read_dir` separators and feeds `from_internal_string` — would produce a tree entry literally named `.config\fish\config.fish` for directory-selection commits on Windows. Inferred from source, unconfirmed — needs a Windows run before item 2 multiplies the conversion sites. Scope-name/`RepoPathBuf` typing (15 conversion sites, `"all"` hardcoded 8×) rides along with whichever wave touches those seams first.
 
 ### 2. The convergence pass (#17 and the heart of the design)
@@ -111,6 +110,7 @@ Use the headless agent-scenario infrastructure (`tests/agent-scenarios/`) with a
 - PR [#15](https://github.com/maxeonyx/dotsync/pull/15) (scope lifecycle / add-scope): review against current main, land or close.
 - Issues [#5](https://github.com/maxeonyx/dotsync/issues/5), [#8](https://github.com/maxeonyx/dotsync/issues/8), [#10](https://github.com/maxeonyx/dotsync/issues/10), [#11](https://github.com/maxeonyx/dotsync/issues/11): partially or fully addressed by PRs #14/#16 (`view`, `diff`, init/status UX) — verify and close or trim.
 - Issues [#4](https://github.com/maxeonyx/dotsync/issues/4), [#18](https://github.com/maxeonyx/dotsync/issues/18): re-triage after steps 1–4; several items fall out of them naturally.
+- **Open design question for Max**: should committing to a non-ancestor scope (for example another machine's leaf scope) be allowed? It is currently silently accepted. The old tombstoned test `retired_non_ancestor_scope_human_error_stands_alone` suggests it was once meant to error, and DESIGN.md does not say either way.
 
 ## Key design decision: conflicts are commits (2026-08-12 revision)
 
