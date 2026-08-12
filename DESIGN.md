@@ -226,13 +226,13 @@ The steady-state command is `dotsync`, and it is the one an agent runs by reflex
 
 **`dotsync commit <scope> -m "message"`** (no paths): Commit every managed file this machine has changed, which is exactly the set `dotsync status` lists as changes. It does not scan all of home for unrelated new files; new paths are intentionally opted into with explicit path arguments.
 
-**`dotsync status`**: List managed files this machine has changed, and separately the files another machine changed that home has not caught up to. Read-only, and exits 0 either way.
+**`dotsync status`**: List managed files this machine has changed, and separately the files another machine changed that home has not caught up to. Says so when a cascade is paused, because that machine can commit nothing until it is resolved. Read-only, and exits 0 either way.
 
 **`dotsync diff`**: Show line-oriented diffs for managed home files that have drifted. Read-only, and exits 1 when drift is present so scripts and agents can distinguish clean from dirty state. A file the repo has moved on from while home stayed put is not drift, so a machine that is merely behind exits 0 — the same answer `status` and plain `dotsync` give.
 
 **`dotsync view`**: Show a read-only overview of checked-in scope and file state. With `--scope <scope>`, show the managed file tree visible on that scope. With `--file <path>`, show the scopes where that file exists. With both `--scope <scope>` and `--file <path>`, print that file as it exists on that scope.
 
-**`dotsync show conflict`**: Re-render the current paused cascade: DAG position, paused scope, colliding scopes, conflicted files, and resolution instructions. Works at any time while a pause exists, for agents that lost the original output.
+**`dotsync show conflict`** *(not implemented — PLAN item 3)*: Re-render the current paused cascade: DAG position, paused scope, colliding scopes, conflicted files, and resolution instructions. Works at any time while a pause exists, for agents that lost the original output.
 
 **`dotsync continue`**: Continue a paused cascade after the conflict markers in the affected home files have been edited away to the resolved contents. Refuses if markers remain.
 

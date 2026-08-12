@@ -104,6 +104,8 @@ Things worth knowing before the next wave:
 - **`--force` is still the only thing keeping `status`/`diff` from being the same command.** They now agree on population, objects, header and per-file rendering; the difference in output is the diff string, and the difference in behaviour is that `diff` exits 1 when it finds anything. That is a `--verbose` flag's worth of difference, which is why the open question below is filed rather than answered.
 - **`N file(s)` was left alone.** The singular/plural fix went to the two messages that read as grammatical errors ("cannot commit 1 of the paths you named"); `file(s)` is a deliberate compact convention used in a dozen places and changing it is churn, not coherence.
 - **Nothing was done about `commit.rs`'s size.** It is still ~1400 lines and its split is still unscheduled; this wave added `DirectoryWalk` to it. See the Wave 2 note.
+- **Only the structural half of "does the headline match the outcome" was settled.** A report can no longer claim something the run did not do: the no-op commit cannot describe a sync it never ran, a stop cannot hide what it overwrote, and the exit code is derived from the state rather than chosen per command. The *behavioural* half is open and is K2 under item 3 — a `continue` that resolves a conflict outside this machine's ancestry succeeds, pushes, and then exits 1 with `drift_detected`, leaving the machine permanently "changed" in `status`. No amount of presentation work fixes that one; the run really does end in two states at once.
+- **The review round after this wave added nine fixes on top of it.** The blocker: `dotsync bogus --output json` emitted nothing at all on stdout, because clap's unknown-command arm swallows the flag — empty stdout with exit 2, for the mistake an agent makes most. Then: usage payloads gained the three collections every other error carries; the drift stop's file list stopped rendering as `- ` bullets immediately below the `Correct flow:` bullets and now uses the one changed-file rendering under a heading of its own; `status` and `diff` report a paused cascade in both channels, because "no changes" was the answer they gave on a machine that could not commit at all; `not initialized` names the command that was run instead of telling everybody to rerun `dotsync status`, and both it and `repo already exists` joined the teaching-error shape; `dotsync commit -- <fifo>` no longer hangs forever (`fs::read` on a fifo blocks, and `read_home_bytes` reads every managed path on every run, so a tracked file replaced by a fifo could stop `status` too); and `view --file` on a path no scope holds says so instead of printing two headings and nothing between them.
 
 Original statement of the wave: JSON schema unified across commands (no empty-string `scope`/`machine_scope` from default-constructed reports; four near-identical `json!` blocks collapsed; `SuccessOutput`'s implicit `human`/`stdout` precedence untangled); `status`/`diff` merged or reconciled (Wave 1 made them agree on *what* is drift; the remaining question is whether two commands are wanted at all); exit-code table made coherent and documented in `--help`; `init` generates the commented `config.toml` DESIGN calls load-bearing (today it's comment-free, so the documented scope-discovery mechanism yields nothing); DESIGN.md Commands section corrected (says "one command" then lists eight, omits `init` and `status`); `docs/SKILL.md` re-verified against actual behavior; user-facing text purged of `bookmark`/`jj` vocabulary (DESIGN: "abstracts jj away entirely").
 
@@ -126,6 +128,10 @@ Deletions this item performs (expanded 2026-08-12):
 
 ### 3. Conflicts as commits
 
+**Read this first (found in the Wave 3 review, 2026-08-12): resolving a conflict on a scope outside this machine's ancestry is broken end to end, and no test covers it.** Drive it by hand before designing anything here. What happens today: machine B pauses cascading into a scope it does not descend from, resolves the conflicted file in home, and runs `dotsync continue`. The continue *succeeds* — it writes the merge, finishes the cascade and pushes — and then exits 1 with `drift_detected`, because the resolved file in home is a change against B's own machine scope, which does not include the scope that was resolved. The headline says the run failed; the outcome is that it worked and published. Worse, the machine stays that way: `status` reports the file as changed for ever, because there is no scope this machine syncs from that holds the resolution. DESIGN specifies a mode switch for exactly this — the pause tells the agent it is resolving another machine's branch, and `continue` restores home afterwards — and none of it is implemented.
+
+**Standing rule for any work on conflicts: exercise both an in-ancestry pause and an out-of-ancestry pause.** Every conflict test in the suite today pauses on a scope the machine descends from, which is why this survived three waves. The two are different flows with different endings, and the second one is the one that leaves a machine wedged.
+
 Write conflicted merges as real commits; derive "paused" from conflicted heads; delete `.dotsync-paused-cascade.json`; never push conflicted heads. Materialize conflict markers into home via sync (jj's own materialization code, scope-labeled sides, base included); drift treats materialized markers as expected content. `continue` verifies markers gone, resolves at the rootmost conflicted scope, propagates via descendant rewriting. `abort` returns to the last fully cascaded machine scope tip, abandoning only unpushed conflicted commits, and reverts **all** the config files — a full sync of home, not a selective restore. Add `dotsync show conflict` rendering derived state.
 
 Deletions and consequences (expanded 2026-08-12):
@@ -136,6 +142,8 @@ Deletions and consequences (expanded 2026-08-12):
 ### 4. Read-only robustness
 
 `status`, `view`, `diff` work on any repo state — including conflicted heads and offline — and report weirdness instead of failing. Read-only commands report what convergence would do (in-memory merges), never mutate.
+
+**Read-only commands still hard-fail on a diverged scope (found in the Wave 3 review, 2026-08-12).** `status`, `diff` and `view` exit 1 with `scope_diverged` when this machine and the remote both hold commits on a scope the other does not. The error itself is honest and was the point of item 1 — but refusing to *run* is exactly what design principle 4 forbids: read-only commands describe unusual state, they do not decline to describe anything because of it. An agent that hits this has no command left that will tell it what is going on. The fix is this item's in-memory convergence reporting: work out what convergence would do, say that the scope has diverged, and still answer the question that was asked. Until then, divergence takes away the diagnostics at the moment they are most needed.
 
 `status` must also report unpushed scopes. After item 1, a refused push is reported by the run that hit it and nowhere else: once that run's output scrolls away, a machine holding unpublished commits looks completely clean, and the honest-failure work of item 1 becomes invisible a minute later. Deferred here deliberately (found during the item 1 review) because it belongs with the rest of the read-only reporting surface.
 
@@ -189,22 +197,22 @@ The message MUST contain all of the following:
 
 ## JSON output contract (`--output json`)
 
-Every command emits one JSON object on stdout when `--output json` is passed. Human-readable messages and notes go to stderr regardless, so a caller can capture the payload and still show the run's own words. This section is the shipped schema as of Wave 3 — one example per command, taken from a live run.
+Every command emits one JSON object on stdout when `--output json` is passed. Human-readable messages and notes go to stderr regardless, so a caller can capture the payload and still show the run's own words. Every payload below is copied verbatim from a real run in a two-machine sandbox, which is why the keys are in serde's alphabetical order rather than a readable one.
 
 The envelope is two fields: `status` is `"ok"` or `"error"`, and `command` names the command that answered. Read `status` first: it is what separates `dotsync diff`'s exit 1 (changes found, `"ok"`) from a stop (`"error"`). Any command that could not reach the remote also carries `remote_unreachable` with git's own words, meaning the payload describes the last state this machine fetched.
 
 ### `dotsync` (sync), `init`, `continue`
 
 ```json
-{"status":"ok","command":"sync","machine_scope":"box1","synced_files":[".config/dotsync/config.toml"],"overwritten_files":[],"unpushed_scopes":[]}
+{"command":"sync","machine_scope":"a","overwritten_files":[],"status":"ok","synced_files":[".config/dotsync/config.toml"],"unpushed_scopes":[]}
 ```
 
-One machine scope under one name: `scope` used to repeat `machine_scope` here and was deleted. `overwritten_files` lists home files whose contents this run discarded in favour of the repo — everything `--force` overwrote, and everything `init` and `abort` overwrote without being asked. It is the opposite direction from `commit`'s `forced_overwrites`, which is what a commit recorded *over* another machine's change, and both exist because a run that destroys something has to say so in the payload as well as in the notes. `unpushed_scopes` lists scopes committed on this machine but not on the remote — the remote refused them, publishing was withheld while a cascade is paused, or the remote was out of reach. Empty means the remote has every scope commit this machine holds, including anything earlier runs left behind, which every publishing command republishes even when it has nothing of its own to add.
+One machine scope under one name: `scope` used to repeat `machine_scope` here and was deleted. `unpushed_scopes` lists scopes committed on this machine but not on the remote — the remote refused them, publishing was withheld while a cascade is paused, or the remote was out of reach. Empty means the remote has every scope commit this machine holds, including anything earlier runs left behind, which every publishing command republishes even when it has nothing of its own to add. `overwritten_files` lists home files whose contents this run discarded in favour of the repo — everything `--force` overwrote, and everything `init` and `abort` overwrote without being asked. It is the opposite direction from `commit`'s `forced_overwrites`, which is what a commit recorded *over* another machine's change, and both exist because a run that destroys something has to say so in the payload as well as in the notes.
 
 ### `abort`
 
 ```json
-{"status":"ok","command":"abort","machine_scope":"box2","paused_scope":"linux","synced_files":[".config/app.conf"],"overwritten_files":[".config/app.conf"]}
+{"command":"abort","machine_scope":"b","overwritten_files":[".config/app.conf"],"paused_scope":"linux","status":"ok","synced_files":[".apprc",".config/app.conf",".config/dotsync/config.toml"]}
 ```
 
 `abort` publishes nothing, so it has no `unpushed_scopes`. `paused_scope` is where the cascade had stopped — not the scope the discarded commit was on, and not something that was itself aborted.
@@ -212,11 +220,11 @@ One machine scope under one name: `scope` used to repeat `machine_scope` here an
 ### `commit`
 
 ```json
-{"status":"ok","command":"commit","outcome":"committed","scope":"all","machine_scope":"box1","skipped_paths":[],"unpushed_scopes":[],"synced_files":[".apprc"],"newly_tracked":[".apprc"],"forced_overwrites":[]}
+{"command":"commit","forced_overwrites":[],"machine_scope":"a","newly_tracked":[".apprc"],"outcome":"committed","scope":"all","skipped_paths":[],"status":"ok","synced_files":[".apprc",".config/dotsync/config.toml"],"unpushed_scopes":[]}
 ```
 
 ```json
-{"status":"ok","command":"commit","outcome":"nothing_to_commit","scope":"all","machine_scope":"box1","skipped_paths":[],"unpushed_scopes":[]}
+{"command":"commit","machine_scope":"a","outcome":"nothing_to_commit","scope":"all","skipped_paths":[],"status":"ok","unpushed_scopes":[]}
 ```
 
 `outcome` distinguishes the two, and they are genuinely different events: a commit with nothing to record writes no history, runs no cascade and runs no home sync, so `synced_files`, `newly_tracked` and `forced_overwrites` are absent rather than empty. `skipped_paths` holds what a named directory matched and the commit left alone, each as `{path, state, reason}` — `state` is a file state such as `stale_not_yours`, or `symlink` / `not_a_regular_file` for a path dotsync cannot record whatever its content says.
@@ -224,14 +232,22 @@ One machine scope under one name: `scope` used to repeat `machine_scope` here an
 ### `status` and `diff`
 
 ```json
-{"status":"ok","command":"status","machine_scope":"box1","changes":[{"path":".apprc","state":"modified","reason":"edited here since the last sync"}],"incoming":[]}
+{"changes":[{"path":".apprc","reason":"edited here since the last sync","state":"modified"}],"command":"status","incoming":[],"machine_scope":"a","status":"ok"}
 ```
 
 ```json
-{"status":"ok","command":"diff","machine_scope":"box1","changes":[{"path":".apprc","state":"modified","reason":"edited here since the last sync","diff":"--- repo\n+++ system\n@@ -1 +1 @@\n-hello\n+changed"}]}
+{"changes":[{"diff":"--- repo\n+++ system\n@@ -1 +1 @@\n-ui = dark\n+ui = light","path":".apprc","reason":"edited here since the last sync","state":"modified"}],"command":"diff","machine_scope":"a","status":"ok"}
 ```
 
 The same population, the same objects, the same names: `diff` is `status`'s `changes` with the diff attached. `status` adds `incoming`, the files another machine changed that home has not caught up to. Neither carries a count — the arrays have lengths.
+
+Both also carry `paused_cascade` when a cascade is paused, naming the scope it stopped at:
+
+```json
+{"changes":[{"path":".config/app.conf","reason":"edited here since the last sync","state":"modified"}],"command":"status","incoming":[],"machine_scope":"b","paused_cascade":"linux","status":"ok"}
+```
+
+Present only when there is one, like `remote_unreachable`. That machine can commit nothing and is publishing nothing, and the read-only commands are where an agent goes to find out why.
 
 ### `view`
 
@@ -240,24 +256,30 @@ Four shapes under one command name, one per question asked: `{scope, files}`, `{
 ### Errors (exit code 1, or 3 for a paused cascade)
 
 ```json
-{"status":"error","error":"unusable_commit_paths","message":"cannot commit 2 of the paths you named","current_state":["`/etc/passwd` is an absolute path, and dotsync resolves every commit path against your home directory.","`typo.conf` matched nothing: no file exists at or under /home/you/typo.conf, and scope `all` tracks no file at or under `typo.conf`."],"drifts":[],"forced_overwrites":[]}
+{"current_state":["`/etc/passwd` is an absolute path, and dotsync resolves every commit path against your home directory.","`typo.conf` matched nothing: no file exists at or under /home/you/typo.conf, and scope `all` tracks no file at or under `typo.conf`."],"drifts":[],"error":"unusable_commit_paths","forced_overwrites":[],"message":"cannot commit 2 of the paths you named","status":"error"}
 ```
 
 `current_state` is a list of facts, one per thing the run found, so a caller never has to split a rendering apart on newlines; the human rendering joins them. `drifts` carries the same change objects `status` and `diff` report, with the diff, and is populated for `drift_detected`. `forced_overwrites` is what the run had already recorded over an incoming change before it stopped. All three are always present, so error handling has one shape.
 
-Error codes in use: `not_initialized`, `repo_exists`, `invalid_scope`, `file_not_on_scope`, `scope_not_in_repo`, `scope_diverged`, `no_current_scope`, `missing_parent`, `scope_cycle`, `config_parse`, `config_edit`, `sync_state`, `drift_detected`, `unusable_commit_paths`, `stale_commit_paths`, `cascade_paused`, `paused_cascade_in_progress`, `unresolved_conflict`, `pause_predates_resolution_check`, `no_paused_cascade`, `missing_hostname`, `remote_unreachable`, `home_not_set`, `non_utf8_path`, `git_submodule`, `io`, `internal`. Plus `usage` on exit 2.
+Error codes in use: `not_initialized`, `repo_exists`, `invalid_scope`, `file_not_on_scope`, `scope_not_in_repo`, `scope_diverged`, `no_current_scope`, `missing_parent`, `scope_cycle`, `config_parse`, `config_edit`, `sync_state`, `drift_detected`, `unusable_commit_paths`, `stale_commit_paths`, `not_a_regular_file`, `cascade_paused`, `paused_cascade_in_progress`, `unresolved_conflict`, `pause_predates_resolution_check`, `no_paused_cascade`, `missing_hostname`, `remote_unreachable`, `home_not_set`, `non_utf8_path`, `git_submodule`, `io`, `internal`. Plus `usage` on exit 2.
 
 ### Usage errors (exit code 2)
 
 ```json
-{"status":"error","error":"usage","message":"unknown command `bogus`; run `dotsync --help` for supported commands"}
+{"current_state":[],"drifts":[],"error":"usage","forced_overwrites":[],"message":"unknown command `bogus`; run `dotsync --help` for supported commands","status":"error"}
 ```
 
-Emitted for clap's own parse failures too, which is why `--output` is read straight from argv before clap runs.
+Emitted for clap's own parse failures too, which is why `--output` is read straight from argv both before clap runs and when clap's unknown-command arm has swallowed it.
 
 ### The conflict pause payload
 
-Today a pause is an ordinary error payload with `error: "cascade_paused"` and the conflicted files in the message. The richer contract this section used to document — `scopes_done`, `scopes_pending`, `original_scope` — **does not exist and is not being built here**: item 3 (conflicts as commits) derives the pause from conflicted heads, at which point `scopes_pending` stops being a coherent idea because the cascade always completes. Item 3 builds that contract.
+Today a pause is an ordinary error payload with `error: "cascade_paused"` and the conflicted files in the message:
+
+```json
+{"current_state":["paused scope: linux"],"drifts":[],"error":"cascade_paused","forced_overwrites":[],"message":"cascade paused at scope `linux` with conflicts in .config/app.conf","status":"error"}
+```
+
+The richer contract this section used to document — `scopes_done`, `scopes_pending`, `original_scope` — **does not exist and is not being built here**: item 3 (conflicts as commits) derives the pause from conflicted heads, at which point `scopes_pending` stops being a coherent idea because the cascade always completes. Item 3 builds that contract.
 
 ## Architecture notes
 

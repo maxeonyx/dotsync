@@ -22,7 +22,7 @@ Always choose the **highest (most general) scope** that makes sense. If a change
 
 ## When a cascade pauses
 
-A commit merges the change through every descendant scope. Where two scopes changed the same file differently, the run stops with **exit code 3** and names the conflicted files. That is not a failure to retry: it is a question. Edit the named files in `~/` to the merged contents you want — the file has to change, because dotsync reads the resolution back out of it — then run `dotsync continue`. Run `dotsync abort` instead to discard the whole cascade, including the home edit that started it. Until you do one of those, `dotsync commit` refuses to start another cascade — also with exit 3 — and nothing this machine has committed is published.
+A commit merges the change through every descendant scope. Where two scopes changed the same file differently, the run stops with **exit code 3** and names the conflicted files. That is not a failure to retry: it is a question. Edit the named files in `~/` to the merged contents you want — the file has to change, because dotsync reads the resolution back out of it — then run `dotsync continue`. Run `dotsync abort` instead to discard the whole cascade, including the home edit that started it. Until you do one of those, `dotsync commit` refuses to start another cascade — also with exit 3 — and nothing this machine has committed is published. `dotsync status` and `dotsync diff` say so whenever a cascade is paused, so that is where to look if you have lost the original message.
 
 ## Exit codes
 
