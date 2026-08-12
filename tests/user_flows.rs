@@ -5215,3 +5215,69 @@ fn a_commit_says_which_files_it_started_tracking() {
         render_output(&edit_output)
     );
 }
+
+/// `dotsync commit all -m msg -- .` reads like "commit everything", and what
+/// it actually does is walk the whole home directory and publish it: ssh keys,
+/// `.netrc`, browser profiles, anything. Nothing about the run says so, and
+/// once it is on the remote it is on every machine that shares the scope.
+#[test]
+fn a_selection_that_names_the_whole_home_directory_is_refused() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_file(".ssh/id_ed25519", "PRIVATE KEY\n");
+    machine.write_file(".netrc", "machine example.com login me password hunter2\n");
+    machine.write_file(".bashrc", "export DOTSYNC=1\n");
+
+    for selection in [".", "./"] {
+        let output = machine.run(&format!(
+            "dotsync commit all -m 'everything' -- {selection}"
+        ));
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "`{selection}` names the whole home directory and must be refused\n{}",
+            render_output(&output)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            stderr.contains("home directory"),
+            "the refusal must say what was named\n{stderr}"
+        );
+    }
+
+    let absolute = machine.run(&format!(
+        "dotsync commit all -m 'everything' -- {}",
+        machine.home_dir.display()
+    ));
+    assert_eq!(
+        absolute.status.code(),
+        Some(1),
+        "naming home by its absolute path must be refused too\n{}",
+        render_output(&absolute)
+    );
+
+    assert!(
+        !bookmark_has_file(&machine, "all", ".ssh/id_ed25519"),
+        "no refused sweep may have recorded a private key"
+    );
+    assert!(!bookmark_has_file(&machine, "all", ".netrc"));
+
+    // Naming a real directory still works, and still only reaches under it.
+    machine.write_file(".config/app/settings.toml", "theme = \"dark\"\n");
+    let scoped = machine.run("dotsync commit all -m 'app settings' -- .config/app/");
+    assert!(scoped.status.success(), "{}", render_output(&scoped));
+    assert!(bookmark_has_file(
+        &machine,
+        "all",
+        ".config/app/settings.toml"
+    ));
+    assert!(!bookmark_has_file(&machine, "all", ".netrc"));
+}
