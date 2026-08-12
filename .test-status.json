@@ -67,8 +67,5 @@
     "dotsync::user_flows$view_summarizes_checked_in_scopes_and_files": "passing",
     "dotsync::user_flows$view_works_while_local_scopes_are_ahead_of_remote": "passing",
     "dotsync::version_json$version_json_flag_prints_machine_readable_version": "passing"
-  },
-  "renames": {
-    "dotsync::user_flows$selected_add_modify_and_delete_are_applied_without_touching_unselected_changes": "dotsync::user_flows$retired_pending_selected_add_modify_and_delete_are_applied_without_touching_unselected_changes"
   }
 }
