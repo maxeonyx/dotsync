@@ -23,7 +23,7 @@ pub use crate::error::{
     CommitPathProblem, DotsyncError, ErrorReport, RefusedCommitPath, RejectedCommitPath,
     SkipReason, SkippedCommitPath,
 };
-pub use crate::inspect::{diff_home, view, DiffReport, ScopeInfo, ViewReport};
+pub use crate::inspect::{diff_home, view, DiffReport, ScopeInfo, ViewAnswer, ViewReport};
 pub use crate::repo::PushReport;
 pub use crate::session::{Run, UnreachableRemote};
 pub use crate::status::{status, FileChange, StatusReport};

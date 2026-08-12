@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
     abort_paused_cascade, commit_and_sync, continue_after_conflict, diff_home, init, status, sync,
     view, CommitFailure, CommitOptions, DiffReport, DotsyncError, DotsyncPaths, ForceScope, Run,
-    UnreachableRemote, ViewReport,
+    UnreachableRemote, ViewAnswer,
 };
 mod render;
 use serde_json::json;
@@ -248,14 +248,21 @@ struct UsageError {
 struct CliOutput {
     kind: OutputKind,
     unreachable_remote: Option<UnreachableRemote>,
-    /// What the user ran, when they ran something dotsync recognises.
+    /// How the user invoked dotsync, when they invoked something it
+    /// recognises: the words to type to run this command again.
     ///
     /// Carried so that a stop can finish its advice with the command to rerun.
     /// The errors that need it are raised far from any knowledge of it — "your
     /// machine is not initialized" comes out of opening the repo — and the
     /// alternative was what dotsync used to do: tell everybody to rerun
     /// `dotsync status`, including the agent who ran `dotsync commit`.
-    command: Option<&'static str>,
+    ///
+    /// An invocation, deliberately, and not the name the JSON payload uses for
+    /// the same command. For plain sync those differ — the payload says
+    /// `"sync"` and the invocation is bare `dotsync`, because `dotsync sync`
+    /// is not a subcommand — and advice that names something dotsync does not
+    /// recognise is the defect this field exists to prevent.
+    invocation: Option<&'static str>,
 }
 
 #[derive(Debug)]
@@ -272,7 +279,7 @@ impl CliOutput {
         Self {
             kind,
             unreachable_remote: None,
-            command: None,
+            invocation: None,
         }
     }
 }
@@ -280,7 +287,7 @@ impl CliOutput {
 /// Turns a finished run into output, carrying what the run could not do onto
 /// whichever arm it ended in. The one place that decision is made.
 fn output_of<T, E: Into<ErrorOutput>>(
-    command: &'static str,
+    invocation: &'static str,
     run: Run<Result<T, E>>,
     render: impl FnOnce(T) -> SuccessOutput,
 ) -> CliOutput {
@@ -294,7 +301,7 @@ fn output_of<T, E: Into<ErrorOutput>>(
             Err(error) => OutputKind::Error(error.into()),
         },
         unreachable_remote,
-        command: Some(command),
+        invocation: Some(invocation),
     }
 }
 
@@ -564,7 +571,7 @@ async fn run_init(remote_url: InitRemote) -> Result<CliOutput, DotsyncError> {
     };
     let paths = discover_paths()?;
     let run = init(&paths, &remote_url).await;
-    Ok(output_of("init", run, |report| {
+    Ok(output_of("dotsync init", run, |report| {
         render::synced_output(
             "init",
             format!(
@@ -598,7 +605,7 @@ fn prompt_init_remote_url() -> Result<String, UsageError> {
 async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     let run = continue_after_conflict(&paths, blanket_force(force)).await;
-    Ok(output_of("continue", run, |report| {
+    Ok(output_of("dotsync continue", run, |report| {
         render::synced_output(
             "continue",
             format!(
@@ -614,7 +621,7 @@ async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
 async fn run_abort() -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     let run = abort_paused_cascade(&paths).await;
-    Ok(output_of("abort", run, |report| {
+    Ok(output_of("dotsync abort", run, |report| {
         // `abort` publishes nothing, so it has no push to report — and the one
         // thing it knows that the other syncing commands do not is where the
         // cascade it discarded had stopped.
@@ -636,7 +643,7 @@ async fn run_abort() -> Result<CliOutput, DotsyncError> {
 async fn run_sync(force: bool) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     let run = sync(&paths, blanket_force(force)).await;
-    Ok(output_of("sync", run, |report| {
+    Ok(output_of("dotsync", run, |report| {
         render::synced_output(
             "sync",
             format!(
@@ -653,7 +660,7 @@ async fn run_sync(force: bool) -> Result<CliOutput, DotsyncError> {
 async fn run_status() -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     let run = status(&paths).await;
-    Ok(output_of("status", run, |report| {
+    Ok(output_of("dotsync status", run, |report| {
         SuccessOutput::message(
             with_paused_cascade(
                 json!({
@@ -674,7 +681,7 @@ async fn run_status() -> Result<CliOutput, DotsyncError> {
 async fn run_diff() -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     let run = diff_home(&paths).await;
-    Ok(output_of("diff", run, |report| SuccessOutput {
+    Ok(output_of("dotsync diff", run, |report| SuccessOutput {
         // Drift is what `diff` exists to report, so it is not an error — but
         // scripts and agents need to tell clean from dirty without parsing.
         exit_code: if report.drifts.is_empty() { 0 } else { 1 },
@@ -703,51 +710,62 @@ async fn run_diff() -> Result<CliOutput, DotsyncError> {
 async fn run_view(scope: Option<String>, file: Option<PathBuf>) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     let run = view(&paths, scope.as_deref(), file.as_deref()).await;
-    Ok(output_of("view", run, |report| match report {
-        ViewReport::FileContents {
-            scope,
-            file,
-            contents,
-        } => SuccessOutput::stdout(
-            json!({
-                "status": "ok",
-                "command": "view",
-                "scope": scope,
-                "path": render::display_path(&file),
-                "contents": String::from_utf8_lossy(&contents),
-            }),
-            String::from_utf8_lossy(&contents).into_owned(),
-        ),
-        ViewReport::Scope { scope, files } => SuccessOutput::stdout(
-            json!({
-                "status": "ok",
-                "command": "view",
-                "scope": scope,
-                "files": files.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
-            }),
-            render_view_scope_stdout(&scope, &files),
-        ),
-        ViewReport::FileScopes { file, scopes } => SuccessOutput::stdout(
-            json!({
-                "status": "ok",
-                "command": "view",
-                "file": render::display_path(&file),
-                "scopes": scopes,
-            }),
-            render_view_file_scopes_stdout(&file, &scopes),
-        ),
-        ViewReport::Overview { scopes, files } => SuccessOutput::stdout(
-            json!({
-                "status": "ok",
-                "command": "view",
-                "scopes": scopes.iter().map(|scope| json!({
-                    "name": scope.name,
-                    "parents": scope.parents,
-                })).collect::<Vec<_>>(),
-                "files": files.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
-            }),
-            render_view_overview_stdout(&scopes, &files),
-        ),
+    Ok(output_of("dotsync view", run, |report| {
+        // The pause is true of the machine, not of the question asked, so it
+        // is added once here rather than in each of the four shapes.
+        let paused_cascade = report.paused_cascade;
+        let answer = match report.found {
+            ViewAnswer::FileContents {
+                scope,
+                file,
+                contents,
+            } => SuccessOutput::stdout(
+                json!({
+                    "status": "ok",
+                    "command": "view",
+                    "scope": scope,
+                    "path": render::display_path(&file),
+                    "contents": String::from_utf8_lossy(&contents),
+                }),
+                String::from_utf8_lossy(&contents).into_owned(),
+            ),
+            ViewAnswer::Scope { scope, files } => SuccessOutput::stdout(
+                json!({
+                    "status": "ok",
+                    "command": "view",
+                    "scope": scope,
+                    "files": files.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
+                }),
+                render_view_scope_stdout(&scope, &files),
+            ),
+            ViewAnswer::FileScopes { file, scopes } => SuccessOutput::stdout(
+                json!({
+                    "status": "ok",
+                    "command": "view",
+                    "file": render::display_path(&file),
+                    "scopes": scopes,
+                }),
+                render_view_file_scopes_stdout(&file, &scopes),
+            ),
+            ViewAnswer::Overview { scopes, files } => SuccessOutput::stdout(
+                json!({
+                    "status": "ok",
+                    "command": "view",
+                    "scopes": scopes.iter().map(|scope| json!({
+                        "name": scope.name,
+                        "parents": scope.parents,
+                    })).collect::<Vec<_>>(),
+                    "files": files.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
+                }),
+                render_view_overview_stdout(&scopes, &files),
+            ),
+        };
+
+        SuccessOutput {
+            json: with_paused_cascade(answer.json, paused_cascade.as_ref()),
+            ..answer
+        }
+        .with_notes(render::paused_cascade_notes(paused_cascade.as_ref()))
     }))
 }
 
@@ -768,7 +786,7 @@ async fn run_commit(
         },
     )
     .await;
-    Ok(output_of("commit", run, render_commit_success))
+    Ok(output_of("dotsync commit", run, render_commit_success))
 }
 
 /// A commit has two outcomes and says which one it had, because they are not
@@ -966,7 +984,7 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
     let CliOutput {
         kind,
         unreachable_remote,
-        command,
+        invocation,
     } = output;
     // Before anything else the run has to say: it is the frame for all of it.
     for note in render::unreachable_remote_notes(unreachable_remote.as_ref()) {
@@ -999,7 +1017,7 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
             for note in render::forced_overwrite_notes(&forced_overwrites) {
                 eprintln!("{note}");
             }
-            eprintln!("{}", render::render_error_human(&error, command));
+            eprintln!("{}", render::render_error_human(&error, invocation));
             let mut error_report = error.to_error_report();
             error_report.forced_overwrites = forced_overwrites;
             // After the teaching message and set apart from it: these are the

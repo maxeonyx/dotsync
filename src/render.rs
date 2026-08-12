@@ -215,10 +215,12 @@ fn current_state_text(report: &ErrorReport) -> String {
     }
 }
 
-/// `command` is the command the user ran, when they ran one dotsync
-/// recognises. A stop that ends by naming the command to rerun has to name
-/// theirs; before this, every one of them named `dotsync status`.
-pub(crate) fn render_error_human(error: &DotsyncError, command: Option<&str>) -> String {
+/// `invocation` is what the user typed, when they typed something dotsync
+/// recognises — the words, not the name the payload uses for the command. A
+/// stop that ends by naming the command to rerun has to name theirs, and has
+/// to name one that runs: before this, every one of them said `dotsync
+/// status`, and the first fix said `dotsync sync`, which is not a command.
+pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>) -> String {
     let error_report = error.to_error_report();
 
     match error {
@@ -457,7 +459,7 @@ pub(crate) fn render_error_human(error: &DotsyncError, command: Option<&str>) ->
             original,
         } => format!(
             "{}\n\nAlso:\nDotsync could not remove the partly created repo at {}: {source}. Delete that directory before running `dotsync init` again.",
-            render_error_human(original, command),
+            render_error_human(original, invocation),
             path.display()
         ),
         DotsyncError::NotInitialized { .. } => render_structured_error(
@@ -469,7 +471,7 @@ pub(crate) fn render_error_human(error: &DotsyncError, command: Option<&str>) ->
             "There is nothing to compare your home directory against, so dotsync cannot answer for it.",
             &[
                 "run `dotsync init <remote-url>` from this home directory. The remote URL is the git remote that stores your dotsync repo.",
-                &format!("then rerun `dotsync {}`.", command.unwrap_or("status")),
+                &format!("then rerun `{}`.", invocation.unwrap_or("dotsync")),
             ],
         ),
         // Naming the repo path in the summary would be pointing an agent at
