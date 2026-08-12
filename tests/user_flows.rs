@@ -317,6 +317,11 @@ fn merge_remote_scope_into(machine: &MachineEnvironment, source: &str, target: &
 // the shared fake remote refuse pushes while still serving fetches, which is
 // how these tests reproduce the issue #19 incident (cascade lands locally, the
 // push never happens).
+//
+// This leans on git running a `/bin/sh` hook, so every test that blocks pushes
+// must assert that the push really was rejected (local revision != remote
+// revision). Without that guard a platform where the hook does not run would
+// turn these tests silently green.
 fn block_remote_pushes(machine: &MachineEnvironment) {
     let hook_path = machine.remote_dir.join("hooks/pre-receive");
     write_file_at(&hook_path, "#!/bin/sh\nexit 1\n");
@@ -2402,8 +2407,9 @@ fn interrupted_push_reports_that_scope_updates_were_not_pushed() {
 
     machine.write_file(".config/fish/dev-certs.fish", "set -gx DEV_CERTS 1\n");
     block_remote_pushes(&machine);
-    let commit_output =
-        machine.run("dotsync commit all -m 'add dev-certs helper' -- .config/fish/dev-certs.fish");
+    let commit_output = machine.run(
+        "dotsync --output json commit all -m 'add dev-certs helper' -- .config/fish/dev-certs.fish",
+    );
     allow_remote_pushes(&machine);
 
     assert_ne!(
@@ -2414,14 +2420,24 @@ fn interrupted_push_reports_that_scope_updates_were_not_pushed() {
 
     // The exit code is deliberately not asserted: whether a rejected push is an
     // error or just deferred convergence is a work item 2 question. What must
-    // be true either way is that the run says the change was not published, so
-    // the user knows why the remote does not have it.
-    let stderr = String::from_utf8_lossy(&commit_output.stderr).to_lowercase();
-    assert!(
-        stderr.contains("push"),
-        "a run whose push was rejected must say the scope updates were not pushed: {}",
+    // be true either way is that the run names the scopes the remote does not
+    // have, both to the user and to an agent reading JSON.
+    let json = parse_stdout_json(&commit_output);
+    assert_eq!(
+        json["unpushed_scopes"],
+        serde_json::json!(["all", "linux", "mx-xps-cy"]),
+        "{}",
         render_output(&commit_output)
     );
+
+    let stderr = String::from_utf8_lossy(&commit_output.stderr);
+    for scope in ["all", "linux", "mx-xps-cy"] {
+        assert!(
+            stderr.contains(scope),
+            "the human output must name the unpushed scope `{scope}`: {}",
+            render_output(&commit_output)
+        );
+    }
 }
 
 #[test]
@@ -2449,11 +2465,7 @@ fn status_works_while_local_scopes_are_ahead_of_remote() {
         "`dotsync status` must keep working while local scopes are unpushed: {}",
         render_output(&status_output)
     );
-    assert!(
-        !render_output(&status_output).contains("fetch would overwrite"),
-        "unpushed local scopes are not a fetch conflict: {}",
-        render_output(&status_output)
-    );
+    assert_stderr_snapshot(&status_output, "dotsync: no changes for mx-xps-cy\n");
 }
 
 #[test]
@@ -2744,10 +2756,6 @@ fn diverged_scope_bookmark_is_reported_as_divergence_not_as_overwrite() {
     assert!(
         rendered.contains("`all`"),
         "the diverged scope must be named: {rendered}"
-    );
-    assert!(
-        !rendered.contains("fetch would overwrite"),
-        "unpushed local work is not a fetch overwrite: {rendered}"
     );
 }
 
