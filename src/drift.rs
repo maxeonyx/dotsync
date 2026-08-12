@@ -139,6 +139,7 @@ impl FileState {
             self,
             Self::StaleNotYours
                 | Self::IncomingNew
+                | Self::RemovedFromRepo
                 | Self::IncomingNewCollidesWithUntrackedHome
                 | Self::NoSyncRecord
         )

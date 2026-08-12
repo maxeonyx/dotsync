@@ -40,7 +40,10 @@ impl RefusedCommitPath {
                 "`{path}` has not been edited here: home holds exactly what dotsync last synced, and the repo has changed it since. That change came from another machine, and committing home's copy would revert it."
             ),
             FileState::IncomingNew => format!(
-                "`{path}` is not in home: the repo has just added it and this machine has not synced it yet. Committing it would delete it from the scope."
+                "`{path}` is not in home: the repo has just added it on another machine and this machine has not synced it yet, so there is nothing here to record."
+            ),
+            FileState::RemovedFromRepo => format!(
+                "`{path}` was deleted on another machine, and home still holds the copy dotsync last synced. Committing it would put the file back."
             ),
             FileState::IncomingNewCollidesWithUntrackedHome => format!(
                 "`{path}` has never been synced here, and the repo has just added a different file at the same path. Committing home's copy would discard the one that arrived."

@@ -226,8 +226,8 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 .unwrap_or(&error_report.message),
             "Recording these would put older bytes back on the scope and cascade them, silently reverting whoever published the change that is already there.",
             &[
-                "run `dotsync` to bring this machine up to date; the incoming change is written into home.",
-                "then edit the file in home if you still want a change of your own, and commit it.",
+                "run `dotsync` to bring this machine up to date; the incoming change is written into home, and an incoming deletion removes the file.",
+                "then edit the file in home if you still want a change of your own, and commit it. To bring back a file another machine deleted, recreate it in home after syncing and commit that.",
                 &format!(
                     "if you really do mean to overwrite the incoming change with what is in home, rerun with `--force`: `dotsync commit {scope} -m \"message\" --force -- <paths...>`. On `commit`, `--force` applies only to the paths you name."
                 ),
