@@ -118,6 +118,23 @@ pub(crate) fn render_error_human(error: &DotsyncError) -> String {
                 "after `dotsync continue` succeeds, rerun the new commit if it is still needed.",
             ],
         ),
+        DotsyncError::SyncStateCommitPath { .. } | DotsyncError::RepoCommitPath { .. } => {
+            render_structured_error(
+                "that path is dotsync's own state, not your config",
+                "Dotsync keeps its own state in your home directory: a hidden repo holding every scope, and a machine-local sync-state file recording which machine scope this home last synced and at which revision.",
+                "This commit flow records the home files you name onto a scope branch, and every file on a scope branch is synced into home on every machine that shares that scope.",
+                "It expects the paths you name to be config files you edit, not the state dotsync maintains to do its own job.",
+                error_report
+                    .current_state
+                    .as_deref()
+                    .unwrap_or(&error_report.message),
+                "Recording dotsync's own state on a scope would sync it onto every machine sharing that scope, overwriting the state each of those machines needs in order to be itself.",
+                &[
+                    "commit the config files you edited instead; run `dotsync status` to see which managed files changed.",
+                    "to change which scopes exist, edit `.config/dotsync/config.toml` in home and commit that path to `all`.",
+                ],
+            )
+        }
         DotsyncError::UnmatchedCommitPath { .. } | DotsyncError::AbsoluteCommitPath { .. } => {
             render_structured_error(
                 "cannot commit that path",

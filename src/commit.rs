@@ -514,13 +514,19 @@ fn expand_selection_paths(
                 path: selection_path.clone(),
             });
         }
+        // Dotsync's own state lives in home too. Skipping these silently made
+        // naming one look like a successful commit that recorded nothing.
         if internal_paths.contains(selection_path) {
-            continue;
+            return Err(DotsyncError::SyncStateCommitPath {
+                path: selection_path.clone(),
+            });
         }
-        // Reject paths that are inside or equal to the repo directory
         if let Some(ref repo_rel) = repo_relative {
             if selection_path.starts_with(repo_rel) {
-                continue;
+                return Err(DotsyncError::RepoCommitPath {
+                    path: selection_path.clone(),
+                    repo_root: paths.repo_root.clone(),
+                });
             }
         }
 

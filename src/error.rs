@@ -32,6 +32,10 @@ pub enum DotsyncError {
     },
     #[error("commit path `{path}` is absolute")]
     AbsoluteCommitPath { path: PathBuf },
+    #[error("commit path `{path}` is this machine's dotsync sync state")]
+    SyncStateCommitPath { path: PathBuf },
+    #[error("commit path `{path}` is inside dotsync's hidden repo")]
+    RepoCommitPath { path: PathBuf, repo_root: PathBuf },
     #[error("{} conflicted file(s) are unchanged since the cascade paused at scope `{scope}`", paths.len())]
     UnresolvedConflict { scope: String, paths: Vec<PathBuf> },
     #[error("failed to read {path}: {source}")]
@@ -142,6 +146,10 @@ impl DotsyncError {
             DotsyncError::UnresolvedConflict { .. } => {
                 basic_error_report("unresolved_conflict", self)
             }
+            DotsyncError::SyncStateCommitPath { .. } => {
+                basic_error_report("sync_state_commit_path", self)
+            }
+            DotsyncError::RepoCommitPath { .. } => basic_error_report("repo_commit_path", self),
         }
     }
 }
@@ -186,6 +194,15 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Option<String> {
                 .map(|path| path.display().to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
+        )),
+        DotsyncError::SyncStateCommitPath { path } => Some(format!(
+            "`{}` is this machine's dotsync sync state; it records which machine scope this home uses, so it has to stay machine-local.",
+            path.display()
+        )),
+        DotsyncError::RepoCommitPath { path, repo_root } => Some(format!(
+            "`{}` is inside dotsync's hidden repo at {}, which is where dotsync stores the scopes themselves.",
+            path.display(),
+            repo_root.display()
         )),
         DotsyncError::AbsoluteCommitPath { path } => Some(format!(
             "`{}` is an absolute path, and dotsync resolves every commit path against your home directory.",
