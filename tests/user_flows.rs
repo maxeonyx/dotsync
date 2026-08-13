@@ -7238,6 +7238,372 @@ fn view_file_says_which_scope_owns_the_file() {
     );
 }
 
+// Read-only robustness (PLAN item 4), plus the one `--force` case that
+// belongs with the conflict work (PLAN item 3). The principle underneath all
+// four: a read-only command describes unusual state, it never declines to
+// describe anything because of it, and it never mutates. An agent that has
+// walked into a weird state must always have a command left that tells it what
+// is going on — and today the diagnostics disappear at exactly the moment they
+// are most needed.
+
+/// A diverged scope — this machine and the remote each holding commits the
+/// other does not — takes every read-only command away today: `status`, `diff`
+/// and `view` all exit 1 with `scope_diverged` and answer nothing. That is a
+/// dead end, and Max's decision that `dotsync status` "should be concise
+/// (doesn't print a diff) always exits 0" (2026-08-13) leaves no exit code for
+/// `status` to stop with even if it wanted to.
+///
+/// So the answer is item 4's in-memory convergence reporting: work out what
+/// convergence would do, say the scope diverged, and still answer the question
+/// that was asked.
+///
+/// The divergence here is deliberately non-conflicting — the two sides added
+/// different files to `all` — so nothing in this test depends on how a
+/// *conflicting* merge should be reported, which is item 2's and item 3's
+/// question.
+///
+/// `diff` keeps its own contract: it exits 1 when it finds drift and 0 when it
+/// does not, and divergence is not drift — it is a fact about the repo and the
+/// remote, not about home. That is the same answer `diff` already gives a
+/// machine that is merely behind. Both halves are pinned below.
+///
+/// The JSON *key* that carries the divergence is deliberately not pinned: no
+/// name for it has been decided, and inventing one here would make the
+/// decision rather than record it. What is pinned is that the payload carries
+/// the fact and the scope somewhere, and that the envelope says `ok` — because
+/// `status` is `"error"` only when the run stopped, and this run did not.
+#[test]
+fn read_only_commands_describe_a_diverged_scope_instead_of_refusing_to_run() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    // This machine holds unpushed commits on every scope, and then another
+    // machine publishes a different file to `all`: `all` genuinely diverges
+    // while `linux` and `mx-xps-cy` are merely local-ahead.
+    interrupt_push_after_cascade(
+        &machine,
+        ".config/fish/dev-certs.fish",
+        "set -gx DEV_CERTS 1\n",
+    );
+    seed_remote_scope_file(
+        &machine,
+        "all",
+        ".config/other-machine.conf",
+        "from another machine\n",
+    );
+
+    let status = machine.run("dotsync status --output json");
+    assert_eq!(
+        status.status.code(),
+        Some(0),
+        "`dotsync status` always exits 0: a diverged scope is something it found in the world, not a reason to stop\n{}",
+        render_output(&status)
+    );
+    let payload = parse_stdout_json(&status);
+    assert_eq!(payload["status"], "ok", "{}", render_output(&status));
+    assert!(
+        payload["changes"].is_array() && payload["incoming"].is_array(),
+        "the question that was asked still has to be answered\n{}",
+        render_output(&status)
+    );
+    assert!(
+        payload_says(&payload, "diverg"),
+        "and the payload has to carry what the run found\n{}",
+        render_output(&status)
+    );
+    assert!(
+        payload_says(&payload, "all"),
+        "naming the scope it found it on\n{}",
+        render_output(&status)
+    );
+
+    // Asked again in the shape a person runs it, because the two channels are
+    // populated separately and it is the human one Max reads.
+    let human = machine.run("dotsync status");
+    assert_eq!(human.status.code(), Some(0), "{}", render_output(&human));
+    assert_reports_divergence(&human, "all");
+
+    let view = machine.run("dotsync view");
+    assert_eq!(
+        view.status.code(),
+        Some(0),
+        "`dotsync view` has no clean/dirty contract to spend an exit code on, so it either answers or it is a dead end\n{}",
+        render_output(&view)
+    );
+    let listed = String::from_utf8_lossy(&view.stdout).into_owned();
+    assert!(
+        listed.contains(".config/fish/dev-certs.fish"),
+        "and it still has to list what the scopes hold\n{listed}"
+    );
+    assert_reports_divergence(&view, "all");
+
+    // Home holds exactly what the machine scope holds, so there is no drift
+    // for `diff` to find. Divergence is not drift.
+    let clean = machine.run("dotsync diff");
+    assert_eq!(
+        clean.status.code(),
+        Some(0),
+        "`diff` exits 1 for drift, and a diverged scope is not drift — it is the same answer `diff` gives a machine that is merely behind\n{}",
+        render_output(&clean)
+    );
+    assert_reports_divergence(&clean, "all");
+
+    // ...and a diverged scope does not take away the answer `diff` exists to
+    // give, either.
+    machine.write_file(".config/fish/dev-certs.fish", "set -gx DEV_CERTS 2\n");
+    let drifted = machine.run("dotsync diff");
+    assert_eq!(
+        drifted.status.code(),
+        Some(1),
+        "`diff` still exits 1 on real drift\n{}",
+        render_output(&drifted)
+    );
+    assert!(
+        String::from_utf8_lossy(&drifted.stderr).contains("+set -gx DEV_CERTS 2"),
+        "and it still shows the drift it found\n{}",
+        render_output(&drifted)
+    );
+    assert_reports_divergence(&drifted, "all");
+}
+
+/// DESIGN: "Read-only commands never mutate. `status`, `diff`, and `view`
+/// don't move bookmarks, create commits, or touch home. They fetch (when
+/// online) and *report* what convergence would do."
+///
+/// Today the fetch commits a transaction that fast-forwards every local scope
+/// bookmark the remote has moved on, so `status` changes the repo — the
+/// command an agent runs to *look* at the machine is one of the commands that
+/// changes it. Wave 2 left exactly one site doing this, which is why the
+/// before/after of the bookmarks is enough to see it.
+///
+/// The revisions are read once, before anything runs, and re-read after each
+/// command: the first command to move a bookmark would otherwise hide the
+/// second.
+#[test]
+fn read_only_commands_leave_the_scope_bookmarks_where_they_found_them() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    // Another machine publishes down the whole graph, so every scope this
+    // machine has a bookmark for is behind the remote — the ordinary case, and
+    // the one where a fetch that reconciles has something to move.
+    seed_remote_scope_file(&machine, "all", ".gitconfig", "[user]\nname = Shared\n");
+    merge_remote_scope_into(&machine, "all", "linux");
+    merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
+
+    let scopes = ["all", "linux", "mx-xps-cy"];
+    let before = scopes.map(|scope| bookmark_revision(&machine, scope));
+
+    for command in ["dotsync status", "dotsync diff", "dotsync view"] {
+        let output = machine.run(command);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "`{command}` on a machine that is merely behind\n{}",
+            render_output(&output)
+        );
+
+        for (scope, was) in scopes.iter().zip(&before) {
+            assert_eq!(
+                &bookmark_revision(&machine, scope),
+                was,
+                "`{command}` moved `{scope}`: a read-only command reports what convergence would do, it does not do it"
+            );
+        }
+        assert!(
+            !machine.file_exists(".gitconfig"),
+            "`{command}` wrote the incoming file into home; only plain `dotsync` applies it"
+        );
+    }
+
+    // The change really was there to be applied, so the assertions above were
+    // about a run that had something to move, not about an idle fetch.
+    let sync = machine.run("dotsync");
+    assert!(sync.status.success(), "{}", render_output(&sync));
+    assert_eq!(machine.read_file(".gitconfig"), "[user]\nname = Shared\n");
+}
+
+/// A refused push is reported by the run that hit it and nowhere else. Once
+/// that output has scrolled away, a machine holding unpublished commits looks
+/// completely clean: `status` says "no changes" and nothing anywhere says the
+/// remote has never seen the work. That is how the 2026-07-27 machine sat
+/// wedged for sixteen days.
+///
+/// `unpushed_scopes` is the name plain `dotsync` and `commit` already use for
+/// this list, so `status` — the command an agent and Max both run by reflex —
+/// reports it under the same name.
+#[test]
+fn status_names_the_scopes_this_machine_has_not_published() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    // A commit whose cascade landed and whose push did not: every scope holds
+    // a commit the remote has never seen, and home is in sync, so there is
+    // nothing else for `status` to report.
+    interrupt_push_after_cascade(
+        &machine,
+        ".config/fish/dev-certs.fish",
+        "set -gx DEV_CERTS 1\n",
+    );
+
+    let json = machine.run("dotsync status --output json");
+    assert_eq!(json.status.code(), Some(0), "{}", render_output(&json));
+    let payload = parse_stdout_json(&json);
+    let unpushed = payload["unpushed_scopes"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!(
+                "`status` has to report the scopes this machine holds and the remote does not\n{}",
+                render_output(&json)
+            )
+        })
+        .iter()
+        .map(|scope| {
+            scope
+                .as_str()
+                .expect("scope should be a string")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    for scope in ["all", "linux", "mx-xps-cy"] {
+        assert!(
+            unpushed.contains(&scope.to_string()),
+            "`{scope}` is unpublished and has to be named: {unpushed:?}\n{}",
+            render_output(&json)
+        );
+    }
+
+    let human = machine.run("dotsync status");
+    assert_eq!(human.status.code(), Some(0), "{}", render_output(&human));
+    let stderr = String::from_utf8_lossy(&human.stderr).into_owned();
+    for scope in ["all", "linux", "mx-xps-cy"] {
+        assert!(
+            stderr.contains(scope),
+            "a machine with unpublished commits must not read as clean: `{scope}` is missing\n{stderr}"
+        );
+    }
+
+    // And the report has to stop once the work is published, or it is noise
+    // rather than a signal.
+    let sync = machine.run("dotsync --output json");
+    assert!(sync.status.success(), "{}", render_output(&sync));
+    let after = machine.run("dotsync status --output json");
+    assert_eq!(
+        parse_stdout_json(&after)["unpushed_scopes"]
+            .as_array()
+            .map(Vec::len),
+        Some(0),
+        "the remote has everything now\n{}",
+        render_output(&after)
+    );
+}
+
+/// While a cascade is paused, the conflicted file in home *is* the resolution
+/// buffer — DESIGN: "While markers are materialized, drift detection treats
+/// them as the expected home content." So there is nothing there for `--force`
+/// to overwrite, and the half-written resolution is the one thing in home that
+/// cannot be reconstructed from anywhere else.
+///
+/// Today it is overwritten. Confirmed by hand at the byte level: with the
+/// cascade paused and a resolution part-written, `dotsync --force` reported
+/// `overwrote 1 drifted file(s)`, replaced the buffer's contents with the
+/// machine scope's version, and exited 0 — while the same run correctly
+/// withheld publishing because a cascade was paused. Data loss with a
+/// contradictory message.
+///
+/// The exit code is deliberately not pinned. Whether this run stops with the
+/// state's own 3, or syncs everything else and exits 0, is item 3's question;
+/// that it does not destroy the resolution is decided now.
+#[test]
+fn forcing_a_sync_does_not_overwrite_a_conflict_resolution_in_progress() {
+    let harness = TestHarness::new();
+    let (machine, _pause) = pause_a_conflict_on_linux(&harness);
+
+    // The agent is part-way through resolving: the markers are gone and the
+    // resolution is written, but `dotsync continue` has not run yet.
+    machine.write_file(".config/app.conf", "setting = \"all+linux\"\n");
+
+    let forced = machine.run("dotsync --force --output json");
+    assert_eq!(
+        machine.read_file(".config/app.conf"),
+        "setting = \"all+linux\"\n",
+        "`--force` overwrote the resolution being written into the conflicted file, which exists nowhere else\n{}",
+        render_output(&forced)
+    );
+    assert!(
+        !parse_stdout_json(&forced)["overwritten_files"]
+            .as_array()
+            .is_some_and(|files| files.iter().any(|file| file == ".config/app.conf")),
+        "and it must not claim to have\n{}",
+        render_output(&forced)
+    );
+
+    // The resolution is still there to be finished with, which is the point:
+    // a run that meets a pause leaves the machine able to get out of it.
+    let continued = machine.run("dotsync continue");
+    assert!(continued.status.success(), "{}", render_output(&continued));
+    assert_eq!(
+        remote_branch_file_contents(&machine, "linux", ".config/app.conf"),
+        "setting = \"all+linux\"\n",
+        "the resolution the agent wrote is the one that got published"
+    );
+}
+
+/// Asserts a run said a scope diverged, in the channel humans read. The
+/// wording is the implementer's; that it is said, and about which scope, is
+/// not.
+fn assert_reports_divergence(output: &Output, scope: &str) {
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        stderr.to_lowercase().contains("diverg"),
+        "the run has to say the scope diverged rather than leaving it to be discovered\n{}",
+        render_output(output)
+    );
+    assert!(
+        stderr.contains(scope),
+        "and it has to name `{scope}`\n{}",
+        render_output(output)
+    );
+}
+
+/// Whether a payload says this anywhere — in a field name or in a string
+/// value. For facts whose key name nobody has decided yet: the test's business
+/// is that the payload carries the fact at all, and pinning a key it does not
+/// have would be choosing the schema rather than recording a decision. Field
+/// names count because `{"diverged_scopes": ["all"]}` is a payload that says
+/// both of the things this is used to ask about.
+fn payload_says(payload: &serde_json::Value, needle: &str) -> bool {
+    match payload {
+        serde_json::Value::String(text) => text.to_lowercase().contains(needle),
+        serde_json::Value::Array(items) => items.iter().any(|item| payload_says(item, needle)),
+        serde_json::Value::Object(fields) => fields.iter().any(|(name, value)| {
+            name.to_lowercase().contains(needle) || payload_says(value, needle)
+        }),
+        _ => false,
+    }
+}
+
 /// The one line of a rendering that names something, so a test can ask how
 /// that thing was rendered rather than whether the text contains it.
 fn the_line_naming<'a>(text: &'a str, needle: &str) -> &'a str {
