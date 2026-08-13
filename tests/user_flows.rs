@@ -7002,3 +7002,252 @@ fn a_symlink_to_home_records_one_entry_rather_than_sweeping_home() {
         );
     }
 }
+
+// Three decided behaviours dotsync does not have yet: the commit target has to
+// be a scope this machine is on (PLAN §6, DESIGN "Commands"), the drift stop
+// has to know a cascade is paused (PLAN, item 3), and `view` has to answer the
+// two orientation questions it is asked (PLAN, item 4).
+
+/// The scope a commit names has to be this machine's own scope or an ancestor
+/// of it (Max, 2026-08-13): home only ever moves forward and the config it
+/// holds is supposed to stay valid, so there is no version of another
+/// machine's branch that this machine can claim to have started from. Today
+/// this is silently accepted, exit 0, and the change reaches the other
+/// machine's branch on the remote.
+///
+/// The refusal has to teach the replacement pattern, because "you cannot do
+/// that" on its own leaves an agent with a real need and no way to meet it:
+/// put the shared material — and the pattern for writing it — on the common
+/// ancestor, and leave an agent running on that machine family to add its own
+/// drop-ins on its own scope. The assertions below pin that the refusal names
+/// the scope that was asked for and the shared ancestor it should have used;
+/// the prose is the implementer's.
+///
+/// This is only about *choosing* a commit target. A cascade from a shared
+/// ancestor still merges into descendant scopes this machine is not on, so
+/// conflicts outside this machine's ancestry stay a normal event.
+#[test]
+fn committing_to_a_scope_this_machine_is_not_on_is_refused() {
+    let harness = TestHarness::new();
+    let (machine_a, _machine_b) = two_synced_machines(&harness);
+
+    machine_a.write_file(".apprc", "ui = dark\n");
+    let refused = machine_a.run("dotsync commit goof-b -m 'set the other box up' -- .apprc");
+    assert_eq!(
+        refused.status.code(),
+        Some(1),
+        "committing to a scope this machine is not on must be refused\n{}",
+        render_output(&refused)
+    );
+
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(
+        stderr.contains("goof-b"),
+        "the refusal has to name the scope that was asked for\n{stderr}"
+    );
+    assert!(
+        stderr.contains("linux"),
+        "and it has to point at the shared ancestor, which is where the material and the pattern for it belong\n{stderr}"
+    );
+
+    let json =
+        machine_a.run("dotsync --output json commit goof-b -m 'set the other box up' -- .apprc");
+    let payload = parse_stdout_json(&json);
+    assert_eq!(payload["status"], "error", "{}", render_output(&json));
+    assert!(
+        payload["current_state"]
+            .as_array()
+            .is_some_and(|facts| facts
+                .iter()
+                .any(|fact| fact.as_str().is_some_and(|fact| fact.contains("goof-b")))),
+        "the payload has to carry the same fact the rendering does\n{}",
+        render_output(&json)
+    );
+
+    assert!(
+        remote_branch_entry_mode(&machine_a, "goof-b", ".apprc").is_none(),
+        "nothing may reach the other machine's branch\nit holds: {:?}",
+        remote_branch_entries(&machine_a, "goof-b")
+    );
+    assert_eq!(
+        machine_a.read_file(".apprc"),
+        "ui = dark\n",
+        "a refusal destroys nothing in home"
+    );
+
+    // The refusal is not a wall: the pattern it teaches has to work. The
+    // shared ancestor is a scope this machine is on, so committing there is
+    // how the same material reaches the other machine.
+    let shared = machine_a.run("dotsync commit linux -m 'set every linux box up' -- .apprc");
+    assert!(shared.status.success(), "{}", render_output(&shared));
+    assert_eq!(
+        remote_branch_file_contents(&machine_a, "goof-b", ".apprc"),
+        "ui = dark\n",
+        "and the cascade is what carries it to the other machine"
+    );
+}
+
+/// Plain `dotsync` is the command an agent runs by reflex, and on a machine
+/// with a paused cascade it is the one still handing out two answers that are
+/// both wrong. Reproduced on v0.3.18 and again while writing this: with the
+/// cascade paused at `linux` and the conflicted file sitting in home as the
+/// resolution buffer, the run exits 1 with `drift_detected` and offers
+/// `dotsync --force` — which overwrites the in-flight resolution, verified by
+/// hand — and "run `dotsync status`, then commit the intended path", which is
+/// refused with exit 3 precisely because a cascade is paused.
+///
+/// Neither channel carries `paused_cascade`, though `status`, `diff` and
+/// `view` all gained it in the Wave 3 review round.
+///
+/// The exit code is deliberately not pinned to a number. Whether a sync that
+/// meets a pause stops with 1 or with the state's own 3 is a question item 3
+/// answers; that it stops, says why, and stops advising a refused remedy is
+/// decided now.
+#[test]
+fn the_drift_stop_says_a_cascade_is_paused_rather_than_advising_a_refused_commit() {
+    let harness = TestHarness::new();
+    let (machine, _pause) = pause_a_conflict_on_linux(&harness);
+
+    let sync = machine.run("dotsync");
+    assert_ne!(
+        sync.status.code(),
+        Some(0),
+        "the conflicted file in home is not something to sync over\n{}",
+        render_output(&sync)
+    );
+
+    let stderr = String::from_utf8_lossy(&sync.stderr).into_owned();
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.contains("paused") && line.contains("linux")),
+        "the stop has to say a cascade is paused, and where\n{stderr}"
+    );
+
+    let json = machine.run("dotsync --output json");
+    assert_eq!(
+        parse_stdout_json(&json)["paused_cascade"],
+        "linux",
+        "and the payload has to carry it too, like `status`, `diff` and `view` do\n{}",
+        render_output(&json)
+    );
+
+    let advice = stderr
+        .split_once("Correct flow:")
+        .expect("the stop teaches a correct flow")
+        .1;
+    assert!(
+        advice.contains("dotsync continue") && advice.contains("dotsync abort"),
+        "the only two remedies this state has are the ones it must name\n{advice}"
+    );
+    assert!(
+        !advice.contains("dotsync commit"),
+        "a commit is refused outright while a cascade is paused, so advising one is a dead end\n{advice}"
+    );
+    for invocation in quoted_dotsync_invocations(advice) {
+        assert!(
+            !invocation.contains("--force"),
+            "`{invocation}` would overwrite the conflicted file in home, which is where the resolution is being written\n{advice}"
+        );
+    }
+}
+
+/// The overview lists every scope, and nothing in it says which one is this
+/// machine — so the command whose whole job is orientation leaves an agent
+/// unable to answer "where am I?". `status` knows: the machine scope is in
+/// sync state. `view` just does not compute it.
+#[test]
+fn the_overview_says_which_scope_is_this_machine() {
+    let harness = TestHarness::new();
+    let (machine_a, _machine_b) = two_synced_machines(&harness);
+
+    let json = machine_a.run("dotsync view --output json");
+    assert!(json.status.success(), "{}", render_output(&json));
+    assert_eq!(
+        parse_stdout_json(&json)["machine_scope"],
+        "goof-a",
+        "the overview has to name this machine's scope, under the name every other payload uses for it\n{}",
+        render_output(&json)
+    );
+
+    let human = machine_a.run("dotsync view");
+    assert!(human.status.success(), "{}", render_output(&human));
+    let stdout = String::from_utf8_lossy(&human.stdout).into_owned();
+    let this_machine = the_line_naming(&stdout, "goof-a");
+    let another_machine = the_line_naming(&stdout, "goof-b");
+    assert_ne!(
+        this_machine.replace("goof-a", ""),
+        another_machine.replace("goof-b", ""),
+        "the two machine scopes render identically apart from their names, so the rendering says nothing about where you are\n{stdout}"
+    );
+}
+
+/// `view --file` lists every scope holding the file — the owner plus every
+/// descendant, because files propagate down the DAG. Reading that list
+/// correctly needs exactly the propagation knowledge an agent was using `view`
+/// to acquire, and the useful answer is the one fact the list does not state:
+/// which scope owns the file. It is derivable — the owner is the rootmost
+/// scope holding it — and it is not computed.
+///
+/// Both cases are here because the rootmost scope is only interesting when it
+/// is not the only one: a file on `all` reaches all four scopes, and a file on
+/// a machine scope reaches one.
+#[test]
+fn view_file_says_which_scope_owns_the_file() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    machine_a.write_file(".apprc", "ui = dark\n");
+    let shared = machine_a.run("dotsync commit all -m 'shared apprc' -- .apprc");
+    assert!(shared.status.success(), "{}", render_output(&shared));
+
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.write_file(".config/local.conf", "monitor = DP-1\n");
+    let local = machine_b.run("dotsync commit goof-b -m 'this box only' -- .config/local.conf");
+    assert!(local.status.success(), "{}", render_output(&local));
+
+    let on_the_root = machine_a.run("dotsync view --file .apprc --output json");
+    assert!(
+        on_the_root.status.success(),
+        "{}",
+        render_output(&on_the_root)
+    );
+    assert_eq!(
+        parse_stdout_json(&on_the_root)["owner"],
+        "all",
+        "a file every scope inherits is owned by the one it was committed to\n{}",
+        render_output(&on_the_root)
+    );
+
+    let on_a_leaf = machine_a.run("dotsync view --file .config/local.conf --output json");
+    assert!(on_a_leaf.status.success(), "{}", render_output(&on_a_leaf));
+    assert_eq!(
+        parse_stdout_json(&on_a_leaf)["owner"],
+        "goof-b",
+        "and a file only one machine holds is owned by that machine's scope\n{}",
+        render_output(&on_a_leaf)
+    );
+
+    let human = machine_a.run("dotsync view --file .apprc");
+    assert!(human.status.success(), "{}", render_output(&human));
+    let stdout = String::from_utf8_lossy(&human.stdout).into_owned();
+    assert!(
+        stdout.to_lowercase().contains("own"),
+        "the rendering has to say which scope owns it, not leave the reader to derive it from the list\n{stdout}"
+    );
+}
+
+/// The one line of a rendering that names something, so a test can ask how
+/// that thing was rendered rather than whether the text contains it.
+fn the_line_naming<'a>(text: &'a str, needle: &str) -> &'a str {
+    let mut lines = text.lines().filter(|line| line.contains(needle));
+    let line = lines
+        .next()
+        .unwrap_or_else(|| panic!("nothing in the rendering names `{needle}`\n{text}"));
+    assert!(
+        lines.next().is_none(),
+        "`{needle}` is named on more than one line, so there is no single rendering of it to compare\n{text}"
+    );
+    line
+}
