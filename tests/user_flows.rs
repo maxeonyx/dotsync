@@ -2445,6 +2445,28 @@ Correct flow:
 /// that machine with a cascade paused at `linux` over `.config/app.conf`.
 /// Returns the paused machine and the output of the run that paused.
 fn pause_a_conflict_on_linux(harness: &TestHarness) -> (MachineEnvironment, Output) {
+    let (_machine_a, machine_b, conflict) = pause_a_conflict_on(harness, "linux");
+    (machine_b, conflict)
+}
+
+/// The same two machines and the same collision, with the scope that holds the
+/// colliding override as the parameter — which is the whole difference between
+/// the two shapes a conflict comes in.
+///
+/// `linux` is a scope the paused machine descends from, so the conflict is on
+/// its own path and the resolution is its own config. `goof-a` is the *other*
+/// machine's leaf scope: the cascade from `all` still has to merge into it, so
+/// the same collision happens, but the paused machine does not descend from it
+/// and the resolution is not its config. PLAN item 3: "Every conflict test in
+/// the suite today pauses on a scope the machine descends from, which is why
+/// this survived three waves."
+///
+/// Returns both machines and the output of the run that paused, because half
+/// of what the second shape is about is what the *other* machine ends up with.
+fn pause_a_conflict_on(
+    harness: &TestHarness,
+    override_scope: &str,
+) -> (MachineEnvironment, MachineEnvironment, Output) {
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
@@ -2467,13 +2489,17 @@ fn pause_a_conflict_on_linux(harness: &TestHarness) -> (MachineEnvironment, Outp
         render_output(&commit_base)
     );
 
-    machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
-    let commit_linux =
-        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
+    machine_a.write_file(
+        ".config/app.conf",
+        &format!("setting = \"{override_scope}\"\n"),
+    );
+    let commit_override = machine_a.run(&format!(
+        "dotsync commit {override_scope} -m 'customize {override_scope} config' -- .config/app.conf"
+    ));
     assert!(
-        commit_linux.status.success(),
+        commit_override.status.success(),
         "{}",
-        render_output(&commit_linux)
+        render_output(&commit_override)
     );
 
     let sync_b = machine_b.run("dotsync");
@@ -2489,7 +2515,7 @@ fn pause_a_conflict_on_linux(harness: &TestHarness) -> (MachineEnvironment, Outp
         render_output(&conflict)
     );
 
-    (machine_b, conflict)
+    (machine_a, machine_b, conflict)
 }
 
 #[test]
@@ -7568,6 +7594,563 @@ fn forcing_a_sync_does_not_overwrite_a_conflict_resolution_in_progress() {
         "setting = \"all+linux\"\n",
         "the resolution the agent wrote is the one that got published"
     );
+}
+
+/// K2, and the reason PLAN item 3 opens with "read this first": resolving a
+/// conflict on a scope this machine is not on is broken end to end, and the
+/// run reports two contradictory things at once.
+///
+/// Driven by hand against this build before the test was written. Machine B
+/// pauses cascading into `goof-a` — machine A's leaf scope, which B does not
+/// descend from — writes the resolution into `.config/app.conf` in home, and
+/// runs `dotsync continue`. The continue *works*: it records the merge,
+/// finishes the cascade, and pushes, so the remote `goof-a` really does hold
+/// `setting = "goof-a+all"` afterwards. Then it exits 1 with `drift_detected`,
+/// because the resolution sitting in home is a change against `goof-b`, which
+/// is not a scope that holds it. The headline says the run failed; the outcome
+/// is that it worked and published.
+///
+/// And the machine stays that way. `status` reports `.config/app.conf` as
+/// changed for ever, because no scope this machine syncs from holds the
+/// resolution — the only way out is `dotsync --force`, which is a run that
+/// destroys something being offered as the remedy for a run that succeeded.
+///
+/// DESIGN answers it in "Conflict resolution in home": for a conflict outside
+/// this machine's ancestry "the affected home path serves as a temporary
+/// resolution buffer — with the mode-switch stated loudly: 'this file
+/// temporarily contains the conflicted merge for scope `windows`; it is not
+/// your machine's config; after `continue` or `abort` it will be restored to
+/// your machine's version.'" So `continue` owes home the restoration, and the
+/// run that does its whole job owes an exit code that says so.
+#[test]
+fn continue_after_a_pause_on_another_machines_scope_restores_this_machines_config() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b, _pause) = pause_a_conflict_on(&harness, "goof-a");
+
+    // The resolution machine B is being asked for is machine A's config: the
+    // merge of what `all` now says with what `goof-a` said.
+    machine_b.write_file(".config/app.conf", "setting = \"goof-a+all\"\n");
+    let continued = machine_b.run("dotsync continue");
+    assert_eq!(
+        continued.status.code(),
+        Some(0),
+        "the continue did its whole job — merge, cascade, push — and then reported failure\n{}",
+        render_output(&continued)
+    );
+
+    // It really did publish, so the exit code above is the only thing that was
+    // wrong about the run.
+    assert_eq!(
+        remote_branch_file_contents(&machine_b, "goof-a", ".config/app.conf"),
+        "setting = \"goof-a+all\"\n",
+        "the resolution has to reach the scope it was for"
+    );
+
+    // Home is machine B's config again. It was borrowed as a resolution buffer
+    // for another machine's branch, and the borrowing ends here.
+    assert_eq!(
+        machine_b.read_file(".config/app.conf"),
+        "setting = \"all\"\n",
+        "home still holds another machine's config after the cascade finished\n{}",
+        render_output(&continued)
+    );
+
+    // The wedge: with the resolution left in home there is no scope this
+    // machine syncs from that holds it, so it reads as a local change no
+    // amount of syncing can settle.
+    let status = machine_b.run("dotsync status --output json");
+    assert_eq!(status.status.code(), Some(0), "{}", render_output(&status));
+    let payload = parse_stdout_json(&status);
+    assert_eq!(
+        payload["changes"].as_array().map(Vec::len),
+        Some(0),
+        "a finished cascade must not leave the machine permanently changed\n{}",
+        render_output(&status)
+    );
+    assert!(
+        payload.get("paused_cascade").is_none(),
+        "and it must not still be paused\n{}",
+        render_output(&status)
+    );
+    let diff = machine_b.run("dotsync diff");
+    assert_eq!(
+        diff.status.code(),
+        Some(0),
+        "`diff` exits 1 on drift, and there is no drift here\n{}",
+        render_output(&diff)
+    );
+
+    // The machine the resolution was for picks it up as an ordinary sync.
+    let sync_a = machine_a.run("dotsync");
+    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    assert_eq!(
+        machine_a.read_file(".config/app.conf"),
+        "setting = \"goof-a+all\"\n"
+    );
+}
+
+/// The other half of the mode switch: the pause has to say whose config is
+/// now sitting in the file, before the agent starts editing it.
+///
+/// DESIGN wants it "stated loudly": "this file temporarily contains the
+/// conflicted merge for scope `windows`; it is not your machine's config;
+/// after `continue` or `abort` it will be restored to your machine's version."
+/// Today the pause for `goof-a` is word-for-word the pause for `linux` apart
+/// from the scope name, so an agent reading it has no way to tell that the
+/// contents it is about to write are not its own machine's.
+///
+/// The wording is the implementer's. What is asserted is the one fact that
+/// cannot be stated without saying it: the message distinguishes the scope
+/// being resolved from this machine's own scope, which means naming both.
+/// There is no in-ancestry counterpart because there is no mode to switch:
+/// when the conflict is on this machine's own path, the resolution *is* its
+/// config, which is what every existing conflict test already exercises.
+#[test]
+fn a_pause_on_another_machines_scope_says_whose_config_is_in_the_file() {
+    let harness = TestHarness::new();
+    let (_machine_a, _machine_b, pause) = pause_a_conflict_on(&harness, "goof-a");
+
+    let stderr = String::from_utf8_lossy(&pause.stderr).into_owned();
+    assert!(
+        stderr.contains("goof-a"),
+        "the pause has to name the scope being resolved\n{}",
+        render_output(&pause)
+    );
+    assert!(
+        stderr.contains("goof-b"),
+        "and it has to name this machine's own scope, because the whole point is that the file no longer holds it\n{}",
+        render_output(&pause)
+    );
+}
+
+/// DL-2's root cause. "Resolved" has to be a property of the *content* — no
+/// conflict markers left in the file — and not of having run `continue`.
+///
+/// Today's interim guard asks a different question: did the file change since
+/// the pause? A file the agent edited and left markers in answers yes, so
+/// `continue` takes it as the resolution. Driven by hand against this build:
+/// the marker text below was recorded on `linux`, cascaded into `goof-a` and
+/// `goof-b`, pushed to the remote, and reported as `resumed cascade and synced
+/// 3 file(s)` with exit 0. Every other machine then syncs a file full of
+/// `<<<<<<<` into its live config.
+///
+/// DESIGN: "`continue` verifies the markers are gone", and "Refuses if markers
+/// remain". Exit 3 because the cascade is still paused afterwards — 3 is a
+/// property of the state, not of the command that met it.
+#[test]
+fn continue_refuses_a_resolution_that_still_holds_conflict_markers() {
+    let harness = TestHarness::new();
+    let (machine, _pause) = pause_a_conflict_on_linux(&harness);
+
+    // A half-done resolution: the agent picked one side of the file and never
+    // took the markers out. The trailing line is there so the file is a change
+    // against whatever the pause materialized into it, in both the world where
+    // that is markers and the world where it is not.
+    machine.write_file(
+        ".config/app.conf",
+        "<<<<<<< all\nsetting = \"all\"\n||||||| base\nsetting = \"base\"\n=======\nsetting = \"linux\"\n>>>>>>> linux\n# half-done\n",
+    );
+    let continued = machine.run("dotsync continue");
+    assert!(
+        !read_bookmark_file_contents(&machine, "linux", ".config/app.conf").contains("<<<<<<<"),
+        "conflict markers were recorded as the merged contents\n{}",
+        render_output(&continued)
+    );
+    assert!(
+        !remote_branch_file_contents(&machine, "linux", ".config/app.conf").contains("<<<<<<<"),
+        "and they reached the remote, where every other machine syncs from"
+    );
+    assert_eq!(
+        continued.status.code(),
+        Some(3),
+        "a file that still holds conflict markers is not a resolution, and the cascade is still paused after refusing it\n{}",
+        render_output(&continued)
+    );
+
+    // Refusing is not a wedge: a real resolution still finishes the cascade.
+    machine.write_file(".config/app.conf", "setting = \"all+linux\"\n");
+    let resolved = machine.run("dotsync continue");
+    assert!(resolved.status.success(), "{}", render_output(&resolved));
+    assert_eq!(
+        remote_branch_file_contents(&machine, "linux", ".config/app.conf"),
+        "setting = \"all+linux\"\n"
+    );
+}
+
+/// The same requirement on the other shape, where getting it wrong is worse:
+/// the markers are recorded on *another machine's* branch, so the machine that
+/// pays for it is not the one that made the mistake and cannot see what
+/// happened. Driven by hand against this build: `goof-a` on the remote ended
+/// up holding the marker text, and machine A's next plain `dotsync` writes it
+/// into its live config.
+#[test]
+fn continue_refuses_conflict_markers_left_in_another_machines_scope() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b, _pause) = pause_a_conflict_on(&harness, "goof-a");
+
+    machine_b.write_file(
+        ".config/app.conf",
+        "<<<<<<< all\nsetting = \"all\"\n||||||| base\nsetting = \"base\"\n=======\nsetting = \"goof-a\"\n>>>>>>> goof-a\n# half-done\n",
+    );
+    let continued = machine_b.run("dotsync continue");
+    assert!(
+        !remote_branch_file_contents(&machine_b, "goof-a", ".config/app.conf").contains("<<<<<<<"),
+        "conflict markers were published onto another machine's branch\n{}",
+        render_output(&continued)
+    );
+    // Asserted after the contents, because the exit code alone cannot tell
+    // this apart from K2: today's continue exits 1 here whatever it recorded.
+    assert_eq!(
+        continued.status.code(),
+        Some(3),
+        "a file that still holds conflict markers is not a resolution, and the cascade is still paused after refusing it\n{}",
+        render_output(&continued)
+    );
+
+    // And the machine that would have received them is untouched.
+    let sync_a = machine_a.run("dotsync");
+    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    assert_eq!(
+        machine_a.read_file(".config/app.conf"),
+        "setting = \"goof-a\"\n",
+        "the other machine's config must not have changed at all"
+    );
+
+    // Refusing is not a wedge here either. The exit code of this continue is
+    // not asserted: that a continue outside this machine's ancestry exits 1
+    // after succeeding is K2, pinned separately above.
+    machine_b.write_file(".config/app.conf", "setting = \"goof-a+all\"\n");
+    machine_b.run("dotsync continue");
+    assert_eq!(
+        remote_branch_file_contents(&machine_b, "goof-a", ".config/app.conf"),
+        "setting = \"goof-a+all\"\n",
+        "a real resolution still gets published"
+    );
+}
+
+/// DESIGN: "The cascade never pauses structurally — every convergence pass
+/// completes in one atomic transaction, writing every merge commit, conflicted
+/// or not", and "Conflicted heads are not pushed. They stay local-ahead ...
+/// until resolved; everything non-conflicted still pushes."
+///
+/// Today neither half happens: the cascade stops at the conflict, and the
+/// `WithheldPausedCascade` guard withholds *everything*, including `all`,
+/// which is not conflicted and whose commit is the entire reason the run
+/// existed. So a pause strands committed history unpushed — the exact shape of
+/// the 2026-07-27 wedge, and what design principle 5 ("a drift stop must not
+/// strand unpushed commits") exists to prevent.
+///
+/// PLAN item 3 wants the eligibility check inside `push_scope_updates` "so
+/// every call site is covered by construction". A black-box test cannot see
+/// where the check lives, so it asks the next best thing: a second, separate
+/// run — a plain `dotsync`, a different call site — has to give the same
+/// answer.
+#[test]
+fn a_pause_publishes_the_scopes_it_did_not_conflict_on() {
+    let harness = TestHarness::new();
+    let machine_a = harness.machine("machine-a", "linux", "goof-a");
+    let machine_b = harness.machine("machine-b", "linux", "goof-b");
+
+    let init_a = machine_a.init();
+    assert!(init_a.status.success(), "{}", render_output(&init_a));
+    let init_b = machine_b.init();
+    assert!(init_b.status.success(), "{}", render_output(&init_b));
+    let sync_a_after_join = machine_a.run("dotsync --force");
+    assert!(
+        sync_a_after_join.status.success(),
+        "{}",
+        render_output(&sync_a_after_join)
+    );
+
+    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
+    let commit_base = machine_a.run("dotsync commit all -m 'add base config' -- .config/app.conf");
+    assert!(
+        commit_base.status.success(),
+        "{}",
+        render_output(&commit_base)
+    );
+    machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
+    let commit_linux =
+        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
+    assert!(
+        commit_linux.status.success(),
+        "{}",
+        render_output(&commit_linux)
+    );
+
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+
+    // Recorded before the pause so the assertions below are about what this
+    // run published, not about what the remote happened to hold.
+    let conflicted_scopes = ["linux", "goof-a", "goof-b"];
+    let before = conflicted_scopes.map(|scope| remote_branch_revision(&machine_b, scope));
+
+    machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
+    let pause = machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
+    assert_eq!(pause.status.code(), Some(3), "{}", render_output(&pause));
+
+    assert_eq!(
+        remote_branch_file_contents(&machine_b, "all", ".config/app.conf"),
+        "setting = \"all\"\n",
+        "`all` is not conflicted, and its commit is the whole reason this run existed: a pause must not strand it\n{}",
+        render_output(&pause)
+    );
+    for (scope, was) in conflicted_scopes.iter().zip(&before) {
+        assert_eq!(
+            &remote_branch_revision(&machine_b, scope),
+            was,
+            "`{scope}` inherited the conflict, and a conflicted head is never pushed"
+        );
+    }
+
+    // A different command, and therefore a different push call site, has to
+    // give the same answer. Its exit code is not asserted: what plain
+    // `dotsync` does when it meets a pause is a separate open question.
+    machine_b.run("dotsync");
+    assert_eq!(
+        remote_branch_file_contents(&machine_b, "all", ".config/app.conf"),
+        "setting = \"all\"\n"
+    );
+    for (scope, was) in conflicted_scopes.iter().zip(&before) {
+        assert_eq!(
+            &remote_branch_revision(&machine_b, scope),
+            was,
+            "a later run pushed the conflicted head of `{scope}`"
+        );
+    }
+}
+
+/// The same rule where it separates one scope from the rest instead of
+/// stopping everything: the conflict is on `goof-a`, so `all`, `linux` and
+/// this machine's own `goof-b` are all clean merges with nothing wrong with
+/// them, and `goof-a` alone stays local until it is resolved.
+///
+/// This is the shape that matters for the machine sitting in front of you.
+/// With the conflict on another machine's branch, withholding the whole push
+/// means this machine's own scope — its own finished config — sits unpublished
+/// behind someone else's unresolved merge.
+#[test]
+fn a_pause_on_another_machines_scope_still_publishes_this_machines_own() {
+    let harness = TestHarness::new();
+    let machine_a = harness.machine("machine-a", "linux", "goof-a");
+    let machine_b = harness.machine("machine-b", "linux", "goof-b");
+
+    let init_a = machine_a.init();
+    assert!(init_a.status.success(), "{}", render_output(&init_a));
+    let init_b = machine_b.init();
+    assert!(init_b.status.success(), "{}", render_output(&init_b));
+    let sync_a_after_join = machine_a.run("dotsync --force");
+    assert!(
+        sync_a_after_join.status.success(),
+        "{}",
+        render_output(&sync_a_after_join)
+    );
+
+    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
+    let commit_base = machine_a.run("dotsync commit all -m 'add base config' -- .config/app.conf");
+    assert!(
+        commit_base.status.success(),
+        "{}",
+        render_output(&commit_base)
+    );
+    machine_a.write_file(".config/app.conf", "setting = \"goof-a\"\n");
+    let commit_machine =
+        machine_a.run("dotsync commit goof-a -m 'customize goof-a config' -- .config/app.conf");
+    assert!(
+        commit_machine.status.success(),
+        "{}",
+        render_output(&commit_machine)
+    );
+
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    let goof_a_before = remote_branch_revision(&machine_b, "goof-a");
+
+    machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
+    let pause = machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
+    assert_eq!(pause.status.code(), Some(3), "{}", render_output(&pause));
+
+    for scope in ["all", "linux", "goof-b"] {
+        assert_eq!(
+            remote_branch_file_contents(&machine_b, scope, ".config/app.conf"),
+            "setting = \"all\"\n",
+            "`{scope}` merged cleanly, so it publishes: another machine's unresolved merge is not a reason to hold this machine's own config back\n{}",
+            render_output(&pause)
+        );
+    }
+    assert_eq!(
+        remote_branch_revision(&machine_b, "goof-a"),
+        goof_a_before,
+        "and the one conflicted head stays local until it is resolved"
+    );
+}
+
+/// DESIGN: "'Paused' is not a stored mode; it is a derived observation: one or
+/// more local scope heads have conflicted trees", and "Anything derivable from
+/// the repo must be derived, never cached in a side file. Derived state is
+/// automatically correct after a crash; stored state is a fresh opportunity to
+/// be wrong."
+///
+/// This asks that as a behaviour rather than as the absence of a file: remove
+/// whatever machine-local record of the pause exists, and the answer must not
+/// change. Under the design there is nothing to remove and this is a no-op.
+/// Today `.dotsync-paused-cascade.json` is the only copy of the intent, so
+/// losing it loses the pause entirely — driven by hand against this build,
+/// `status` reports an ordinary modified file with no `paused_cascade`,
+/// `continue` says "there is no paused cascade on this machine", and the repo
+/// is left half-cascaded with nothing saying so.
+///
+/// One shape is enough here, and it is the only test in this batch where that
+/// is true: where the pause state is read from is the same question whichever
+/// scope conflicted, and both shapes write the same one file.
+#[test]
+fn a_pause_survives_losing_every_machine_local_record_of_it() {
+    let harness = TestHarness::new();
+    let (_machine_a, machine_b, _pause) = pause_a_conflict_on(&harness, "linux");
+
+    remove_machine_local_records(&machine_b);
+
+    let status = machine_b.run("dotsync status --output json");
+    assert_eq!(status.status.code(), Some(0), "{}", render_output(&status));
+    assert_eq!(
+        parse_stdout_json(&status)["paused_cascade"],
+        "linux",
+        "the pause is in the repo's conflicted heads, so nothing outside the repo can take it away\n{}",
+        render_output(&status)
+    );
+
+    let commit = machine_b.run("dotsync commit goof-b -m 'unrelated' -- .config/app.conf");
+    assert_eq!(
+        commit.status.code(),
+        Some(3),
+        "and a commit is still refused, because the machine is still in the state that refuses it\n{}",
+        render_output(&commit)
+    );
+
+    machine_b.write_file(".config/app.conf", "setting = \"all+linux\"\n");
+    let continued = machine_b.run("dotsync continue");
+    assert!(continued.status.success(), "{}", render_output(&continued));
+    assert_eq!(
+        remote_branch_file_contents(&machine_b, "linux", ".config/app.conf"),
+        "setting = \"all+linux\"\n",
+        "and the cascade can still be finished"
+    );
+}
+
+/// DESIGN: "A conflict anywhere in this machine's scope ancestry propagates
+/// down into the machine scope's tree, so syncing writes standard conflict
+/// markers ... into the affected home files — using jj's own
+/// conflict-materialization code."
+///
+/// Nothing materializes today: home holds exactly the bytes the agent last
+/// typed there, which is why the interim DL-2 guard has to ask "did this file
+/// change" instead of "are the markers gone", and why the pause's instruction
+/// to "edit the conflicted file to the merged contents you want" gives the
+/// agent nothing to merge *from*. The version being merged away is only
+/// reachable through `dotsync view --scope linux --file .config/app.conf`, and
+/// only if the agent reads far enough into the refusal to find that out.
+#[test]
+fn a_pause_materializes_the_conflict_into_home() {
+    let harness = TestHarness::new();
+    let (machine, pause) = pause_a_conflict_on_linux(&harness);
+
+    let home = machine.read_file(".config/app.conf");
+    assert_materialized_conflict(
+        &home,
+        ["all", "linux"],
+        [
+            "setting = \"all\"",
+            "setting = \"base\"",
+            "setting = \"linux\"",
+        ],
+        &render_output(&pause),
+    );
+}
+
+/// The same materialization for a conflict this machine is not on, where it
+/// has to be done deliberately rather than by propagation: `goof-b`'s tree is
+/// a clean merge, so nothing about syncing this machine's own scope would ever
+/// put the `goof-a` conflict in front of the agent.
+///
+/// DESIGN: conflicts outside this machine's ancestry "don't appear in home
+/// naturally ... the affected home path serves as a temporary resolution
+/// buffer". Without the buffer, the agent is asked to resolve a merge it
+/// cannot see either side of, which is what makes today's answer — leave the
+/// file alone, or write anything at all, and `continue` records it — so easy
+/// to get wrong.
+#[test]
+fn a_pause_on_another_machines_scope_leaves_the_conflict_in_home_as_a_buffer() {
+    let harness = TestHarness::new();
+    let (_machine_a, machine_b, pause) = pause_a_conflict_on(&harness, "goof-a");
+
+    let home = machine_b.read_file(".config/app.conf");
+    assert_materialized_conflict(
+        &home,
+        ["all", "goof-a"],
+        [
+            "setting = \"all\"",
+            "setting = \"base\"",
+            "setting = \"goof-a\"",
+        ],
+        &render_output(&pause),
+    );
+}
+
+/// A conflict as DESIGN asks for it to be materialized: git-style markers
+/// ("Agents have deep priors on this exact format"), the base included, and
+/// the sides labelled with the scopes whose changes are colliding rather than
+/// with commit ids.
+///
+/// The labels are asked of the marker lines only, and only that the scope
+/// names appear on them — where each one goes, and what else the line says, is
+/// jj's materialization and the implementer's.
+fn assert_materialized_conflict(
+    contents: &str,
+    colliding_scopes: [&str; 2],
+    versions: [&str; 3],
+    context: &str,
+) {
+    for marker in ["<<<<<<<", "|||||||", "=======", ">>>>>>>"] {
+        assert!(
+            contents.lines().any(|line| line.starts_with(marker)),
+            "home holds no `{marker}` line, so the conflict is not in front of the agent at all\n--- home ---\n{contents}\n--- the run that paused ---\n{context}"
+        );
+    }
+    for version in versions {
+        assert!(
+            contents.contains(version),
+            "the materialized conflict is missing `{version}`, and the base is one of the three\n--- home ---\n{contents}"
+        );
+    }
+    let labels: String = contents
+        .lines()
+        .filter(|line| {
+            ["<<<<<<<", "|||||||", "=======", ">>>>>>>"]
+                .iter()
+                .any(|marker| line.starts_with(marker))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    for scope in colliding_scopes {
+        assert!(
+            labels.contains(scope),
+            "the sides have to be labelled with the scopes whose changes are colliding, and `{scope}` is not on any marker line\n--- marker lines ---\n{labels}"
+        );
+    }
+}
+
+/// Removes every machine-local record dotsync keeps beside its repo, so a test
+/// can ask whether an answer was derived from the repo or read out of a file.
+/// Deliberately says nothing about what it found: a test that asserts the file
+/// was there pins the file, and the file is the thing being removed.
+fn remove_machine_local_records(machine: &MachineEnvironment) {
+    for entry in fs::read_dir(&machine.repo_dir).expect("read the repo directory") {
+        let entry = entry.expect("read a repo directory entry");
+        if entry.file_name().to_string_lossy().starts_with(".dotsync-") {
+            fs::remove_file(entry.path()).expect("remove a machine-local record");
+        }
+    }
 }
 
 /// Asserts a run said a scope diverged, in the channel humans read. The
