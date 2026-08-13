@@ -4,8 +4,15 @@
 // assertion helpers the scenarios in `user_flows.rs` share.
 //
 // The jj-lib reading below is a deliberately separate client from
-// `src/repo.rs`: these are black-box tests, so what a scope holds is read
-// without going through the code under test.
+// `src/repo.rs`, not duplication waiting to be removed. These are black-box
+// tests: reading a scope through the code under test would make the answer
+// agree with the bug. `src/repo.rs`'s `read_tree_entry_bytes` is the concrete
+// case — it returns a symlink's target as file bytes, which is exactly what
+// `a_symlink_on_a_scope_materialises_in_home_as_a_symlink` is pending on, and
+// a harness that reused it could not see that.
+//
+// Everything in `src/repo.rs` is `pub(crate)` anyway, so sharing would mean
+// widening the library's public API for the tests' benefit.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -373,23 +380,29 @@ pub fn test_settings() -> UserSettings {
         .expect("load jj settings for test assertions")
 }
 
-pub fn load_repo_direct(repo_dir: &Path) -> Arc<jj_lib::repo::ReadonlyRepo> {
-    let settings = test_settings();
+/// Runs a jj-lib future to completion. jj-lib's store reads are async and
+/// these helpers are not, so each one bridges with a runtime of its own.
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("build tokio runtime")
-        .block_on(async {
-            RepoLoader::init_from_file_system(
-                &settings,
-                &repo_dir.join(".jj/repo"),
-                &StoreFactories::default(),
-            )
-            .expect("init repo loader")
-            .load_at_head()
-            .await
-            .expect("load repo at head")
-        })
+        .block_on(future)
+}
+
+pub fn load_repo_direct(repo_dir: &Path) -> Arc<jj_lib::repo::ReadonlyRepo> {
+    let settings = test_settings();
+    block_on(async {
+        RepoLoader::init_from_file_system(
+            &settings,
+            &repo_dir.join(".jj/repo"),
+            &StoreFactories::default(),
+        )
+        .expect("init repo loader")
+        .load_at_head()
+        .await
+        .expect("load repo at head")
+    })
 }
 
 pub fn bookmark_commit(machine: &MachineEnvironment, scope: &str) -> jj_lib::commit::Commit {
@@ -425,24 +438,22 @@ pub fn read_bookmark_file_contents(
         panic!("expected file at `{relative}` on `{scope}`")
     };
 
-    let mut reader = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("build tokio runtime")
-        .block_on(commit.store().read_file(path, &id))
-        .unwrap_or_else(|err| panic!("read file contents for `{relative}` on `{scope}`: {err}"));
-    let mut contents = Vec::new();
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("build tokio runtime")
-        .block_on(async {
-            use tokio::io::AsyncReadExt;
-            reader
-                .read_to_end(&mut contents)
-                .await
-                .expect("read bookmark file bytes");
-        });
+    let contents = block_on(async {
+        use tokio::io::AsyncReadExt;
+        let mut reader = commit
+            .store()
+            .read_file(path, &id)
+            .await
+            .unwrap_or_else(|err| {
+                panic!("read file contents for `{relative}` on `{scope}`: {err}")
+            });
+        let mut contents = Vec::new();
+        reader
+            .read_to_end(&mut contents)
+            .await
+            .expect("read bookmark file bytes");
+        contents
+    });
     String::from_utf8(contents).expect("bookmark file should be utf-8")
 }
 
