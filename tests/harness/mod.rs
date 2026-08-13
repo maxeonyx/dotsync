@@ -224,6 +224,65 @@ impl MachineEnvironment {
         (output, calls)
     }
 
+    /// Runs dotsync with another machine winning the race to publish: the
+    /// first time this run reaches for `git push`, the commit parked by
+    /// `park_a_racing_commit` lands on `branch`, so the push arrives at a
+    /// remote that moved *after* this run fetched. Every later push in the
+    /// same run finds the remote where it left it, so a run that fetches and
+    /// tries again can get through.
+    ///
+    /// The race is staged in front of `git` rather than in a receive hook
+    /// because that is where the race is — between this run's fetch and this
+    /// run's push — and a hook cannot tell those apart. dotsync reaches the
+    /// remote by shelling out to `git`, which is jj-lib's supported mechanism
+    /// and already how `fetches_during` counts network calls.
+    pub fn run_racing_the_first_push(&self, command: &str, branch: &str) -> Output {
+        let shim_dir = &self.shim_dir;
+        let marker = shim_dir.join("race-fired");
+        if marker.exists() {
+            fs::remove_file(&marker).expect("clear the race marker");
+        }
+        let real_git = real_git_path();
+        write_file_at(
+            &shim_dir.join("git"),
+            &format!(
+                "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = push ] && [ ! -e \"{marker}\" ]; then\n    : > \"{marker}\"\n    \"{git}\" --git-dir=\"{remote}\" update-ref refs/heads/{branch} refs/racer/head\n  fi\ndone\nexec \"{git}\" \"$@\"\n",
+                marker = marker.display(),
+                git = real_git.display(),
+                remote = self.remote_dir.display(),
+            ),
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(shim_dir.join("git"), fs::Permissions::from_mode(0o755))
+                .expect("make git shim executable");
+        }
+
+        let args = dotsync_args(command);
+        let mut command = Command::new(env!("CARGO_BIN_EXE_dotsync"));
+        command.args(args);
+        command.current_dir(&self.home_dir);
+        command.env("HOME", &self.home_dir);
+        command.env("DOTSYNC_OS", &self.os);
+        command.env("DOTSYNC_HOSTNAME", &self.hostname);
+        command.env(
+            "PATH",
+            format!(
+                "{}:{}",
+                shim_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+        let output = command.output().expect("run dotsync");
+        assert!(
+            marker.exists(),
+            "this test needs a run that pushed, and nothing asked git to push\n{}",
+            render_output(&output)
+        );
+        output
+    }
+
     /// How many times a run asked git to talk to the remote.
     pub fn fetches_during(&self, command: &str) -> (Output, usize) {
         let (output, calls) = self.run_recording_git(command);
@@ -539,6 +598,16 @@ pub fn remote_branch_entry_mode(
         .map(|(_, mode)| mode)
 }
 
+/// Whether the branch every other machine reads holds this path at all.
+/// Asked separately from the contents because `remote_branch_file_contents`
+/// can only report a missing path by failing inside the harness, which reads
+/// as the fixture breaking rather than as the thing the test is about.
+pub fn remote_branch_holds(machine: &MachineEnvironment, branch: &str, relative: &str) -> bool {
+    remote_branch_entries(machine, branch)
+        .iter()
+        .any(|(path, _)| path == relative)
+}
+
 /// Every path a branch holds, with its mode.
 pub fn remote_branch_entries(machine: &MachineEnvironment, branch: &str) -> Vec<(String, String)> {
     let output = git_in(&machine.remote_dir, &["ls-tree", "-r", branch]);
@@ -648,6 +717,51 @@ pub fn block_remote_pushes(machine: &MachineEnvironment) {
 
 pub fn allow_remote_pushes(machine: &MachineEnvironment) {
     fs::remove_file(machine.remote_dir.join("hooks/pre-receive")).expect("remove pre-receive hook");
+}
+
+/// Lets one branch of a push through and rejects the rest of the same push,
+/// which is what a half-published push looks like from the outside. Git runs
+/// `update` once per ref, after `pre-receive` has accepted the push as a
+/// whole, so this is the only hook that can separate the refs of one push.
+pub fn block_remote_pushes_except(machine: &MachineEnvironment, branch: &str) {
+    let hook_path = machine.remote_dir.join("hooks/update");
+    write_file_at(
+        &hook_path,
+        &format!("#!/bin/sh\n[ \"$1\" = \"refs/heads/{branch}\" ] && exit 0\nexit 1\n"),
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755))
+            .expect("make update hook executable");
+    }
+}
+
+pub fn allow_every_branch_to_be_pushed(machine: &MachineEnvironment) {
+    fs::remove_file(machine.remote_dir.join("hooks/update")).expect("remove update hook");
+}
+
+/// Parks a commit on the remote without putting it on a branch, ready to be
+/// dropped onto `branch` at the moment of another machine's choosing.
+///
+/// It goes on `refs/racer/head` rather than on a branch of its own because
+/// dotsync fetches `refs/heads/*`: a branch here would be a scope, and this
+/// commit is not supposed to exist as far as the machine under test knows.
+pub fn park_a_racing_commit(
+    machine: &MachineEnvironment,
+    branch: &str,
+    relative: &str,
+    contents: &str,
+) {
+    let clone_dir = machine.home_dir.join(format!("racer-{branch}.ignore"));
+    if clone_dir.exists() {
+        fs::remove_dir_all(&clone_dir).expect("remove old racer clone dir");
+    }
+    clone_remote_branch_to(&clone_dir, &machine.remote_dir, branch);
+    write_file_at(&clone_dir.join(relative), contents);
+    git_commit_all(&clone_dir, &format!("test: racing commit on {branch}"));
+    let push = git_in(&clone_dir, &["push", "origin", "HEAD:refs/racer/head"]);
+    assert!(push.status.success(), "{}", render_output(&push));
 }
 
 pub fn remote_branch_revision(machine: &MachineEnvironment, branch: &str) -> String {
