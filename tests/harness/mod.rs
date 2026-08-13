@@ -110,6 +110,33 @@ impl MachineEnvironment {
         ))
     }
 
+    /// `init`, for the tests that do not care how it went — which is every
+    /// test whose subject is what happens afterwards.
+    pub fn init_ok(&self) -> Output {
+        let output = self.init();
+        assert!(
+            output.status.success(),
+            "expected `dotsync init` to succeed\n{}",
+            render_output(&output)
+        );
+        output
+    }
+
+    /// Runs dotsync, asserts it exited 0, and hands the output back.
+    ///
+    /// The idiom this replaces asserted exactly this and nothing more, so a
+    /// success assertion that carries its own explanation is still written out
+    /// against `run`: the explanation is the part `run_ok` cannot keep.
+    pub fn run_ok(&self, command: &str) -> Output {
+        let output = self.run(command);
+        assert!(
+            output.status.success(),
+            "expected `{command}` to succeed\n{}",
+            render_output(&output)
+        );
+        output
+    }
+
     pub fn run(&self, command: &str) -> Output {
         let args = dotsync_args(command);
         let mut command = Command::new(env!("CARGO_BIN_EXE_dotsync"));

@@ -9,12 +9,7 @@ fn init_creates_no_visible_git_directory() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     assert!(
         !machine.repo_dir.join(".git").exists(),
@@ -31,12 +26,7 @@ fn drift_detected_human_error_stands_alone() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(
         &machine,
@@ -44,12 +34,7 @@ fn drift_detected_human_error_stands_alone() {
         ".gitconfig",
         "[user]\nname = \"Repo\"\n",
     );
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     machine.write_file(".gitconfig", "[user]\nname = \"Drifted\"\n");
 
@@ -101,12 +86,7 @@ fn diff_shows_line_oriented_home_drift_without_syncing() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(
         &machine,
@@ -114,12 +94,7 @@ fn diff_shows_line_oriented_home_drift_without_syncing() {
         ".config/app.conf",
         "line one\nline two\n",
     );
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     machine.write_file(".config/app.conf", "line one\nchanged two\n");
 
@@ -155,29 +130,14 @@ fn view_summarizes_checked_in_scopes_and_files() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "all", ".gitconfig", "[user]\nname = Shared\n");
     merge_remote_scope_into(&machine, "all", "linux");
     merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
-    let view_output = machine.run("dotsync view");
-    assert!(
-        view_output.status.success(),
-        "{}",
-        render_output(&view_output)
-    );
+    let view_output = machine.run_ok("dotsync view");
     assert_stdout_snapshot(
         &view_output,
         "\
@@ -198,29 +158,14 @@ fn view_scope_shows_checked_in_file_tree() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "all", ".gitconfig", "[user]\nname = Shared\n");
     merge_remote_scope_into(&machine, "all", "linux");
     merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
-    let view_output = machine.run("dotsync view --scope mx-xps-cy");
-    assert!(
-        view_output.status.success(),
-        "{}",
-        render_output(&view_output)
-    );
+    let view_output = machine.run_ok("dotsync view --scope mx-xps-cy");
     assert_stdout_snapshot(
         &view_output,
         "\
@@ -236,29 +181,14 @@ fn view_file_shows_scopes_and_scoped_file_content() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "all", ".gitconfig", "[user]\nname = Shared\n");
     merge_remote_scope_into(&machine, "all", "linux");
     merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
-    let file_scopes_output = machine.run("dotsync view --file .gitconfig");
-    assert!(
-        file_scopes_output.status.success(),
-        "{}",
-        render_output(&file_scopes_output)
-    );
+    let file_scopes_output = machine.run_ok("dotsync view --file .gitconfig");
     assert_stdout_snapshot(
         &file_scopes_output,
         "\
@@ -270,12 +200,7 @@ mx-xps-cy
 ",
     );
 
-    let file_content_output = machine.run("dotsync view --scope mx-xps-cy --file .gitconfig");
-    assert!(
-        file_content_output.status.success(),
-        "{}",
-        render_output(&file_content_output)
-    );
+    let file_content_output = machine.run_ok("dotsync view --scope mx-xps-cy --file .gitconfig");
     assert_stdout_snapshot(&file_content_output, "[user]\nname = Shared\n");
 }
 
@@ -288,19 +213,9 @@ fn view_reaches_the_remote_once() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
     add_hyprland_scope(&machine);
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     let (view_output, git_calls) = machine.run_recording_git("dotsync view");
     assert!(
@@ -324,12 +239,7 @@ fn drift_detected_json_contract_stays_compatible() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(
         &machine,
@@ -337,12 +247,7 @@ fn drift_detected_json_contract_stays_compatible() {
         ".gitconfig",
         "[user]\nname = \"Repo\"\n",
     );
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     machine.write_file(".gitconfig", "[user]\nname = \"Drifted\"\n");
 
@@ -375,12 +280,7 @@ fn missing_state_file_disables_deletion() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(
         &machine,
@@ -388,23 +288,13 @@ fn missing_state_file_disables_deletion() {
         ".gitconfig",
         "[user]\nname = \"Max\"\n",
     );
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
     assert!(machine.file_exists(".gitconfig"));
 
     machine.delete_sync_state();
     remove_remote_scope_file(&machine, "mx-xps-cy", ".gitconfig");
 
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
     assert!(
         machine.file_exists(".gitconfig"),
         "without sync state, dotsync should fail safe and leave the previously managed file in home"
@@ -416,12 +306,7 @@ fn invalid_state_file_returns_clear_error() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     machine.write_sync_state_raw("not valid json\n");
 
@@ -464,12 +349,7 @@ fn invalid_sync_state_human_error_stands_alone() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     machine.write_sync_state_raw("not valid json\n");
 
@@ -514,12 +394,7 @@ fn sync_uses_state_machine_scope_even_if_checkout_changes() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(
         &machine,
@@ -527,12 +402,7 @@ fn sync_uses_state_machine_scope_even_if_checkout_changes() {
         ".config/machine-only.txt",
         "machine config\n",
     );
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
     assert_eq!(
         machine.read_file(".config/machine-only.txt"),
         "machine config\n"
@@ -547,12 +417,7 @@ fn sync_uses_state_machine_scope_even_if_checkout_changes() {
         bookmark_revision(&machine, "mx-xps-cy")
     ));
 
-    let sync_output = machine.run("dotsync --force");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync --force");
     assert_eq!(
         machine.read_file(".config/machine-only.txt"),
         "machine config\n",
@@ -565,12 +430,7 @@ fn v03_init_creates_hidden_repo_not_dotfiles() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    let init_output = machine.init_ok();
 
     assert!(
         machine
@@ -592,12 +452,7 @@ fn v03_plain_sync_ignores_unrelated_home_changes() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     machine.write_file("untracked-notes.txt", "leave me alone\n");
 
@@ -615,12 +470,7 @@ fn commit_with_no_paths_ignores_unmanaged_home_files() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     // An unmanaged file in home. `dotsync commit <scope> -m ...` with no paths
     // means "every managed file that changed", and nothing managed changed, so
@@ -668,12 +518,7 @@ fn continue_without_pause_returns_clear_error() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     let continue_output = machine.run("dotsync continue");
     assert_eq!(
@@ -694,36 +539,17 @@ fn abort_paused_cascade_restores_pre_pause_state_and_clears_pause() {
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
-    let init_a = machine_a.init();
-    assert!(init_a.status.success(), "{}", render_output(&init_a));
-    let init_b = machine_b.init();
-    assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a_after_join = machine_a.run("dotsync --force");
-    assert!(
-        sync_a_after_join.status.success(),
-        "{}",
-        render_output(&sync_a_after_join)
-    );
+    machine_a.init_ok();
+    machine_b.init_ok();
+    machine_a.run_ok("dotsync --force");
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
-    let commit_base = machine_a.run("dotsync commit all -m 'add base config' -- .config/app.conf");
-    assert!(
-        commit_base.status.success(),
-        "{}",
-        render_output(&commit_base)
-    );
+    machine_a.run_ok("dotsync commit all -m 'add base config' -- .config/app.conf");
 
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
-    let commit_linux =
-        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
-    assert!(
-        commit_linux.status.success(),
-        "{}",
-        render_output(&commit_linux)
-    );
+    machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
 
-    let sync_b = machine_b.run("dotsync");
-    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.run_ok("dotsync");
     let all_before_pause = bookmark_revision(&machine_b, "all");
     let linux_before_pause = bookmark_revision(&machine_b, "linux");
     let machine_before_pause = bookmark_revision(&machine_b, "goof-b");
@@ -738,8 +564,7 @@ fn abort_paused_cascade_restores_pre_pause_state_and_clears_pause() {
         render_output(&conflict)
     );
 
-    let aborted = machine_b.run("dotsync abort");
-    assert!(aborted.status.success(), "{}", render_output(&aborted));
+    let aborted = machine_b.run_ok("dotsync abort");
     // Abort reverts home, so it says what it reverted: the edit that started
     // the cascade is gone, and that is the point of the command.
     assert_stderr_snapshot(
@@ -767,18 +592,11 @@ dotsync: aborted the cascade paused at linux and synced 2 file(s)
         "setting = \"linux\"\n"
     );
 
-    let status = machine_b.run("dotsync status");
-    assert!(status.status.success(), "{}", render_output(&status));
+    let status = machine_b.run_ok("dotsync status");
     assert_stderr_snapshot(&status, "dotsync: no changes for goof-b\n");
 
     machine_b.write_file(".config/other.conf", "other = true\n");
-    let commit_after_abort =
-        machine_b.run("dotsync commit goof-b -m 'commit after abort' -- .config/other.conf");
-    assert!(
-        commit_after_abort.status.success(),
-        "{}",
-        render_output(&commit_after_abort)
-    );
+    machine_b.run_ok("dotsync commit goof-b -m 'commit after abort' -- .config/other.conf");
 }
 
 #[test]
@@ -787,38 +605,19 @@ fn abort_paused_cascade_restores_non_conflicting_selected_paths() {
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
-    let init_a = machine_a.init();
-    assert!(init_a.status.success(), "{}", render_output(&init_a));
-    let init_b = machine_b.init();
-    assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a_after_join = machine_a.run("dotsync --force");
-    assert!(
-        sync_a_after_join.status.success(),
-        "{}",
-        render_output(&sync_a_after_join)
-    );
+    machine_a.init_ok();
+    machine_b.init_ok();
+    machine_a.run_ok("dotsync --force");
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
     machine_a.write_file(".config/other.conf", "other = false\n");
-    let commit_base = machine_a
-        .run("dotsync commit all -m 'add base config' -- .config/app.conf .config/other.conf");
-    assert!(
-        commit_base.status.success(),
-        "{}",
-        render_output(&commit_base)
-    );
+    machine_a
+        .run_ok("dotsync commit all -m 'add base config' -- .config/app.conf .config/other.conf");
 
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
-    let commit_linux =
-        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
-    assert!(
-        commit_linux.status.success(),
-        "{}",
-        render_output(&commit_linux)
-    );
+    machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
 
-    let sync_b = machine_b.run("dotsync");
-    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.run_ok("dotsync");
 
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     machine_b.write_file(".config/other.conf", "other = true\n");
@@ -831,8 +630,7 @@ fn abort_paused_cascade_restores_non_conflicting_selected_paths() {
         render_output(&conflict)
     );
 
-    let aborted = machine_b.run("dotsync abort");
-    assert!(aborted.status.success(), "{}", render_output(&aborted));
+    machine_b.run_ok("dotsync abort");
 
     assert_eq!(
         machine_b.read_file(".config/app.conf"),
@@ -840,8 +638,7 @@ fn abort_paused_cascade_restores_non_conflicting_selected_paths() {
     );
     assert_eq!(machine_b.read_file(".config/other.conf"), "other = false\n");
 
-    let status = machine_b.run("dotsync status");
-    assert!(status.status.success(), "{}", render_output(&status));
+    let status = machine_b.run_ok("dotsync status");
     assert_stderr_snapshot(&status, "dotsync: no changes for goof-b\n");
 }
 
@@ -850,21 +647,11 @@ fn explicit_commit_command_adds_file_to_scope_and_syncs() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     machine.write_file(".gitconfig", "[user]\nname = \"Max\"\n");
 
-    let commit_output = machine.run("dotsync commit all -m 'add gitconfig' -- .gitconfig");
-    assert!(
-        commit_output.status.success(),
-        "{}",
-        render_output(&commit_output)
-    );
+    machine.run_ok("dotsync commit all -m 'add gitconfig' -- .gitconfig");
 
     assert_eq!(
         read_bookmark_file_contents(&machine, "all", ".gitconfig"),
@@ -901,12 +688,7 @@ fn commit_path_that_matches_nothing_is_an_error() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     machine.write_file(".apprc", "ui_theme = dark\n");
     fs::create_dir_all(machine.home_dir.join("empty-dir")).expect("create empty dir");
@@ -984,12 +766,7 @@ fn commit_path_that_escapes_home_is_an_error() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     // Dotsync records the path you name verbatim as a repo path, and every
     // machine on that scope writes it back out under its own home. A path that
@@ -1028,12 +805,7 @@ fn committing_the_scope_graph_outside_all_is_an_error() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     let config_path = ".config/dotsync/config.toml";
     let original = machine.read_file(config_path);
@@ -1069,14 +841,9 @@ fn committing_the_scope_graph_outside_all_is_an_error() {
     );
 
     // The same change is fine on `all`, which is the only place it is read.
-    let right_scope = machine.run(&format!(
+    machine.run_ok(&format!(
         "dotsync commit all -m 'describe hyprland' -- {config_path}"
     ));
-    assert!(
-        right_scope.status.success(),
-        "{}",
-        render_output(&right_scope)
-    );
     assert!(
         read_bookmark_file_contents(&machine, "all", config_path)
             .contains("# hyprland: wayland compositor config"),
@@ -1089,12 +856,7 @@ fn commit_reports_every_unusable_path_at_once() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     machine.write_file(".apprc", "ui_theme = dark\n");
 
@@ -1129,12 +891,7 @@ fn commit_path_inside_dotsyncs_own_state_is_an_error() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     let sync_state = machine.sync_state_relative_path();
     let sync_state = sync_state.to_str().expect("sync state path is UTF-8");
@@ -1204,29 +961,14 @@ fn commit_explicit_path_adds_file_to_scope_and_syncs() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "mx-xps-cy", ".config/existing.txt", "existing\n");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     machine.write_file(".gitconfig", "[user]\nname = \"Max\"\n");
 
-    let commit_output = machine.run("dotsync commit all -m 'add gitconfig' -- .gitconfig");
-    assert!(
-        commit_output.status.success(),
-        "{}",
-        render_output(&commit_output)
-    );
+    machine.run_ok("dotsync commit all -m 'add gitconfig' -- .gitconfig");
 
     assert_eq!(
         read_bookmark_file_contents(&machine, "all", ".gitconfig"),
@@ -1245,20 +987,10 @@ fn commit_modifies_existing_file_on_scope() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "linux", ".bashrc", "export PATH=\"$PATH\"\n");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     machine.write_file(".bashrc", "export PATH=\"$HOME/bin:$PATH\"\n");
     machine.write_sync_state_raw(&format!(
@@ -1266,12 +998,7 @@ fn commit_modifies_existing_file_on_scope() {
         bookmark_revision(&machine, "all")
     ));
 
-    let commit_output = machine.run("dotsync commit linux -m 'update bashrc' -- .bashrc");
-    assert!(
-        commit_output.status.success(),
-        "{}",
-        render_output(&commit_output)
-    );
+    machine.run_ok("dotsync commit linux -m 'update bashrc' -- .bashrc");
 
     assert_eq!(
         read_bookmark_file_contents(&machine, "linux", ".bashrc"),
@@ -1292,32 +1019,17 @@ fn commit_deletes_file_from_scope() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "all", ".config/remove-me.txt", "delete me\n");
     merge_remote_scope_into(&machine, "all", "linux");
     merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
     assert!(machine.file_exists(".config/remove-me.txt"));
 
     machine.delete_file(".config/remove-me.txt");
 
-    let commit_output = machine.run("dotsync commit all -m 'remove file' -- .config/remove-me.txt");
-    assert!(
-        commit_output.status.success(),
-        "{}",
-        render_output(&commit_output)
-    );
+    machine.run_ok("dotsync commit all -m 'remove file' -- .config/remove-me.txt");
 
     assert!(!bookmark_has_file(&machine, "all", ".config/remove-me.txt"));
     assert!(!bookmark_has_file(
@@ -1333,12 +1045,7 @@ fn commit_cascades_through_all_descendants() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     add_hyprland_scope(&machine);
     seed_remote_scope_file(&machine, "all", ".config/all-only.txt", "all\n");
@@ -1349,22 +1056,11 @@ fn commit_cascades_through_all_descendants() {
         ".config/hyprland-only.txt",
         "hyprland\n",
     );
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     machine.write_file(".config/shared.txt", "shared everywhere\n");
 
-    let commit_output =
-        machine.run("dotsync commit all -m 'add shared file' -- .config/shared.txt");
-    assert!(
-        commit_output.status.success(),
-        "{}",
-        render_output(&commit_output)
-    );
+    machine.run_ok("dotsync commit all -m 'add shared file' -- .config/shared.txt");
 
     for scope in ["all", "linux", "hyprland", "mx-xps-cy"] {
         assert_eq!(
@@ -1381,34 +1077,23 @@ fn multiple_machines_can_contribute_to_all_without_losing_changes() {
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
-    let init_a = machine_a.init();
-    assert!(init_a.status.success(), "{}", render_output(&init_a));
-    let init_b = machine_b.init();
-    assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a_after_join = machine_a.run("dotsync --force");
-    assert!(
-        sync_a_after_join.status.success(),
-        "{}",
-        render_output(&sync_a_after_join)
-    );
+    machine_a.init_ok();
+    machine_b.init_ok();
+    machine_a.run_ok("dotsync --force");
 
     machine_a.write_file(".config/shared-a.conf", "from machine a\n");
-    let commit_a = machine_a.run("dotsync commit all -m 'add shared a' -- .config/shared-a.conf");
-    assert!(commit_a.status.success(), "{}", render_output(&commit_a));
+    machine_a.run_ok("dotsync commit all -m 'add shared a' -- .config/shared-a.conf");
 
-    let sync_b = machine_b.run("dotsync");
-    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.run_ok("dotsync");
     assert_eq!(
         machine_b.read_file(".config/shared-a.conf"),
         "from machine a\n"
     );
 
     machine_b.write_file(".config/shared-b.conf", "from machine b\n");
-    let commit_b = machine_b.run("dotsync commit all -m 'add shared b' -- .config/shared-b.conf");
-    assert!(commit_b.status.success(), "{}", render_output(&commit_b));
+    machine_b.run_ok("dotsync commit all -m 'add shared b' -- .config/shared-b.conf");
 
-    let sync_a = machine_a.run("dotsync");
-    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    machine_a.run_ok("dotsync");
     assert_eq!(
         machine_a.read_file(".config/shared-a.conf"),
         "from machine a\n"
@@ -1441,45 +1126,22 @@ fn concurrent_same_scope_file_edits_require_resolution() {
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
-    let init_a = machine_a.init();
-    assert!(init_a.status.success(), "{}", render_output(&init_a));
-    let init_b = machine_b.init();
-    assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a_after_join = machine_a.run("dotsync --force");
-    assert!(
-        sync_a_after_join.status.success(),
-        "{}",
-        render_output(&sync_a_after_join)
-    );
+    machine_a.init_ok();
+    machine_b.init_ok();
+    machine_a.run_ok("dotsync --force");
 
     // Establish the shared base version first.
     machine_a.write_file(".config/shared.conf", "setting = \"base\"\n");
-    let commit_base =
-        machine_a.run("dotsync commit all -m 'add shared base' -- .config/shared.conf");
-    assert!(
-        commit_base.status.success(),
-        "{}",
-        render_output(&commit_base)
-    );
+    machine_a.run_ok("dotsync commit all -m 'add shared base' -- .config/shared.conf");
 
     // Both machines start the conflict scenario from the same synced base.
-    let sync_a_to_base = machine_a.run("dotsync");
-    assert!(
-        sync_a_to_base.status.success(),
-        "{}",
-        render_output(&sync_a_to_base)
-    );
+    machine_a.run_ok("dotsync");
     assert_eq!(
         machine_a.read_file(".config/shared.conf"),
         "setting = \"base\"\n"
     );
 
-    let sync_b_to_base = machine_b.run("dotsync");
-    assert!(
-        sync_b_to_base.status.success(),
-        "{}",
-        render_output(&sync_b_to_base)
-    );
+    machine_b.run_ok("dotsync");
     assert_eq!(
         machine_b.read_file(".config/shared.conf"),
         "setting = \"base\"\n"
@@ -1498,9 +1160,7 @@ fn concurrent_same_scope_file_edits_require_resolution() {
         "machine B must make its own local edit before machine A publishes"
     );
 
-    let commit_a =
-        machine_a.run("dotsync commit all -m 'update shared from a' -- .config/shared.conf");
-    assert!(commit_a.status.success(), "{}", render_output(&commit_a));
+    machine_a.run_ok("dotsync commit all -m 'update shared from a' -- .config/shared.conf");
     assert_eq!(
         machine_b.read_file(".config/shared.conf"),
         "setting = \"all-b\"\n",
@@ -1553,15 +1213,13 @@ Correct flow:
     );
 
     machine_b.write_file(".config/shared.conf", "setting = \"all-a+all-b\"\n");
-    let continued = machine_b.run("dotsync continue");
-    assert!(continued.status.success(), "{}", render_output(&continued));
+    machine_b.run_ok("dotsync continue");
     assert_eq!(
         machine_b.read_file(".config/shared.conf"),
         "setting = \"all-a+all-b\"\n"
     );
 
-    let sync_a = machine_a.run("dotsync");
-    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    machine_a.run_ok("dotsync");
     assert_eq!(
         machine_a.read_file(".config/shared.conf"),
         "setting = \"all-a+all-b\"\n"
@@ -1578,36 +1236,17 @@ fn shared_scope_conflict_pauses_and_continue_applies_resolution_to_machine_homes
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
-    let init_a = machine_a.init();
-    assert!(init_a.status.success(), "{}", render_output(&init_a));
-    let init_b = machine_b.init();
-    assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a_after_join = machine_a.run("dotsync --force");
-    assert!(
-        sync_a_after_join.status.success(),
-        "{}",
-        render_output(&sync_a_after_join)
-    );
+    machine_a.init_ok();
+    machine_b.init_ok();
+    machine_a.run_ok("dotsync --force");
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
-    let commit_base = machine_a.run("dotsync commit all -m 'add base config' -- .config/app.conf");
-    assert!(
-        commit_base.status.success(),
-        "{}",
-        render_output(&commit_base)
-    );
+    machine_a.run_ok("dotsync commit all -m 'add base config' -- .config/app.conf");
 
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
-    let commit_linux =
-        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
-    assert!(
-        commit_linux.status.success(),
-        "{}",
-        render_output(&commit_linux)
-    );
+    machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
 
-    let sync_b = machine_b.run("dotsync");
-    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.run_ok("dotsync");
     assert_eq!(
         machine_b.read_file(".config/app.conf"),
         "setting = \"linux\"\n"
@@ -1651,15 +1290,13 @@ Correct flow:
     );
 
     machine_b.write_file(".config/app.conf", "setting = \"all+linux\"\n");
-    let continued = machine_b.run("dotsync continue");
-    assert!(continued.status.success(), "{}", render_output(&continued));
+    machine_b.run_ok("dotsync continue");
     assert_eq!(
         machine_b.read_file(".config/app.conf"),
         "setting = \"all+linux\"\n"
     );
 
-    let sync_a = machine_a.run("dotsync");
-    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    machine_a.run_ok("dotsync");
     assert_eq!(
         machine_a.read_file(".config/app.conf"),
         "setting = \"all+linux\"\n"
@@ -1762,8 +1399,7 @@ fn continue_refuses_a_pause_that_predates_the_resolution_check() {
 
     // The way out has to actually work: abort reads nothing the old pause file
     // lacks.
-    let aborted = machine.run("dotsync abort");
-    assert!(aborted.status.success(), "{}", render_output(&aborted));
+    machine.run_ok("dotsync abort");
     assert_eq!(
         machine.read_file(".config/app.conf"),
         "setting = \"linux\"\n",
@@ -1823,8 +1459,7 @@ Correct flow:
 
     // The guard is not a wedge: a real resolution still finishes the cascade.
     machine_b.write_file(".config/app.conf", "setting = \"all+linux\"\n");
-    let resolved = machine_b.run("dotsync continue");
-    assert!(resolved.status.success(), "{}", render_output(&resolved));
+    machine_b.run_ok("dotsync continue");
     assert_eq!(
         read_bookmark_file_contents(&machine_b, "linux", ".config/app.conf"),
         "setting = \"all+linux\"\n"
@@ -1837,38 +1472,19 @@ fn continue_preserves_non_conflicting_parent_changes_from_paused_merge() {
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
-    let init_a = machine_a.init();
-    assert!(init_a.status.success(), "{}", render_output(&init_a));
-    let init_b = machine_b.init();
-    assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a_after_join = machine_a.run("dotsync --force");
-    assert!(
-        sync_a_after_join.status.success(),
-        "{}",
-        render_output(&sync_a_after_join)
-    );
+    machine_a.init_ok();
+    machine_b.init_ok();
+    machine_a.run_ok("dotsync --force");
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
     machine_a.write_file(".config/shared.conf", "shared = \"base\"\n");
-    let commit_base = machine_a
-        .run("dotsync commit all -m 'add base config' -- .config/app.conf .config/shared.conf");
-    assert!(
-        commit_base.status.success(),
-        "{}",
-        render_output(&commit_base)
-    );
+    machine_a
+        .run_ok("dotsync commit all -m 'add base config' -- .config/app.conf .config/shared.conf");
 
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
-    let commit_linux =
-        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
-    assert!(
-        commit_linux.status.success(),
-        "{}",
-        render_output(&commit_linux)
-    );
+    machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
 
-    let sync_b = machine_b.run("dotsync");
-    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.run_ok("dotsync");
     assert_eq!(
         machine_b.read_file(".config/app.conf"),
         "setting = \"linux\"\n"
@@ -1891,8 +1507,7 @@ fn continue_preserves_non_conflicting_parent_changes_from_paused_merge() {
     );
 
     machine_b.write_file(".config/app.conf", "setting = \"all+linux\"\n");
-    let continued = machine_b.run("dotsync continue");
-    assert!(continued.status.success(), "{}", render_output(&continued));
+    machine_b.run_ok("dotsync continue");
     assert_eq!(
         machine_b.read_file(".config/app.conf"),
         "setting = \"all+linux\"\n"
@@ -1902,8 +1517,7 @@ fn continue_preserves_non_conflicting_parent_changes_from_paused_merge() {
         "shared = \"updated\"\n"
     );
 
-    let sync_a = machine_a.run("dotsync");
-    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    machine_a.run_ok("dotsync");
     assert_eq!(
         machine_a.read_file(".config/app.conf"),
         "setting = \"all+linux\"\n"
@@ -1928,36 +1542,17 @@ fn commit_while_cascade_paused_is_blocked_without_mutating_scope() {
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
-    let init_a = machine_a.init();
-    assert!(init_a.status.success(), "{}", render_output(&init_a));
-    let init_b = machine_b.init();
-    assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a_after_join = machine_a.run("dotsync --force");
-    assert!(
-        sync_a_after_join.status.success(),
-        "{}",
-        render_output(&sync_a_after_join)
-    );
+    machine_a.init_ok();
+    machine_b.init_ok();
+    machine_a.run_ok("dotsync --force");
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
-    let commit_base = machine_a.run("dotsync commit all -m 'add base config' -- .config/app.conf");
-    assert!(
-        commit_base.status.success(),
-        "{}",
-        render_output(&commit_base)
-    );
+    machine_a.run_ok("dotsync commit all -m 'add base config' -- .config/app.conf");
 
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
-    let commit_linux =
-        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
-    assert!(
-        commit_linux.status.success(),
-        "{}",
-        render_output(&commit_linux)
-    );
+    machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
 
-    let sync_b = machine_b.run("dotsync");
-    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.run_ok("dotsync");
 
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     let conflict =
@@ -2020,22 +1615,11 @@ fn commit_to_machine_scope_does_not_cascade() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     machine.write_file(".config/machine-local.txt", "machine only\n");
 
-    let commit_output =
-        machine.run("dotsync commit mx-xps-cy -m 'add machine file' -- .config/machine-local.txt");
-    assert!(
-        commit_output.status.success(),
-        "{}",
-        render_output(&commit_output)
-    );
+    machine.run_ok("dotsync commit mx-xps-cy -m 'add machine file' -- .config/machine-local.txt");
 
     assert_eq!(
         read_bookmark_file_contents(&machine, "mx-xps-cy", ".config/machine-local.txt"),
@@ -2058,12 +1642,7 @@ fn commit_without_paths_imports_all_diffs() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(
         &machine,
@@ -2071,21 +1650,11 @@ fn commit_without_paths_imports_all_diffs() {
         ".config/app.conf",
         "setting = \"original\"\n",
     );
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     machine.write_file(".config/app.conf", "setting = \"updated\"\n");
 
-    let commit_output = machine.run("dotsync commit mx-xps-cy -m update");
-    assert!(
-        commit_output.status.success(),
-        "{}",
-        render_output(&commit_output)
-    );
+    machine.run_ok("dotsync commit mx-xps-cy -m update");
 
     assert_eq!(
         read_bookmark_file_contents(&machine, "mx-xps-cy", ".config/app.conf"),
@@ -2098,20 +1667,10 @@ fn commit_noop_when_no_changes() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "mx-xps-cy", ".config/unchanged.txt", "same\n");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     let revision_before = bookmark_revision(&machine, "mx-xps-cy");
 
@@ -2132,12 +1691,7 @@ fn noop_commit_names_the_scope_it_targeted() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     // The report for a commit that found nothing was default-constructed, so
     // it did not carry the scope the agent had just named - and the message
@@ -2161,12 +1715,7 @@ fn commit_invalid_scope_errors() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     let commit_output = machine.run("dotsync commit nonexistent -m test -- .gitconfig");
     assert_eq!(
@@ -2296,20 +1845,10 @@ fn status_shows_modified_file() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     machine.write_file(".bashrc", "export DOTSYNC=modified\n");
 
@@ -2335,12 +1874,7 @@ fn force_is_refused_with_one_message_wherever_it_is_meaningless() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     // `--force` reaches exactly one decision: whether to overwrite drifted
     // home files. On the commands that never write home it means nothing, and
@@ -2380,25 +1914,10 @@ fn force_is_refused_with_one_message_wherever_it_is_meaningless() {
 
     // The commands that do write home keep it, in both positions.
     machine.write_file(".apprc", "ui_theme = dark\n");
-    let commit_output = machine.run("dotsync commit all -m 'add apprc' --force -- .apprc");
-    assert!(
-        commit_output.status.success(),
-        "{}",
-        render_output(&commit_output)
-    );
+    machine.run_ok("dotsync commit all -m 'add apprc' --force -- .apprc");
     machine.write_file(".apprc", "ui_theme = light\n");
-    let commit_before = machine.run("dotsync --force commit all -m 'light theme' -- .apprc");
-    assert!(
-        commit_before.status.success(),
-        "{}",
-        render_output(&commit_before)
-    );
-    let sync_output = machine.run("dotsync --force");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync --force commit all -m 'light theme' -- .apprc");
+    machine.run_ok("dotsync --force");
 }
 
 #[test]
@@ -2406,12 +1925,7 @@ fn output_format_is_accepted_after_the_subcommand() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     // `--force` is global and `--output` was not, so the two flags on the same
     // struct had opposite positional rules and neither one said so.
@@ -2473,20 +1987,10 @@ fn status_shows_deleted_file() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     machine.delete_file(".bashrc");
 
@@ -2512,20 +2016,10 @@ fn status_clean_shows_no_changes() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     let status_output = machine.run("dotsync status");
     assert_eq!(
@@ -2543,20 +2037,10 @@ fn status_json_contract() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     machine.write_file(".bashrc", "export DOTSYNC=modified\n");
 
@@ -2593,12 +2077,7 @@ fn status_ignores_unmanaged_files() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     machine.write_file(".unmanaged-status-test", "this file is unmanaged\n");
 
@@ -2622,12 +2101,7 @@ fn interrupted_push_reports_that_scope_updates_were_not_pushed() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     machine.write_file(".config/fish/dev-certs.fish", "set -gx DEV_CERTS 1\n");
     block_remote_pushes(&machine);
@@ -2669,12 +2143,7 @@ fn status_works_while_local_scopes_are_ahead_of_remote() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     interrupt_push_after_cascade(
         &machine,
@@ -2697,12 +2166,7 @@ fn view_works_while_local_scopes_are_ahead_of_remote() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     interrupt_push_after_cascade(
         &machine,
@@ -2729,12 +2193,7 @@ fn diff_works_while_local_scopes_are_ahead_of_remote() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     interrupt_push_after_cascade(
         &machine,
@@ -2756,12 +2215,7 @@ fn plain_sync_pushes_scopes_left_unpushed_by_an_interrupted_commit() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     interrupt_push_after_cascade(
         &machine,
@@ -2794,12 +2248,7 @@ fn commit_with_nothing_to_commit_still_publishes_unpushed_scopes() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     interrupt_push_after_cascade(
         &machine,
@@ -2810,12 +2259,7 @@ fn commit_with_nothing_to_commit_still_publishes_unpushed_scopes() {
     // Committing a path that already matches the scope adds no history — but
     // the run still has to publish what the interrupted run left behind.
     let commit_output = machine
-        .run("dotsync --output json commit all -m 'no change' -- .config/fish/dev-certs.fish");
-    assert!(
-        commit_output.status.success(),
-        "{}",
-        render_output(&commit_output)
-    );
+        .run_ok("dotsync --output json commit all -m 'no change' -- .config/fish/dev-certs.fish");
 
     for scope in ["all", "linux", "mx-xps-cy"] {
         assert_eq!(
@@ -2843,12 +2287,7 @@ fn commit_pushes_scopes_left_unpushed_by_an_interrupted_commit() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     interrupt_push_after_cascade(
         &machine,
@@ -2888,12 +2327,7 @@ fn drift_stop_during_commit_does_not_strand_unpushed_history() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(
         &machine,
@@ -2901,12 +2335,7 @@ fn drift_stop_during_commit_does_not_strand_unpushed_history() {
         ".gitconfig",
         "[user]\nname = \"Repo\"\n",
     );
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     // Unrelated drift that the commit does not select: the home sync will stop
     // on it after the cascade transaction has already created history.
@@ -2942,35 +2371,16 @@ fn continue_json_reports_unpushed_scopes() {
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
-    let init_a = machine_a.init();
-    assert!(init_a.status.success(), "{}", render_output(&init_a));
-    let init_b = machine_b.init();
-    assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a_after_join = machine_a.run("dotsync --force");
-    assert!(
-        sync_a_after_join.status.success(),
-        "{}",
-        render_output(&sync_a_after_join)
-    );
+    machine_a.init_ok();
+    machine_b.init_ok();
+    machine_a.run_ok("dotsync --force");
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
-    let commit_base = machine_a.run("dotsync commit all -m 'add base config' -- .config/app.conf");
-    assert!(
-        commit_base.status.success(),
-        "{}",
-        render_output(&commit_base)
-    );
+    machine_a.run_ok("dotsync commit all -m 'add base config' -- .config/app.conf");
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
-    let commit_linux =
-        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
-    assert!(
-        commit_linux.status.success(),
-        "{}",
-        render_output(&commit_linux)
-    );
+    machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
 
-    let sync_b = machine_b.run("dotsync");
-    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.run_ok("dotsync");
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     let conflict =
         machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
@@ -2983,9 +2393,8 @@ fn continue_json_reports_unpushed_scopes() {
 
     machine_b.write_file(".config/app.conf", "setting = \"all+linux\"\n");
     block_remote_pushes(&machine_b);
-    let continued = machine_b.run("dotsync --output json continue");
+    let continued = machine_b.run_ok("dotsync --output json continue");
     allow_remote_pushes(&machine_b);
-    assert!(continued.status.success(), "{}", render_output(&continued));
     assert_ne!(
         bookmark_revision(&machine_b, "all"),
         remote_branch_revision(&machine_b, "all"),
@@ -3019,35 +2428,16 @@ fn paused_cascade_withholds_publishing_until_it_is_resolved() {
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
-    let init_a = machine_a.init();
-    assert!(init_a.status.success(), "{}", render_output(&init_a));
-    let init_b = machine_b.init();
-    assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a_after_join = machine_a.run("dotsync --force");
-    assert!(
-        sync_a_after_join.status.success(),
-        "{}",
-        render_output(&sync_a_after_join)
-    );
+    machine_a.init_ok();
+    machine_b.init_ok();
+    machine_a.run_ok("dotsync --force");
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
-    let commit_base = machine_a.run("dotsync commit all -m 'add base config' -- .config/app.conf");
-    assert!(
-        commit_base.status.success(),
-        "{}",
-        render_output(&commit_base)
-    );
+    machine_a.run_ok("dotsync commit all -m 'add base config' -- .config/app.conf");
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
-    let commit_linux =
-        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
-    assert!(
-        commit_linux.status.success(),
-        "{}",
-        render_output(&commit_linux)
-    );
+    machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
 
-    let sync_b = machine_b.run("dotsync");
-    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.run_ok("dotsync");
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     let conflict =
         machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
@@ -3118,12 +2508,7 @@ fn diverged_leaf_scope_keeps_the_local_commit_and_the_home_file() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     // A leaf scope diverges on its own: nothing else is local-ahead, so
     // reconciliation reaches this scope with no other scope to stop on first.
@@ -3165,12 +2550,7 @@ fn diverged_scope_bookmark_is_reported_as_divergence_not_as_overwrite() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     interrupt_push_after_cascade(
         &machine,
@@ -3221,12 +2601,7 @@ fn selected_add_modify_and_delete_are_applied_without_touching_unselected_change
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(
         &machine,
@@ -3237,23 +2612,13 @@ fn selected_add_modify_and_delete_are_applied_without_touching_unselected_change
     seed_remote_scope_file(&machine, "all", ".config/fish/removed.fish", "remove me\n");
     merge_remote_scope_into(&machine, "all", "linux");
     merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     machine.write_file(".config/fish/config.fish", "set -g fish_greeting off\n");
     machine.write_file(".config/fish/completions/git.fish", "complete -c git\n");
     machine.delete_file(".config/fish/removed.fish");
 
-    let commit_output = machine.run("dotsync commit all -m 'update fish dir' -- .config/fish/");
-    assert!(
-        commit_output.status.success(),
-        "{}",
-        render_output(&commit_output)
-    );
+    machine.run_ok("dotsync commit all -m 'update fish dir' -- .config/fish/");
 
     assert_eq!(
         read_bookmark_file_contents(&machine, "all", ".config/fish/config.fish"),
@@ -3297,8 +2662,7 @@ fn a_stale_home_file_cannot_be_committed_over_another_machines_change() {
     // B adds a line and publishes it. A has done nothing since the seed: its
     // home `.apprc` is not edited, it is simply behind.
     machine_b.write_file(".apprc", "ui_theme = dark\nfont = mono\nsize = 14\n");
-    let commit_b = machine_b.run("dotsync commit all -m 'add size' -- .apprc");
-    assert!(commit_b.status.success(), "{}", render_output(&commit_b));
+    machine_b.run_ok("dotsync commit all -m 'add size' -- .apprc");
     assert_eq!(
         remote_branch_file_contents(&machine_b, "all", ".apprc"),
         "ui_theme = dark\nfont = mono\nsize = 14\n"
@@ -3307,8 +2671,7 @@ fn a_stale_home_file_cannot_be_committed_over_another_machines_change() {
     // The taught workflow starts with `status`, and every dotsync command
     // fetches on entry. Whatever `status` reports, the commit that follows must
     // not re-record A's older content on top of B's published change.
-    let status_a = machine_a.run("dotsync status");
-    assert!(status_a.status.success(), "{}", render_output(&status_a));
+    machine_a.run_ok("dotsync status");
 
     let commit_a = machine_a.run("dotsync commit all -m 'commit what status showed' -- .apprc");
     assert_eq!(
@@ -3334,8 +2697,7 @@ fn a_stale_home_file_cannot_be_committed_over_another_machines_change() {
     );
 
     // The taught recovery works: sync, then edit, then commit.
-    let sync_a = machine_a.run("dotsync");
-    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    machine_a.run_ok("dotsync");
     assert_eq!(
         machine_a.read_file(".apprc"),
         "ui_theme = dark\nfont = mono\nsize = 14\n"
@@ -3348,27 +2710,17 @@ fn concurrent_edits_still_require_resolution_after_an_intervening_status() {
     let (machine_a, machine_b) = two_synced_machines(&harness);
 
     machine_a.write_file(".config/shared.conf", "setting = \"base\"\n");
-    let commit_base =
-        machine_a.run("dotsync commit all -m 'add shared base' -- .config/shared.conf");
-    assert!(
-        commit_base.status.success(),
-        "{}",
-        render_output(&commit_base)
-    );
-    let sync_b = machine_b.run("dotsync");
-    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_a.run_ok("dotsync commit all -m 'add shared base' -- .config/shared.conf");
+    machine_b.run_ok("dotsync");
 
     // Two genuinely different edits to one file on one scope.
     machine_a.write_file(".config/shared.conf", "setting = \"all-a\"\n");
     machine_b.write_file(".config/shared.conf", "setting = \"all-b\"\n");
-    let commit_a =
-        machine_a.run("dotsync commit all -m 'update shared from a' -- .config/shared.conf");
-    assert!(commit_a.status.success(), "{}", render_output(&commit_a));
+    machine_a.run_ok("dotsync commit all -m 'update shared from a' -- .config/shared.conf");
 
     // The read-only command that the workflow tells B to run first. It must not
     // turn a genuine two-sided conflict into a silent overwrite of A's edit.
-    let status_b = machine_b.run("dotsync status");
-    assert!(status_b.status.success(), "{}", render_output(&status_b));
+    machine_b.run_ok("dotsync status");
 
     let conflict =
         machine_b.run("dotsync commit all -m 'update shared from b' -- .config/shared.conf");
@@ -3390,8 +2742,7 @@ fn concurrent_edits_still_require_resolution_after_an_intervening_status() {
     );
 
     machine_b.write_file(".config/shared.conf", "setting = \"all-a+all-b\"\n");
-    let continued = machine_b.run("dotsync continue");
-    assert!(continued.status.success(), "{}", render_output(&continued));
+    machine_b.run_ok("dotsync continue");
     assert_eq!(
         remote_branch_file_contents(&machine_b, "all", ".config/shared.conf"),
         "setting = \"all-a+all-b\"\n"
@@ -3405,13 +2756,11 @@ fn a_remote_advance_is_reported_as_incoming_by_status_diff_and_sync() {
     seed_shared_apprc(&machine_a, &machine_b);
 
     machine_b.write_file(".apprc", "ui_theme = light\nfont = mono\n");
-    let commit_b = machine_b.run("dotsync commit all -m 'light theme' -- .apprc");
-    assert!(commit_b.status.success(), "{}", render_output(&commit_b));
+    machine_b.run_ok("dotsync commit all -m 'light theme' -- .apprc");
 
     // A is merely behind: nothing in its home changed. `status`, `diff` and
     // plain `dotsync` have to agree about that.
-    let status_a = machine_a.run("dotsync status");
-    assert!(status_a.status.success(), "{}", render_output(&status_a));
+    let status_a = machine_a.run_ok("dotsync status");
     assert_stderr_snapshot(
         &status_a,
         "\
@@ -3420,12 +2769,7 @@ dotsync: 1 incoming file(s) for goof-a — plain `dotsync` applies these
 ",
     );
 
-    let status_json = machine_a.run("dotsync --output json status");
-    assert!(
-        status_json.status.success(),
-        "{}",
-        render_output(&status_json)
-    );
+    let status_json = machine_a.run_ok("dotsync --output json status");
     let json = parse_stdout_json(&status_json);
     assert_eq!(
         json["changes"].as_array().map(Vec::len),
@@ -3444,8 +2788,7 @@ dotsync: 1 incoming file(s) for goof-a — plain `dotsync` applies these
     );
     assert_stderr_snapshot(&diff_a, "dotsync: no changes for goof-a\n");
 
-    let sync_a = machine_a.run("dotsync");
-    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    machine_a.run_ok("dotsync");
     assert_eq!(
         machine_a.read_file(".apprc"),
         "ui_theme = light\nfont = mono\n"
@@ -3461,8 +2804,7 @@ fn an_untracked_home_file_is_not_overwritten_by_an_incoming_add() {
     machine_a.write_file(".newfile", "mine\n");
 
     machine_b.write_file(".newfile", "theirs\n");
-    let commit_b = machine_b.run("dotsync commit all -m 'add newfile' -- .newfile");
-    assert!(commit_b.status.success(), "{}", render_output(&commit_b));
+    machine_b.run_ok("dotsync commit all -m 'add newfile' -- .newfile");
 
     let sync_a = machine_a.run("dotsync");
     assert_eq!(
@@ -3477,8 +2819,7 @@ fn an_untracked_home_file_is_not_overwritten_by_an_incoming_add() {
         "dotsync must not silently overwrite home content it has never seen"
     );
 
-    let forced = machine_a.run("dotsync --force");
-    assert!(forced.status.success(), "{}", render_output(&forced));
+    machine_a.run_ok("dotsync --force");
     assert_eq!(machine_a.read_file(".newfile"), "theirs\n");
 }
 
@@ -3487,20 +2828,10 @@ fn deleting_a_managed_file_blocks_sync_and_is_committable() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     machine.delete_file(".bashrc");
 
@@ -3529,21 +2860,11 @@ fn deleting_a_managed_file_blocks_sync_and_is_committable() {
         "the blocked sync must not quietly restore the deleted file"
     );
 
-    let commit_output = machine.run("dotsync commit mx-xps-cy -m 'drop bashrc' -- .bashrc");
-    assert!(
-        commit_output.status.success(),
-        "{}",
-        render_output(&commit_output)
-    );
+    machine.run_ok("dotsync commit mx-xps-cy -m 'drop bashrc' -- .bashrc");
     assert!(!bookmark_has_file(&machine, "mx-xps-cy", ".bashrc"));
     assert!(!machine.file_exists(".bashrc"));
 
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 }
 
 #[test]
@@ -3551,29 +2872,14 @@ fn a_sync_interrupted_before_saving_state_is_not_drift_on_the_next_run() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "mx-xps-cy", ".apprc", "version = 1\n");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
     let state_before = machine.read_sync_state_raw();
 
     seed_remote_scope_file(&machine, "mx-xps-cy", ".apprc", "version = 2\n");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
     assert_eq!(machine.read_file(".apprc"), "version = 2\n");
 
     // A run that dies between finishing the home writes and saving sync state
@@ -3598,25 +2904,14 @@ fn abort_restores_a_drifted_file_outside_the_paused_selection() {
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
     machine_a.write_file(".config/unrelated.conf", "unrelated = \"base\"\n");
-    let commit_base = machine_a
-        .run("dotsync commit all -m 'add base config' -- .config/app.conf .config/unrelated.conf");
-    assert!(
-        commit_base.status.success(),
-        "{}",
-        render_output(&commit_base)
+    machine_a.run_ok(
+        "dotsync commit all -m 'add base config' -- .config/app.conf .config/unrelated.conf",
     );
 
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
-    let commit_linux =
-        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
-    assert!(
-        commit_linux.status.success(),
-        "{}",
-        render_output(&commit_linux)
-    );
+    machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
 
-    let sync_b = machine_b.run("dotsync");
-    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.run_ok("dotsync");
 
     // Drift on a file the paused commit never named.
     machine_b.write_file(".config/unrelated.conf", "unrelated = \"drifted\"\n");
@@ -3652,21 +2947,11 @@ fn commit_force_applies_to_the_named_paths_and_not_to_unrelated_drift() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "mx-xps-cy", ".gitconfig", "[user]\nname = Repo\n");
     seed_remote_scope_file(&machine, "mx-xps-cy", ".config/app.conf", "setting = one\n");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     machine.write_file(".gitconfig", "[user]\nname = Drifted\n");
     machine.write_file(".config/app.conf", "setting = two\n");
@@ -3698,15 +2983,12 @@ fn forcing_a_stale_commit_records_what_it_overwrote() {
     seed_shared_apprc(&machine_a, &machine_b);
 
     machine_b.write_file(".apprc", "ui_theme = dark\nfont = mono\nsize = 14\n");
-    let commit_b = machine_b.run("dotsync commit all -m 'add size' -- .apprc");
-    assert!(commit_b.status.success(), "{}", render_output(&commit_b));
+    machine_b.run_ok("dotsync commit all -m 'add size' -- .apprc");
 
-    let status_a = machine_a.run("dotsync status");
-    assert!(status_a.status.success(), "{}", render_output(&status_a));
+    machine_a.run_ok("dotsync status");
 
-    let commit_a =
-        machine_a.run("dotsync --output json commit all -m 'revert on purpose' --force -- .apprc");
-    assert!(commit_a.status.success(), "{}", render_output(&commit_a));
+    let commit_a = machine_a
+        .run_ok("dotsync --output json commit all -m 'revert on purpose' --force -- .apprc");
 
     let json = parse_stdout_json(&commit_a);
     assert_eq!(
@@ -3728,12 +3010,7 @@ fn diff_reports_an_inserted_line_as_a_single_addition() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(
         &machine,
@@ -3741,12 +3018,7 @@ fn diff_reports_an_inserted_line_as_a_single_addition() {
         ".config/app.conf",
         "one\ntwo\nthree\n",
     );
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     machine.write_file(".config/app.conf", "one\ninserted\ntwo\nthree\n");
 
@@ -3773,29 +3045,14 @@ fn sync_does_not_rewrite_files_that_already_match() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "mx-xps-cy", ".apprc", "ui_theme = dark\n");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
     let written_at = machine.modified_time(".apprc");
 
     std::thread::sleep(std::time::Duration::from_millis(20));
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     assert_eq!(
         machine.modified_time(".apprc"),
@@ -3824,20 +3081,10 @@ fn a_machine_that_lost_its_sync_state_still_syncs() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     machine.delete_sync_state();
     machine.delete_file(".bashrc");
@@ -3863,18 +3110,15 @@ fn a_concurrent_merge_leaves_no_drift_behind() {
         ".config/app.conf",
         "alpha = 1\nbeta = 2\ngamma = 3\ndelta = 4\nepsilon = 5\n",
     );
-    let seed = machine_a.run("dotsync commit all -m 'seed app.conf' -- .config/app.conf");
-    assert!(seed.status.success(), "{}", render_output(&seed));
-    let sync_b = machine_b.run("dotsync");
-    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_a.run_ok("dotsync commit all -m 'seed app.conf' -- .config/app.conf");
+    machine_b.run_ok("dotsync");
 
     // Line-disjoint edits, so the merge succeeds. B is behind when it commits.
     machine_a.write_file(
         ".config/app.conf",
         "alpha = 100\nbeta = 2\ngamma = 3\ndelta = 4\nepsilon = 5\n",
     );
-    let commit_a = machine_a.run("dotsync commit all -m 'a changes alpha' -- .config/app.conf");
-    assert!(commit_a.status.success(), "{}", render_output(&commit_a));
+    machine_a.run_ok("dotsync commit all -m 'a changes alpha' -- .config/app.conf");
 
     machine_b.write_file(
         ".config/app.conf",
@@ -3909,20 +3153,10 @@ fn a_machine_with_no_sync_record_says_so_instead_of_guessing() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=v1\n");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     // Home holds exactly what dotsync wrote there. Losing the state file does
     // not change that — it only means dotsync can no longer prove it.
@@ -3952,8 +3186,7 @@ fn a_machine_with_no_sync_record_says_so_instead_of_guessing() {
     );
 
     // Both ways out still work.
-    let forced = machine.run("dotsync --force");
-    assert!(forced.status.success(), "{}", render_output(&forced));
+    machine.run_ok("dotsync --force");
     assert_eq!(machine.read_file(".bashrc"), "export DOTSYNC=v2\n");
 }
 
@@ -3965,11 +3198,9 @@ fn committing_a_path_another_machine_deleted_is_refused() {
 
     // B removes the file and publishes the removal. A has not synced since.
     machine_b.delete_file(".apprc");
-    let commit_b = machine_b.run("dotsync commit all -m 'drop apprc' -- .apprc");
-    assert!(commit_b.status.success(), "{}", render_output(&commit_b));
+    machine_b.run_ok("dotsync commit all -m 'drop apprc' -- .apprc");
 
-    let status_a = machine_a.run("dotsync status");
-    assert!(status_a.status.success(), "{}", render_output(&status_a));
+    machine_a.run_ok("dotsync status");
 
     let commit_a = machine_a.run("dotsync commit all -m 'keep apprc' -- .apprc");
     assert_eq!(
@@ -3989,14 +3220,12 @@ fn committing_a_path_another_machine_deleted_is_refused() {
     );
 
     // Applying the deletion is one way out.
-    let sync_a = machine_a.run("dotsync");
-    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    machine_a.run_ok("dotsync");
     assert!(!machine_a.file_exists(".apprc"));
 
     // Putting it back on purpose is the other, and it says so in the JSON.
     machine_b.write_file(".apprc", "ui_theme = dark\nfont = mono\n");
-    let restore = machine_b.run("dotsync --output json commit all -m 'put it back' -- .apprc");
-    assert!(restore.status.success(), "{}", render_output(&restore));
+    machine_b.run_ok("dotsync --output json commit all -m 'put it back' -- .apprc");
     assert_eq!(
         remote_branch_file_contents(&machine_b, "all", ".apprc"),
         "ui_theme = dark\nfont = mono\n"
@@ -4010,24 +3239,16 @@ fn a_forced_overwrite_is_reported_even_when_the_run_then_fails() {
     seed_shared_apprc(&machine_a, &machine_b);
 
     machine_a.write_file(".config/other.conf", "other = base\n");
-    let seed_other = machine_a.run("dotsync commit all -m 'add other' -- .config/other.conf");
-    assert!(
-        seed_other.status.success(),
-        "{}",
-        render_output(&seed_other)
-    );
-    let sync_b = machine_b.run("dotsync");
-    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_a.run_ok("dotsync commit all -m 'add other' -- .config/other.conf");
+    machine_b.run_ok("dotsync");
 
     machine_b.write_file(".apprc", "ui_theme = dark\nfont = mono\nsize = 14\n");
-    let commit_b = machine_b.run("dotsync commit all -m 'add size' -- .apprc");
-    assert!(commit_b.status.success(), "{}", render_output(&commit_b));
+    machine_b.run_ok("dotsync commit all -m 'add size' -- .apprc");
 
     // A forces the revert of `.apprc`, and separately has drift on a file the
     // commit does not name — so the commit's own home sync stops after the
     // forced history has already been written and pushed.
-    let status_a = machine_a.run("dotsync status");
-    assert!(status_a.status.success(), "{}", render_output(&status_a));
+    machine_a.run_ok("dotsync status");
     machine_a.write_file(".config/other.conf", "other = drifted\n");
 
     let commit_a =
@@ -4062,17 +3283,14 @@ fn a_successful_forced_commit_says_what_it_overwrote() {
     seed_shared_apprc(&machine_a, &machine_b);
 
     machine_b.write_file(".apprc", "ui_theme = dark\nfont = mono\nsize = 14\n");
-    let commit_b = machine_b.run("dotsync commit all -m 'add size' -- .apprc");
-    assert!(commit_b.status.success(), "{}", render_output(&commit_b));
+    machine_b.run_ok("dotsync commit all -m 'add size' -- .apprc");
 
-    let status_a = machine_a.run("dotsync status");
-    assert!(status_a.status.success(), "{}", render_output(&status_a));
+    machine_a.run_ok("dotsync status");
 
     // Succeeding is not a reason to stay quiet. A run that reverted another
     // machine's published change has to say so on the way past, exactly as it
     // does when it goes on to fail — the successful one is the commoner case.
-    let commit_a = machine_a.run("dotsync commit all -m 'revert on purpose' --force -- .apprc");
-    assert!(commit_a.status.success(), "{}", render_output(&commit_a));
+    let commit_a = machine_a.run_ok("dotsync commit all -m 'revert on purpose' --force -- .apprc");
     assert_stderr_snapshot(
         &commit_a,
         "\
@@ -4094,19 +3312,9 @@ fn read_only_commands_report_against_the_last_fetched_state_when_the_remote_is_u
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
     seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
 
     machine.write_file(".bashrc", "export DOTSYNC=edited-here\n");
     harness.disconnect_remote();
@@ -4186,12 +3394,7 @@ fn work_done_offline_reaches_the_remote_on_the_next_online_run() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     harness.disconnect_remote();
     machine.write_file(".config/offline.conf", "mode = offline\n");
@@ -4304,17 +3507,14 @@ fn a_directory_selection_records_what_this_machine_changed_and_says_what_it_skip
 
     machine_a.write_file(".config/fish/config.fish", "set -g theme dark\n");
     machine_a.write_file(".config/fish/aliases.fish", "alias ll 'ls -l'\n");
-    let seed = machine_a.run("dotsync commit all -m 'seed fish config' -- .config/fish/");
-    assert!(seed.status.success(), "{}", render_output(&seed));
-    let sync_b = machine_b.run("dotsync");
-    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_a.run_ok("dotsync commit all -m 'seed fish config' -- .config/fish/");
+    machine_b.run_ok("dotsync");
 
     // B publishes a change to one file under that directory. A has not synced
     // it, and has an edit of its own to a different file under there, plus a
     // brand new file it wants to add.
     machine_b.write_file(".config/fish/aliases.fish", "alias ll 'ls -lah'\n");
-    let commit_b = machine_b.run("dotsync commit all -m 'better ll' -- .config/fish/aliases.fish");
-    assert!(commit_b.status.success(), "{}", render_output(&commit_b));
+    machine_b.run_ok("dotsync commit all -m 'better ll' -- .config/fish/aliases.fish");
 
     machine_a.write_file(".config/fish/config.fish", "set -g theme light\n");
     machine_a.write_file(
@@ -4378,19 +3578,9 @@ fn a_run_that_stops_offline_still_says_the_remote_was_out_of_reach() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
     machine.write_file(".bashrc", "export DOTSYNC=one\n");
-    let commit_output = machine.run("dotsync commit all -m 'add bashrc' -- .bashrc");
-    assert!(
-        commit_output.status.success(),
-        "{}",
-        render_output(&commit_output)
-    );
+    machine.run_ok("dotsync commit all -m 'add bashrc' -- .bashrc");
 
     machine.write_file(".bashrc", "export DOTSYNC=edited\n");
     harness.disconnect_remote();
@@ -4448,12 +3638,7 @@ fn a_commit_says_which_files_it_started_tracking() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     machine.write_file(".config/fish/config.fish", "set -g fish_greeting off\n");
     machine.write_file(".config/fish/aliases.fish", "alias ll 'ls -l'\n");
@@ -4517,12 +3702,7 @@ fn a_selection_that_names_the_whole_home_directory_is_refused() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     machine.write_file(".ssh/id_ed25519", "PRIVATE KEY\n");
     machine.write_file(".netrc", "machine example.com login me password hunter2\n");
@@ -4564,8 +3744,7 @@ fn a_selection_that_names_the_whole_home_directory_is_refused() {
 
     // Naming a real directory still works, and still only reaches under it.
     machine.write_file(".config/app/settings.toml", "theme = \"dark\"\n");
-    let scoped = machine.run("dotsync commit all -m 'app settings' -- .config/app/");
-    assert!(scoped.status.success(), "{}", render_output(&scoped));
+    machine.run_ok("dotsync commit all -m 'app settings' -- .config/app/");
     assert!(bookmark_has_file(
         &machine,
         "all",
@@ -4583,16 +3762,10 @@ fn a_trailing_separator_on_a_named_file_is_just_a_trailing_separator() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     machine.write_file(".bashrc", "export DOTSYNC=one\n");
-    let added = machine.run("dotsync commit all -m 'add bashrc' -- .bashrc");
-    assert!(added.status.success(), "{}", render_output(&added));
+    machine.run_ok("dotsync commit all -m 'add bashrc' -- .bashrc");
 
     machine.write_file(".bashrc", "export DOTSYNC=two\n");
     let with_slash = machine.run("dotsync commit all -m 'edit bashrc' -- .bashrc/");
@@ -4614,12 +3787,7 @@ fn a_trailing_separator_on_a_named_file_is_just_a_trailing_separator() {
 
     // `./` in front says nothing either.
     machine.write_file(".bashrc", "export DOTSYNC=three\n");
-    let with_prefix = machine.run("dotsync commit all -m 'edit again' -- ./.bashrc");
-    assert!(
-        with_prefix.status.success(),
-        "{}",
-        render_output(&with_prefix)
-    );
+    machine.run_ok("dotsync commit all -m 'edit again' -- ./.bashrc");
     assert_eq!(
         read_bookmark_file_contents(&machine, "all", ".bashrc"),
         "export DOTSYNC=three\n"
@@ -4635,19 +3803,9 @@ fn status_diff_sync_and_commit_each_reach_the_remote_once() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
     add_hyprland_scope(&machine);
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
     machine.write_file(".bashrc", "export DOTSYNC=1\n");
 
     for command in [
@@ -4675,12 +3833,7 @@ fn a_symlink_pointing_at_home_cannot_be_used_to_sweep_it() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     machine.write_file(".ssh/id_ed25519", "PRIVATE KEY\n");
     machine.write_file(".netrc", "machine example.com login me password hunter2\n");
@@ -4694,8 +3847,7 @@ fn a_symlink_pointing_at_home_cannot_be_used_to_sweep_it() {
         render_output(&output)
     );
 
-    let tracked = machine.run("dotsync view --scope all");
-    assert!(tracked.status.success(), "{}", render_output(&tracked));
+    let tracked = machine.run_ok("dotsync view --scope all");
     let tracked = String::from_utf8_lossy(&tracked.stdout).into_owned();
     for forbidden in ["selflink", "id_ed25519", ".netrc", ".jj", "sync-state"] {
         assert!(
@@ -4715,12 +3867,7 @@ fn a_symlinked_selection_path_is_refused_whether_it_is_a_file_or_a_directory() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     // Config kept outside home and linked into place, which is a real pattern.
     let outside = machine
@@ -4763,8 +3910,7 @@ fn a_symlinked_selection_path_is_refused_whether_it_is_a_file_or_a_directory() {
 
     // Real files next to them are unaffected.
     machine.write_file(".bashrc", "export DOTSYNC=1\n");
-    let real = machine.run("dotsync commit all -m 'real file' -- .bashrc");
-    assert!(real.status.success(), "{}", render_output(&real));
+    machine.run_ok("dotsync commit all -m 'real file' -- .bashrc");
 }
 
 /// A commit that records nothing ran no sync, so it has no sync to report. The
@@ -4775,16 +3921,10 @@ fn a_commit_that_records_nothing_says_so_instead_of_reporting_an_empty_sync() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     machine.write_file(".apprc", "ui_theme = dark\n");
-    let recorded = machine.run("dotsync --output json commit all -m 'add apprc' -- .apprc");
-    assert!(recorded.status.success(), "{}", render_output(&recorded));
+    let recorded = machine.run_ok("dotsync --output json commit all -m 'add apprc' -- .apprc");
     let json = parse_stdout_json(&recorded);
     assert_eq!(
         json["outcome"],
@@ -4833,18 +3973,13 @@ fn every_command_that_only_syncs_names_the_machine_scope_once() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.run(&format!(
+    let init_output = machine.run_ok(&format!(
         "dotsync --output json init {}",
         machine
             .remote_dir
             .to_str()
             .expect("remote path should be valid UTF-8")
     ));
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
     let json = parse_stdout_json(&init_output);
     assert_eq!(json["command"], "init");
     assert_eq!(json["machine_scope"], "mx-xps-cy");
@@ -4854,12 +3989,7 @@ fn every_command_that_only_syncs_names_the_machine_scope_once() {
         render_output(&init_output)
     );
 
-    let sync_output = machine.run("dotsync --output json");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    let sync_output = machine.run_ok("dotsync --output json");
     let json = parse_stdout_json(&sync_output);
     assert_eq!(json["command"], "sync");
     assert_eq!(json["machine_scope"], "mx-xps-cy");
@@ -4879,28 +4009,13 @@ fn status_and_diff_describe_the_same_change_with_the_same_words() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
     machine.write_file(".bashrc", "export DOTSYNC=modified\n");
 
-    let status_output = machine.run("dotsync --output json status");
-    assert!(
-        status_output.status.success(),
-        "{}",
-        render_output(&status_output)
-    );
+    let status_output = machine.run_ok("dotsync --output json status");
     let status_json = parse_stdout_json(&status_output);
     assert!(
         status_json.get("groups").is_none(),
@@ -4957,12 +4072,7 @@ fn a_run_that_stops_lists_each_thing_it_found_separately() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     let output =
         machine.run("dotsync --output json commit all -m x -- /etc/passwd ../outside typo.conf");
@@ -5008,12 +4118,7 @@ fn naming_one_unusable_path_reads_as_one_path() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     let unusable = machine.run("dotsync --output json commit all -m x -- typo.conf");
     assert_eq!(
@@ -5047,12 +4152,7 @@ fn a_symlink_under_a_named_directory_is_reported_rather_than_silently_skipped() 
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     let outside = harness.root_dir.join("outside/nvim-init.lua");
     write_file_at(&outside, "vim.o.number = true\n");
@@ -5114,23 +4214,11 @@ fn a_paused_cascade_is_the_same_answer_whichever_command_meets_it() {
     let (machine_a, machine_b) = two_synced_machines(&harness);
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
-    let commit_base = machine_a.run("dotsync commit all -m 'add base config' -- .config/app.conf");
-    assert!(
-        commit_base.status.success(),
-        "{}",
-        render_output(&commit_base)
-    );
+    machine_a.run_ok("dotsync commit all -m 'add base config' -- .config/app.conf");
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
-    let commit_linux =
-        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
-    assert!(
-        commit_linux.status.success(),
-        "{}",
-        render_output(&commit_linux)
-    );
+    machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
 
-    let sync_b = machine_b.run("dotsync");
-    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.run_ok("dotsync");
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     let conflict =
         machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
@@ -5158,8 +4246,7 @@ fn a_paused_cascade_is_the_same_answer_whichever_command_meets_it() {
         render_output(&unresolved)
     );
 
-    let aborted = machine_b.run("dotsync --output json abort");
-    assert!(aborted.status.success(), "{}", render_output(&aborted));
+    let aborted = machine_b.run_ok("dotsync --output json abort");
     let json = parse_stdout_json(&aborted);
     assert_eq!(
         json["paused_scope"],
@@ -5188,12 +4275,7 @@ fn a_user_never_meets_the_backends_vocabulary() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     let bad_scope = machine.run("dotsync --output json view --scope nosuchscope");
     assert_eq!(
@@ -5245,12 +4327,7 @@ fn init_writes_a_config_whose_comments_teach_scope_choice() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     let config = machine.read_file(".config/dotsync/config.toml");
     for expected in [
@@ -5287,21 +4364,17 @@ fn a_machine_joining_keeps_the_comments_already_in_the_config() {
     let harness = TestHarness::new();
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
 
-    let init_a = machine_a.init();
-    assert!(init_a.status.success(), "{}", render_output(&init_a));
+    machine_a.init_ok();
 
     let described = machine_a.read_file(".config/dotsync/config.toml").replace(
         "[sync]",
         "# hand-written: hyprland and fish config live on `linux`.\n[sync]",
     );
     machine_a.write_file(".config/dotsync/config.toml", &described);
-    let commit =
-        machine_a.run("dotsync commit all -m 'describe linux' -- .config/dotsync/config.toml");
-    assert!(commit.status.success(), "{}", render_output(&commit));
+    machine_a.run_ok("dotsync commit all -m 'describe linux' -- .config/dotsync/config.toml");
 
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
-    let init_b = machine_b.init();
-    assert!(init_b.status.success(), "{}", render_output(&init_b));
+    machine_b.init_ok();
 
     let joined = machine_b.read_file(".config/dotsync/config.toml");
     assert!(
@@ -5326,16 +4399,10 @@ fn a_forced_sync_says_which_home_files_it_overwrote() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
-    let clean = machine.run("dotsync --output json");
-    assert!(clean.status.success(), "{}", render_output(&clean));
+    let clean = machine.run_ok("dotsync --output json");
     assert_eq!(
         parse_stdout_json(&clean)["overwritten_files"]
             .as_array()
@@ -5346,8 +4413,7 @@ fn a_forced_sync_says_which_home_files_it_overwrote() {
     );
 
     machine.write_file(".bashrc", "export DOTSYNC=mine\n");
-    let forced = machine.run("dotsync --force --output json");
-    assert!(forced.status.success(), "{}", render_output(&forced));
+    let forced = machine.run_ok("dotsync --force --output json");
     let json = parse_stdout_json(&forced);
     assert_eq!(
         json["overwritten_files"],
@@ -5420,19 +4486,9 @@ fn the_drift_stop_lists_files_the_way_status_does_and_apart_from_its_instruction
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
     seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "{}",
-        render_output(&sync_output)
-    );
+    machine.run_ok("dotsync");
     machine.write_file(".bashrc", "export DOTSYNC=mine\n");
 
     let stopped = machine.run("dotsync");
@@ -5478,14 +4534,11 @@ fn status_and_diff_say_a_cascade_is_paused() {
     let (machine_a, machine_b) = two_synced_machines(&harness);
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
-    let base = machine_a.run("dotsync commit all -m 'add base' -- .config/app.conf");
-    assert!(base.status.success(), "{}", render_output(&base));
+    machine_a.run_ok("dotsync commit all -m 'add base' -- .config/app.conf");
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
-    let linux = machine_a.run("dotsync commit linux -m 'linux flavour' -- .config/app.conf");
-    assert!(linux.status.success(), "{}", render_output(&linux));
+    machine_a.run_ok("dotsync commit linux -m 'linux flavour' -- .config/app.conf");
 
-    let sync_b = machine_b.run("dotsync");
-    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.run_ok("dotsync");
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     let conflict = machine_b.run("dotsync commit all -m 'shared change' -- .config/app.conf");
     assert_eq!(
@@ -5566,12 +4619,7 @@ fn init_on_an_initialized_machine_says_what_to_run_instead() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     let again = machine.init();
     assert_eq!(again.status.code(), Some(1), "{}", render_output(&again));
@@ -5600,12 +4648,7 @@ fn a_named_path_that_is_not_a_regular_file_is_refused_rather_than_read() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     make_fifo(&machine.home_dir.join(".pipe"));
 
@@ -5628,8 +4671,7 @@ fn a_named_path_that_is_not_a_regular_file_is_refused_rather_than_read() {
     // The same file where dotsync reads home without being asked: a path the
     // scope already tracks, replaced in home by a fifo.
     machine.write_file(".bashrc", "export DOTSYNC=1\n");
-    let tracked = machine.run("dotsync commit all -m 'bashrc' -- .bashrc");
-    assert!(tracked.status.success(), "{}", render_output(&tracked));
+    machine.run_ok("dotsync commit all -m 'bashrc' -- .bashrc");
     machine.delete_file(".bashrc");
     make_fifo(&machine.home_dir.join(".bashrc"));
 
@@ -5655,12 +4697,7 @@ fn view_says_when_no_scope_holds_a_file() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     let output = machine.run("dotsync view --file .nosuchfile");
     assert_eq!(output.status.code(), Some(0), "{}", render_output(&output));
@@ -5726,14 +4763,11 @@ fn view_says_a_cascade_is_paused() {
     let (machine_a, machine_b) = two_synced_machines(&harness);
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
-    let base = machine_a.run("dotsync commit all -m 'add base' -- .config/app.conf");
-    assert!(base.status.success(), "{}", render_output(&base));
+    machine_a.run_ok("dotsync commit all -m 'add base' -- .config/app.conf");
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
-    let linux = machine_a.run("dotsync commit linux -m 'linux flavour' -- .config/app.conf");
-    assert!(linux.status.success(), "{}", render_output(&linux));
+    machine_a.run_ok("dotsync commit linux -m 'linux flavour' -- .config/app.conf");
 
-    let sync_b = machine_b.run("dotsync");
-    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.run_ok("dotsync");
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     let conflict = machine_b.run("dotsync commit all -m 'shared change' -- .config/app.conf");
     assert_eq!(
@@ -5750,8 +4784,7 @@ fn view_says_a_cascade_is_paused() {
         "dotsync view --scope all",
         "dotsync view --file .config/app.conf",
     ] {
-        let output = machine_b.run(command);
-        assert!(output.status.success(), "{}", render_output(&output));
+        let output = machine_b.run_ok(command);
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         assert!(
             stderr.contains("paused") && stderr.contains("linux"),
@@ -5786,20 +4819,14 @@ fn a_symlink_on_a_scope_materialises_in_home_as_a_symlink() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "all", ".config/app/real.conf", "theme = dark\n");
     seed_remote_scope_symlink(&machine, "all", ".config/app/current.conf", "real.conf");
     merge_remote_scope_into(&machine, "all", "linux");
     merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
 
-    let sync = machine.run("dotsync");
-    assert!(sync.status.success(), "{}", render_output(&sync));
+    machine.run_ok("dotsync");
 
     assert!(
         machine.is_symlink(".config/app/current.conf"),
@@ -5827,20 +4854,10 @@ fn a_sync_replaces_a_home_symlink_instead_of_writing_through_it() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "mx-xps-cy", ".apprc", "ui = dark\n");
-    let first_sync = machine.run("dotsync");
-    assert!(
-        first_sync.status.success(),
-        "{}",
-        render_output(&first_sync)
-    );
+    machine.run_ok("dotsync");
     assert_eq!(machine.read_file(".apprc"), "ui = dark\n");
 
     // A file dotsync does not manage, at a path dotsync has never heard of.
@@ -5864,8 +4881,7 @@ fn a_sync_replaces_a_home_symlink_instead_of_writing_through_it() {
         "a run that stopped must not have written anything"
     );
 
-    let forced = machine.run("dotsync --force");
-    assert!(forced.status.success(), "{}", render_output(&forced));
+    machine.run_ok("dotsync --force");
     assert_eq!(
         fs::read_to_string(&outside).expect("read the link target"),
         "notes nobody asked dotsync to touch\n",
@@ -5890,12 +4906,7 @@ fn commit_records_a_symlink_as_a_symlink() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     machine.write_file(".config/app/real.conf", "theme = dark\n");
     symlink_at(
@@ -5903,9 +4914,7 @@ fn commit_records_a_symlink_as_a_symlink() {
         &machine.home_dir.join(".config/app/current.conf"),
     );
 
-    let commit =
-        machine.run("dotsync commit all -m 'point current at real' -- .config/app/current.conf");
-    assert!(commit.status.success(), "{}", render_output(&commit));
+    machine.run_ok("dotsync commit all -m 'point current at real' -- .config/app/current.conf");
 
     assert_eq!(
         remote_branch_entry_mode(&machine, "all", ".config/app/current.conf").as_deref(),
@@ -5938,8 +4947,7 @@ fn a_symlink_to_a_sibling_script_survives_the_round_trip_to_another_machine() {
     let machine_a = harness.machine("machine-a", "linux", "box1");
     let machine_b = harness.machine("machine-b", "linux", "box2");
 
-    let init_a = machine_a.init();
-    assert!(init_a.status.success(), "{}", render_output(&init_a));
+    machine_a.init_ok();
 
     machine_a.write_file(".local/bin/tool-1.2.0", "#!/bin/sh\necho tool\n");
     symlink_at(
@@ -5947,12 +4955,9 @@ fn a_symlink_to_a_sibling_script_survives_the_round_trip_to_another_machine() {
         &machine_a.home_dir.join(".local/bin/tool"),
     );
 
-    let commit =
-        machine_a.run("dotsync commit all -m 'ship tool and the current link' -- .local/bin/");
-    assert!(commit.status.success(), "{}", render_output(&commit));
+    machine_a.run_ok("dotsync commit all -m 'ship tool and the current link' -- .local/bin/");
 
-    let init_b = machine_b.init();
-    assert!(init_b.status.success(), "{}", render_output(&init_b));
+    machine_b.init_ok();
 
     assert_eq!(
         machine_b.read_file(".local/bin/tool-1.2.0"),
@@ -5983,12 +4988,7 @@ fn status_and_diff_report_a_kind_difference_between_a_link_and_a_file() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     seed_remote_scope_file(&machine, "mx-xps-cy", ".apprc", "ui = dark\n");
     seed_remote_scope_file(
@@ -6003,8 +5003,7 @@ fn status_and_diff_report_a_kind_difference_between_a_link_and_a_file() {
         ".config/app/current.conf",
         "real.conf",
     );
-    let sync = machine.run("dotsync");
-    assert!(sync.status.success(), "{}", render_output(&sync));
+    machine.run_ok("dotsync");
 
     // A link where the scope holds a file, over content identical to the
     // scope's.
@@ -6077,19 +5076,13 @@ fn a_symlink_to_home_records_one_entry_rather_than_sweeping_home() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     machine.write_file(".ssh/id_ed25519", "PRIVATE KEY\n");
     machine.write_file(".netrc", "machine example.com login me password hunter2\n");
     symlink_at(&machine.home_dir, &machine.home_dir.join("selflink"));
 
-    let commit = machine.run("dotsync commit all -m 'link to home' -- selflink/");
-    assert!(commit.status.success(), "{}", render_output(&commit));
+    machine.run_ok("dotsync commit all -m 'link to home' -- selflink/");
 
     assert_eq!(
         remote_branch_entry_mode(&machine, "all", "selflink").as_deref(),
@@ -6184,8 +5177,7 @@ fn committing_to_a_scope_this_machine_is_not_on_is_refused() {
     // The refusal is not a wall: the pattern it teaches has to work. The
     // shared ancestor is a scope this machine is on, so committing there is
     // how the same material reaches the other machine.
-    let shared = machine_a.run("dotsync commit linux -m 'set every linux box up' -- .apprc");
-    assert!(shared.status.success(), "{}", render_output(&shared));
+    machine_a.run_ok("dotsync commit linux -m 'set every linux box up' -- .apprc");
     assert_eq!(
         remote_branch_file_contents(&machine_a, "goof-b", ".apprc"),
         "ui = dark\n",
@@ -6267,8 +5259,7 @@ fn the_overview_says_which_scope_is_this_machine() {
     let harness = TestHarness::new();
     let (machine_a, _machine_b) = two_synced_machines(&harness);
 
-    let json = machine_a.run("dotsync view --output json");
-    assert!(json.status.success(), "{}", render_output(&json));
+    let json = machine_a.run_ok("dotsync view --output json");
     assert_eq!(
         parse_stdout_json(&json)["machine_scope"],
         "goof-a",
@@ -6276,8 +5267,7 @@ fn the_overview_says_which_scope_is_this_machine() {
         render_output(&json)
     );
 
-    let human = machine_a.run("dotsync view");
-    assert!(human.status.success(), "{}", render_output(&human));
+    let human = machine_a.run_ok("dotsync view");
     let stdout = String::from_utf8_lossy(&human.stdout).into_owned();
     let this_machine = the_line_naming(&stdout, "goof-a");
     let another_machine = the_line_naming(&stdout, "goof-b");
@@ -6304,21 +5294,13 @@ fn view_file_says_which_scope_owns_the_file() {
     let (machine_a, machine_b) = two_synced_machines(&harness);
 
     machine_a.write_file(".apprc", "ui = dark\n");
-    let shared = machine_a.run("dotsync commit all -m 'shared apprc' -- .apprc");
-    assert!(shared.status.success(), "{}", render_output(&shared));
+    machine_a.run_ok("dotsync commit all -m 'shared apprc' -- .apprc");
 
-    let sync_b = machine_b.run("dotsync");
-    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.run_ok("dotsync");
     machine_b.write_file(".config/local.conf", "monitor = DP-1\n");
-    let local = machine_b.run("dotsync commit goof-b -m 'this box only' -- .config/local.conf");
-    assert!(local.status.success(), "{}", render_output(&local));
+    machine_b.run_ok("dotsync commit goof-b -m 'this box only' -- .config/local.conf");
 
-    let on_the_root = machine_a.run("dotsync view --file .apprc --output json");
-    assert!(
-        on_the_root.status.success(),
-        "{}",
-        render_output(&on_the_root)
-    );
+    let on_the_root = machine_a.run_ok("dotsync view --file .apprc --output json");
     assert_eq!(
         parse_stdout_json(&on_the_root)["owner"],
         "all",
@@ -6326,8 +5308,7 @@ fn view_file_says_which_scope_owns_the_file() {
         render_output(&on_the_root)
     );
 
-    let on_a_leaf = machine_a.run("dotsync view --file .config/local.conf --output json");
-    assert!(on_a_leaf.status.success(), "{}", render_output(&on_a_leaf));
+    let on_a_leaf = machine_a.run_ok("dotsync view --file .config/local.conf --output json");
     assert_eq!(
         parse_stdout_json(&on_a_leaf)["owner"],
         "goof-b",
@@ -6335,8 +5316,7 @@ fn view_file_says_which_scope_owns_the_file() {
         render_output(&on_a_leaf)
     );
 
-    let human = machine_a.run("dotsync view --file .apprc");
-    assert!(human.status.success(), "{}", render_output(&human));
+    let human = machine_a.run_ok("dotsync view --file .apprc");
     let stdout = String::from_utf8_lossy(&human.stdout).into_owned();
     assert!(
         stdout.to_lowercase().contains("own"),
@@ -6383,12 +5363,7 @@ fn read_only_commands_describe_a_diverged_scope_instead_of_refusing_to_run() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     // This machine holds unpushed commits on every scope, and then another
     // machine publishes a different file to `all`: `all` genuinely diverges
@@ -6497,12 +5472,7 @@ fn read_only_commands_leave_the_scope_bookmarks_where_they_found_them() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     // Another machine publishes down the whole graph, so every scope this
     // machine has a bookmark for is behind the remote — the ordinary case, and
@@ -6538,8 +5508,7 @@ fn read_only_commands_leave_the_scope_bookmarks_where_they_found_them() {
 
     // The change really was there to be applied, so the assertions above were
     // about a run that had something to move, not about an idle fetch.
-    let sync = machine.run("dotsync");
-    assert!(sync.status.success(), "{}", render_output(&sync));
+    machine.run_ok("dotsync");
     assert_eq!(machine.read_file(".gitconfig"), "[user]\nname = Shared\n");
 }
 
@@ -6557,12 +5526,7 @@ fn status_names_the_scopes_this_machine_has_not_published() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.init();
-    assert!(
-        init_output.status.success(),
-        "{}",
-        render_output(&init_output)
-    );
+    machine.init_ok();
 
     // A commit whose cascade landed and whose push did not: every scope holds
     // a commit the remote has never seen, and home is in sync, so there is
@@ -6612,8 +5576,7 @@ fn status_names_the_scopes_this_machine_has_not_published() {
 
     // And the report has to stop once the work is published, or it is noise
     // rather than a signal.
-    let sync = machine.run("dotsync --output json");
-    assert!(sync.status.success(), "{}", render_output(&sync));
+    machine.run_ok("dotsync --output json");
     let after = machine.run("dotsync status --output json");
     assert_eq!(
         parse_stdout_json(&after)["unpushed_scopes"]
@@ -6667,8 +5630,7 @@ fn forcing_a_sync_does_not_overwrite_a_conflict_resolution_in_progress() {
 
     // The resolution is still there to be finished with, which is the point:
     // a run that meets a pause leaves the machine able to get out of it.
-    let continued = machine.run("dotsync continue");
-    assert!(continued.status.success(), "{}", render_output(&continued));
+    machine.run_ok("dotsync continue");
     assert_eq!(
         remote_branch_file_contents(&machine, "linux", ".config/app.conf"),
         "setting = \"all+linux\"\n",
@@ -6761,8 +5723,7 @@ fn continue_after_a_pause_on_another_machines_scope_restores_this_machines_confi
     );
 
     // The machine the resolution was for picks it up as an ordinary sync.
-    let sync_a = machine_a.run("dotsync");
-    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    machine_a.run_ok("dotsync");
     assert_eq!(
         machine_a.read_file(".config/app.conf"),
         "setting = \"goof-a+all\"\n"
@@ -6849,8 +5810,7 @@ fn continue_refuses_a_resolution_that_still_holds_conflict_markers() {
 
     // Refusing is not a wedge: a real resolution still finishes the cascade.
     machine.write_file(".config/app.conf", "setting = \"all+linux\"\n");
-    let resolved = machine.run("dotsync continue");
-    assert!(resolved.status.success(), "{}", render_output(&resolved));
+    machine.run_ok("dotsync continue");
     assert_eq!(
         remote_branch_file_contents(&machine, "linux", ".config/app.conf"),
         "setting = \"all+linux\"\n"
@@ -6888,8 +5848,7 @@ fn continue_refuses_conflict_markers_left_in_another_machines_scope() {
     );
 
     // And the machine that would have received them is untouched.
-    let sync_a = machine_a.run("dotsync");
-    assert!(sync_a.status.success(), "{}", render_output(&sync_a));
+    machine_a.run_ok("dotsync");
     assert_eq!(
         machine_a.read_file(".config/app.conf"),
         "setting = \"goof-a\"\n",
@@ -6931,35 +5890,16 @@ fn a_pause_publishes_the_scopes_it_did_not_conflict_on() {
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
-    let init_a = machine_a.init();
-    assert!(init_a.status.success(), "{}", render_output(&init_a));
-    let init_b = machine_b.init();
-    assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a_after_join = machine_a.run("dotsync --force");
-    assert!(
-        sync_a_after_join.status.success(),
-        "{}",
-        render_output(&sync_a_after_join)
-    );
+    machine_a.init_ok();
+    machine_b.init_ok();
+    machine_a.run_ok("dotsync --force");
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
-    let commit_base = machine_a.run("dotsync commit all -m 'add base config' -- .config/app.conf");
-    assert!(
-        commit_base.status.success(),
-        "{}",
-        render_output(&commit_base)
-    );
+    machine_a.run_ok("dotsync commit all -m 'add base config' -- .config/app.conf");
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
-    let commit_linux =
-        machine_a.run("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
-    assert!(
-        commit_linux.status.success(),
-        "{}",
-        render_output(&commit_linux)
-    );
+    machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
 
-    let sync_b = machine_b.run("dotsync");
-    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.run_ok("dotsync");
 
     // Recorded before the pause so the assertions below are about what this
     // run published, not about what the remote happened to hold.
@@ -7016,35 +5956,16 @@ fn a_pause_on_another_machines_scope_still_publishes_this_machines_own() {
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
-    let init_a = machine_a.init();
-    assert!(init_a.status.success(), "{}", render_output(&init_a));
-    let init_b = machine_b.init();
-    assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a_after_join = machine_a.run("dotsync --force");
-    assert!(
-        sync_a_after_join.status.success(),
-        "{}",
-        render_output(&sync_a_after_join)
-    );
+    machine_a.init_ok();
+    machine_b.init_ok();
+    machine_a.run_ok("dotsync --force");
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
-    let commit_base = machine_a.run("dotsync commit all -m 'add base config' -- .config/app.conf");
-    assert!(
-        commit_base.status.success(),
-        "{}",
-        render_output(&commit_base)
-    );
+    machine_a.run_ok("dotsync commit all -m 'add base config' -- .config/app.conf");
     machine_a.write_file(".config/app.conf", "setting = \"goof-a\"\n");
-    let commit_machine =
-        machine_a.run("dotsync commit goof-a -m 'customize goof-a config' -- .config/app.conf");
-    assert!(
-        commit_machine.status.success(),
-        "{}",
-        render_output(&commit_machine)
-    );
+    machine_a.run_ok("dotsync commit goof-a -m 'customize goof-a config' -- .config/app.conf");
 
-    let sync_b = machine_b.run("dotsync");
-    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+    machine_b.run_ok("dotsync");
     let goof_a_before = remote_branch_revision(&machine_b, "goof-a");
 
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
@@ -7109,8 +6030,7 @@ fn a_pause_survives_losing_every_machine_local_record_of_it() {
     );
 
     machine_b.write_file(".config/app.conf", "setting = \"all+linux\"\n");
-    let continued = machine_b.run("dotsync continue");
-    assert!(continued.status.success(), "{}", render_output(&continued));
+    machine_b.run_ok("dotsync continue");
     assert_eq!(
         remote_branch_file_contents(&machine_b, "linux", ".config/app.conf"),
         "setting = \"all+linux\"\n",
