@@ -137,6 +137,22 @@ impl MachineEnvironment {
         output
     }
 
+    /// Runs dotsync, asserts which exit code it ended on, and hands the output
+    /// back. The code is a bare number for the same reason the assertions this
+    /// replaces used one: DESIGN's exit-code table is the meaning of it, and
+    /// several of the codes these tests meet are still open questions, so a
+    /// name here would decide them.
+    pub fn run_expecting(&self, command: &str, exit_code: i32) -> Output {
+        let output = self.run(command);
+        assert_eq!(
+            output.status.code(),
+            Some(exit_code),
+            "expected `{command}` to exit {exit_code}\n{}",
+            render_output(&output)
+        );
+        output
+    }
+
     pub fn run(&self, command: &str) -> Output {
         let args = dotsync_args(command);
         let mut command = Command::new(env!("CARGO_BIN_EXE_dotsync"));
