@@ -239,6 +239,33 @@ impl MachineEnvironment {
         self.home_dir.join(relative).exists()
     }
 
+    /// Asked without following the link, which is the whole question: a link
+    /// to a regular file answers `true` to every other test on this struct.
+    fn is_symlink(&self, relative: &str) -> bool {
+        fs::symlink_metadata(self.home_dir.join(relative))
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    }
+
+    fn read_link(&self, relative: &str) -> PathBuf {
+        fs::read_link(self.home_dir.join(relative))
+            .unwrap_or_else(|err| panic!("read home symlink `{relative}`: {err}"))
+    }
+
+    /// Removes first, because writing to a path that holds a link writes
+    /// through it — which is the bug several of these tests are about, and
+    /// would silently corrupt their own fixtures.
+    fn replace_with_regular_file(&self, relative: &str, contents: &str) {
+        let path = self.home_dir.join(relative);
+        fs::remove_file(&path).unwrap_or_else(|err| panic!("remove `{relative}`: {err}"));
+        write_file_at(&path, contents);
+    }
+
+    fn replace_with_symlink(&self, relative: &str, target: &Path) {
+        let path = self.home_dir.join(relative);
+        fs::remove_file(&path).unwrap_or_else(|err| panic!("remove `{relative}`: {err}"));
+        symlink_at(target, &path);
+    }
+
     fn sync_state_relative_path(&self) -> PathBuf {
         PathBuf::from(
             read_bookmark_file_contents(self, "all", ".config/dotsync/config.toml")
@@ -410,6 +437,63 @@ fn seed_remote_scope_file(
     write_file_at(&clone_dir.join(relative), contents);
     git_commit_all(&clone_dir, &format!("test: seed {scope} {relative}"));
     git_push(&clone_dir, scope);
+}
+
+/// Puts a symlink on a scope the way anything that is not dotsync would: a
+/// plain git client, which records mode 120000 with the target as the blob.
+/// Nothing about this needs dotsync to be able to *commit* a link, which is
+/// what makes the materialization question reachable on its own.
+fn seed_remote_scope_symlink(
+    machine: &MachineEnvironment,
+    scope: &str,
+    relative: &str,
+    target: &str,
+) {
+    let clone_dir = machine.home_dir.join(format!("remote-{scope}.ignore"));
+    if clone_dir.exists() {
+        fs::remove_dir_all(&clone_dir).expect("remove old remote clone dir");
+    }
+    clone_remote_branch_to(&clone_dir, &machine.remote_dir, scope);
+    symlink_at(Path::new(target), &clone_dir.join(relative));
+    git_commit_all(
+        &clone_dir,
+        &format!("test: seed {scope} {relative} -> {target}"),
+    );
+    git_push(&clone_dir, scope);
+}
+
+/// The file mode a branch records for a path: `100644` for a regular file,
+/// `120000` for a symlink. Read from the shared remote rather than from the
+/// hidden repo, because the remote is what every other machine will read.
+fn remote_branch_entry_mode(
+    machine: &MachineEnvironment,
+    branch: &str,
+    relative: &str,
+) -> Option<String> {
+    remote_branch_entries(machine, branch)
+        .into_iter()
+        .find(|(path, _)| path == relative)
+        .map(|(_, mode)| mode)
+}
+
+/// Every path a branch holds, with its mode.
+fn remote_branch_entries(machine: &MachineEnvironment, branch: &str) -> Vec<(String, String)> {
+    let output = git_in(&machine.remote_dir, &["ls-tree", "-r", branch]);
+    assert!(output.status.success(), "{}", render_output(&output));
+    String::from_utf8(output.stdout)
+        .expect("git ls-tree output should be utf-8")
+        .lines()
+        .map(|line| {
+            let (meta, path) = line
+                .split_once('\t')
+                .unwrap_or_else(|| panic!("unexpected ls-tree line `{line}`"));
+            let mode = meta
+                .split_whitespace()
+                .next()
+                .unwrap_or_else(|| panic!("unexpected ls-tree line `{line}`"));
+            (path.to_string(), mode.to_string())
+        })
+        .collect()
 }
 
 fn remove_remote_scope_file(machine: &MachineEnvironment, scope: &str, relative: &str) {
@@ -6574,6 +6658,347 @@ fn view_says_a_cascade_is_paused() {
             "linux",
             "`{command}` must report the pause in the payload too\n{}",
             render_output(&json_output)
+        );
+    }
+}
+
+// Symlink handling — six tests for the 2026-08-13 decision that symlinks are
+// treated as files and never followed (PLAN.md §1.5). Every one of them
+// describes behaviour dotsync does not have yet.
+
+/// A symlink that is already on a scope has to reach home as a symlink. Today
+/// it does not: the repo read turns `TreeValue::Symlink` into the target
+/// string as bytes, and the home write puts those bytes in a regular file, so
+/// `~/.config/app/current.conf` ends up being a file whose entire contents are
+/// the nine characters `real.conf`.
+///
+/// Nothing here needs dotsync to be able to *commit* a link — a plain git
+/// client puts it on `all` and an ordinary cascade carries it down — which is
+/// why this is reachable today and is the sharpest statement of the decision.
+#[test]
+fn a_symlink_on_a_scope_materialises_in_home_as_a_symlink() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "all", ".config/app/real.conf", "theme = dark\n");
+    seed_remote_scope_symlink(&machine, "all", ".config/app/current.conf", "real.conf");
+    merge_remote_scope_into(&machine, "all", "linux");
+    merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
+
+    let sync = machine.run("dotsync");
+    assert!(sync.status.success(), "{}", render_output(&sync));
+
+    assert!(
+        machine.is_symlink(".config/app/current.conf"),
+        "a symlink on the scope must arrive in home as a symlink, not as a regular file holding the target text (home holds: {:?})",
+        fs::read_to_string(machine.home_dir.join(".config/app/current.conf")).ok()
+    );
+    assert_eq!(
+        machine.read_link(".config/app/current.conf"),
+        PathBuf::from("real.conf"),
+        "and it must point where the scope says it points"
+    );
+}
+
+/// Home holds a link where the scope holds a regular file. Sync must replace
+/// the link, not write through it — writing through it edits a file dotsync
+/// was never asked to manage, under a name it does not know.
+///
+/// Reproduced with two managed files: `toolA` recorded as a regular file, then
+/// replaced in home by a link to the managed `toolB`, and `dotsync --force`
+/// wrote toolA's recorded content into toolB. The link target here is outside
+/// home so the loss is unambiguous, and its content is asserted explicitly:
+/// that byte comparison is the data loss.
+#[test]
+fn a_sync_replaces_a_home_symlink_instead_of_writing_through_it() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".apprc", "ui = dark\n");
+    let first_sync = machine.run("dotsync");
+    assert!(
+        first_sync.status.success(),
+        "{}",
+        render_output(&first_sync)
+    );
+    assert_eq!(machine.read_file(".apprc"), "ui = dark\n");
+
+    // A file dotsync does not manage, at a path dotsync has never heard of.
+    let outside = harness.root_dir.join("outside/notes.txt");
+    write_file_at(&outside, "notes nobody asked dotsync to touch\n");
+    machine.replace_with_symlink(".apprc", &outside);
+
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".apprc", "ui = light\n");
+
+    // A plain sync stops: home holds something that is not what was synced.
+    let stopped = machine.run("dotsync");
+    assert_eq!(
+        stopped.status.code(),
+        Some(1),
+        "{}",
+        render_output(&stopped)
+    );
+    assert_eq!(
+        fs::read_to_string(&outside).expect("read the link target"),
+        "notes nobody asked dotsync to touch\n",
+        "a run that stopped must not have written anything"
+    );
+
+    let forced = machine.run("dotsync --force");
+    assert!(forced.status.success(), "{}", render_output(&forced));
+    assert_eq!(
+        fs::read_to_string(&outside).expect("read the link target"),
+        "notes nobody asked dotsync to touch\n",
+        "the link's target is not a managed file and must survive byte for byte"
+    );
+    assert!(
+        !machine.is_symlink(".apprc"),
+        "the link itself is what the scope disagrees with, so the link is what gets replaced"
+    );
+    assert_eq!(
+        machine.read_file(".apprc"),
+        "ui = light\n",
+        "and home ends up holding the scope's regular file"
+    );
+}
+
+/// Naming a symlink records it as a symlink, storing the target. Today it is
+/// refused outright — the conservative placeholder that stood in for this
+/// decision.
+#[test]
+fn commit_records_a_symlink_as_a_symlink() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_file(".config/app/real.conf", "theme = dark\n");
+    symlink_at(
+        Path::new("real.conf"),
+        &machine.home_dir.join(".config/app/current.conf"),
+    );
+
+    let commit =
+        machine.run("dotsync commit all -m 'point current at real' -- .config/app/current.conf");
+    assert!(commit.status.success(), "{}", render_output(&commit));
+
+    assert_eq!(
+        remote_branch_entry_mode(&machine, "all", ".config/app/current.conf").as_deref(),
+        Some("120000"),
+        "the scope has to record it as a link, not as a file"
+    );
+    assert_eq!(
+        remote_branch_file_contents(&machine, "all", ".config/app/current.conf"),
+        "real.conf",
+        "and what it stores is the target"
+    );
+    assert!(
+        machine.is_symlink(".config/app/current.conf"),
+        "committing a link must leave home holding the same link"
+    );
+}
+
+/// The whole story, in the shape a person meets it: a versioned script and a
+/// `tool -> tool-1.2.0` link beside it. The link has to still be a link on the
+/// second machine, and must not have become a second copy of the script.
+///
+/// Named as a directory selection rather than naming the link exactly, so this
+/// fails on the round trip rather than on the refusal that
+/// `commit_records_a_symlink_as_a_symlink` covers: today the walk silently
+/// skips the link, machine A publishes only the script, and machine B has no
+/// link at all.
+#[test]
+fn a_symlink_to_a_sibling_script_survives_the_round_trip_to_another_machine() {
+    let harness = TestHarness::new();
+    let machine_a = harness.machine("machine-a", "linux", "box1");
+    let machine_b = harness.machine("machine-b", "linux", "box2");
+
+    let init_a = machine_a.init();
+    assert!(init_a.status.success(), "{}", render_output(&init_a));
+
+    machine_a.write_file(".local/bin/tool-1.2.0", "#!/bin/sh\necho tool\n");
+    symlink_at(
+        Path::new("tool-1.2.0"),
+        &machine_a.home_dir.join(".local/bin/tool"),
+    );
+
+    let commit =
+        machine_a.run("dotsync commit all -m 'ship tool and the current link' -- .local/bin/");
+    assert!(commit.status.success(), "{}", render_output(&commit));
+
+    let init_b = machine_b.init();
+    assert!(init_b.status.success(), "{}", render_output(&init_b));
+
+    assert_eq!(
+        machine_b.read_file(".local/bin/tool-1.2.0"),
+        "#!/bin/sh\necho tool\n"
+    );
+    assert!(
+        machine_b.is_symlink(".local/bin/tool"),
+        "the link has to arrive as a link (machine b holds: {:?})",
+        fs::read_to_string(machine_b.home_dir.join(".local/bin/tool")).ok()
+    );
+    assert_eq!(
+        machine_b.read_link(".local/bin/tool"),
+        PathBuf::from("tool-1.2.0"),
+        "pointing at its sibling, not carrying a second copy of it"
+    );
+}
+
+/// A difference in kind is a difference. Both fixtures below hold exactly the
+/// bytes the scope holds — the link's target text is the file's content, and
+/// vice versa — so the only thing that differs is whether the path is a link.
+/// Today both read as clean, because the drift read follows the link and then
+/// compares content.
+///
+/// Exit codes are the 2026-08-13 decision: `status` is concise and always
+/// exits 0, `diff` exits 1 when it finds anything.
+#[test]
+fn status_and_diff_report_a_kind_difference_between_a_link_and_a_file() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".apprc", "ui = dark\n");
+    seed_remote_scope_file(
+        &machine,
+        "mx-xps-cy",
+        ".config/app/real.conf",
+        "theme = dark\n",
+    );
+    seed_remote_scope_symlink(
+        &machine,
+        "mx-xps-cy",
+        ".config/app/current.conf",
+        "real.conf",
+    );
+    let sync = machine.run("dotsync");
+    assert!(sync.status.success(), "{}", render_output(&sync));
+
+    // A link where the scope holds a file, over content identical to the
+    // scope's.
+    let outside = harness.root_dir.join("outside/apprc.txt");
+    write_file_at(&outside, "ui = dark\n");
+    machine.replace_with_symlink(".apprc", &outside);
+
+    // A file where the scope holds a link, holding exactly the target text.
+    machine.replace_with_regular_file(".config/app/current.conf", "real.conf");
+
+    let status = machine.run("dotsync --output json status");
+    assert_eq!(status.status.code(), Some(0), "{}", render_output(&status));
+    let changed = parse_stdout_json(&status);
+    let changed = changed["changes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("changes should be an array\n{}", render_output(&status)));
+    for path in [".apprc", ".config/app/current.conf"] {
+        let entry = changed
+            .iter()
+            .find(|entry| entry["path"] == path)
+            .unwrap_or_else(|| {
+                panic!(
+                    "`{path}` differs from the scope in kind and must be reported\n{}",
+                    render_output(&status)
+                )
+            });
+        assert!(
+            entry["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("symlink")),
+            "the reason must name the kind difference rather than describing content\n{}",
+            render_output(&status)
+        );
+    }
+
+    let diff = machine.run("dotsync --output json diff");
+    assert_eq!(
+        diff.status.code(),
+        Some(1),
+        "diff exits 1 when it finds changes\n{}",
+        render_output(&diff)
+    );
+    let diffed = parse_stdout_json(&diff);
+    let diffed = diffed["changes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("changes should be an array\n{}", render_output(&diff)))
+        .iter()
+        .map(|entry| entry["path"].as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>();
+    for path in [".apprc", ".config/app/current.conf"] {
+        assert!(
+            diffed.iter().any(|reported| reported == path),
+            "`{path}` must be in diff's population too\n{}",
+            render_output(&diff)
+        );
+    }
+}
+
+/// The leak this whole area was found through, and the reason the blanket
+/// refusal existed: `selflink -> $HOME` used to walk all of home under an
+/// aliased prefix and publish 72 files, including `.ssh/id_ed25519`, `.netrc`
+/// and the whole hidden `.jj` store, exit 0.
+///
+/// Under "treat links as files and do not follow them" the sweep stays closed
+/// for a structural reason rather than a guard: `selflink` is one symlink
+/// entry, so there is no directory to walk. That is the claim here — recording
+/// the link is allowed, and home's contents still do not reach the remote.
+#[test]
+fn a_symlink_to_home_records_one_entry_rather_than_sweeping_home() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    let init_output = machine.init();
+    assert!(
+        init_output.status.success(),
+        "{}",
+        render_output(&init_output)
+    );
+
+    machine.write_file(".ssh/id_ed25519", "PRIVATE KEY\n");
+    machine.write_file(".netrc", "machine example.com login me password hunter2\n");
+    symlink_at(&machine.home_dir, &machine.home_dir.join("selflink"));
+
+    let commit = machine.run("dotsync commit all -m 'link to home' -- selflink/");
+    assert!(commit.status.success(), "{}", render_output(&commit));
+
+    assert_eq!(
+        remote_branch_entry_mode(&machine, "all", "selflink").as_deref(),
+        Some("120000"),
+        "a link to home is one link entry"
+    );
+
+    let published = remote_branch_entries(&machine, "all")
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect::<Vec<_>>();
+    for forbidden in [".ssh/id_ed25519", ".netrc", ".jj", "sync-state"] {
+        assert!(
+            !published.iter().any(|path| path.contains(forbidden)),
+            "`{forbidden}` must never reach the remote\npublished: {published:?}"
         );
     }
 }
