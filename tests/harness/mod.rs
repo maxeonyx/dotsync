@@ -916,6 +916,15 @@ pub fn render_output(output: &Output) -> String {
     )
 }
 
+/// Splits `dotsync commit all -m 'add base' -- .apprc` into argv the way a
+/// shell would, so a test can write the command a user would type.
+///
+/// It looks like a convenience worth deleting in favour of `&["commit", "all",
+/// ...]`, and it is not: `every_command_the_advice_names_is_a_command_dotsync_knows`
+/// pulls invocations out of dotsync's own stderr and runs them. That test
+/// cannot build an array from a string dotsync printed, so something has to
+/// split it, and having two ways to say "run this command" would be worse than
+/// having one.
 pub fn dotsync_args(command: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
