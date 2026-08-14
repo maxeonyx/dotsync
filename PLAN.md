@@ -218,6 +218,16 @@ The mark is not optional, and it is the reason `drift.rs` has fifteen states. Ta
 
 Max: *"you're talking about 'root causes' as if we're finding a line of code or a behaviour. But that's not right. Those are still derived from the design and from the process that produced the code."*
 
+His own summary of what the thirteen defects traced back to, before that correction pushed the analysis up a level:
+
+> We're discovering that we're using JJ wrong, and it causes many downstream issues.
+>
+> We're discovering that the code is a massive adhoc mess of cases, rather than being able to properly model a cascade
+>
+> We're discovering that we've got control flow heavy code instead of data-driven code.
+
+And the standard this whole section is held to, also his: **"Make invalid states unrepresentable. Make bugs impossible by construction. Relentlessly identify and destroy incidental complexity (while making sure always to keep enough essential complexity)."**
+
 **The design describes what you do, never what exists.** `DESIGN.md` specifies workflows. It never writes down the state space — that a scope head can be one commit, no commit, *or contested by two machines*; that a managed path has a kind; that a conflict is a base plus two sides. Because the third state of a bookmark was never written down as existing, six sites each invented an answer for it and produced five different ones (step 3 lists them). Nobody was careless; there was no definition to conform to. That is what "an ad-hoc mess of cases" is at the root.
 
 **One line of the design caused "we're using jj wrong".** DESIGN says dotsync should "abstract jj away entirely". For the user interface that is correct — nobody should see the word "bookmark". An agent implementing a data structure reads it as an instruction about the code, and the cheapest way to abstract a rich type is to narrow it at the boundary. The agents complied. Narrowing is what "using jj wrong" means. The corrected instruction: **hide jj from the user; do not narrow jj's types in the code — or prove the narrower type holds everything the wider one could.**
@@ -236,7 +246,7 @@ Those two together are what lets a machine publish a declaration that is fine fo
 - Declaring a new scope the way `docs/SKILL.md` instructs — edit `config.toml`, commit it to `all` — reports success and creates **no bookmark**, not at commit and not at sync. The scope is then unusable, and because the config cascades, `dotsync view` breaks on every machine in the fleet.
 - `DOTSYNC_HOSTNAME=linux` silently makes the shared OS scope this machine's "private" scope, and a "private" commit then reaches every other machine.
 
-**The tests follow the workflows, so nobody attacked the inputs.** `tests/user_flows.rs` is flows, and 22 tests already run two or more machines — the multi-machine case *is* exercised, and an earlier claim here that it was not was wrong. All thirteen known defects live inside workflows. Both machine-killers arrive through inputs: the hand-edited config, the ref namespace, the kind-space of the filesystem. Heuristic worth keeping: **the defects were found by driving states dotsync knows about; the disasters were found by attacking things dotsync accepts.**
+**The tests follow the workflows, so nobody attacked the inputs.** `tests/user_flows.rs` is flows, and 22 tests already run two or more machines — the multi-machine case *is* exercised, and an earlier claim here that it was not was wrong. All thirteen known defects live inside workflows. The wedging failures arrive through inputs instead: the hand-edited config, the ref namespace, the kind-space of the filesystem. Heuristic worth keeping: **the defects were found by driving states dotsync knows about; the disasters were found by attacking things dotsync accepts.**
 
 **No one owned the whole model, so the cheapest edit always won.** For an agent adding one feature, the cheapest correct change is another branch in the control flow or another guard at the one call site it can see. Nothing forced consolidation. The fingerprint: the commit path has four guards protecting dotsync's own repo, and the sync path has none — not a disagreement about policy, two paths written by people who could not see each other.
 
@@ -258,7 +268,7 @@ It also supplies machine identity from repo state, which is what unblocks step 4
 
 Honest costs: `WorkingCopy` is jj-lib internal API and will churn across versions, pinning dotsync more tightly; a correct `snapshot` has real detail in it, though far less than the general case because only a known path set is ever examined; and this is surgery on the centre of the tool, which is why step 1 comes first.
 
-**Step 3 — use jj's types instead of parallel ones.** Wherever dotsync builds its own model of something jj already models, its own model is lossier: `ScopeHeads` is a parallel copy of the repo's bookmarks (step 5 deletes it), `sync-state.json` is a parallel copy of the working copy's position (step 2 dissolves it), and a managed file's content carried without its kind is a parallel copy of `TreeValue` (step 2 again — that is the silently dropped executable bit). Narrowing is the failure mode that pattern produces, and the instance 2.2 already met is a bookmark's position. `RefTarget` is `Merge<Option<CommitId>>`, so a bookmark position has three real states — absent, exactly one commit, or *contested*, jj's own record that this machine and the remote both moved it. `as_normal()` returns `Some` only for "exactly one", so **`None` means both absent and contested**, and each of six sites then decides locally what that means:
+**Step 3 — just use jj's types.** Wherever dotsync builds its own model of something jj already models, its own model is lossier: `ScopeHeads` is a parallel copy of the repo's bookmarks (step 5 deletes it), `sync-state.json` is a parallel copy of the working copy's position (step 2 dissolves it), and a managed file's content carried without its kind is a parallel copy of `TreeValue` (step 2 again — that is the silently dropped executable bit). Narrowing is the failure mode that pattern produces, and the instance 2.2 already met is a bookmark's position. `RefTarget` is `Merge<Option<CommitId>>`, so a bookmark position has three real states — absent, exactly one commit, or *contested*, jj's own record that this machine and the remote both moved it. `as_normal()` returns `Some` only for "exactly one", so **`None` means both absent and contested**, and each of six sites then decides locally what that means:
 
 ```
 cascade.rs:49   if let Some(id) = target.as_normal()      → scope silently skipped mid-cascade

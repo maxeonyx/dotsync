@@ -35,6 +35,8 @@ Core flows implemented: `dotsync init`, sync, commit with cascade, conflict paus
 
 This project uses strict TDD via [tdd-ratchet](https://tdd-ratchet.maxeonyx.com). Run `cargo ratchet` instead of `cargo test`. New tests must fail first (committed as `pending`), then pass in a separate commit. See `.test-status.json` for current test states.
 
+**Renaming or deleting a test is supported — use the `renames` and `removals` entries in `.test-status.json`, edited in the same commit as the change.** Commit `1deeb74` already did this when it retired the commit/continue-era tests. Write this down here rather than relying on knowing it: the v0.3.24 harness extraction declined to split `tests/user_flows.rs` because nextest ids carry the module path, so moving a test renames it — and, not knowing about the renames bridge, it reasoned that a rename would look to the ratchet like a removal plus a brand-new test passing on its first run. That reasoning is sound and the conclusion was wrong, purely because the mechanism was undocumented in this repo.
+
 ## CI and Release
 
 PRs in this repo can be merged without approval (Max, 2026-08-12).
