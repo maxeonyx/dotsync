@@ -248,6 +248,15 @@ Those two together are what lets a machine publish a declaration that is fine fo
 
 **The tests follow the workflows, so nobody attacked the inputs.** `tests/user_flows.rs` is flows, and 22 tests already run two or more machines — the multi-machine case *is* exercised, and an earlier claim here that it was not was wrong. All thirteen known defects live inside workflows. The wedging failures arrive through inputs instead: the hand-edited config, the ref namespace, the kind-space of the filesystem. Heuristic worth keeping: **the defects were found by driving states dotsync knows about; the disasters were found by attacking things dotsync accepts.**
 
+**Two roots the steps below do not otherwise carry.** Both came from the 2026-08-14 root-cause review and neither was independently re-driven afterwards, so treat them as reported rather than confirmed — unlike the three breakages above, which were reproduced by hand.
+
+- **Dotsync acts on every ref on the remote while modelling only scopes, and never intersects the two.** Reported consequences: a stray git branch on the remote wedges every machine, and a routine `dotsync` silently restored a commit somebody had force-pushed away while reporting `status: "ok"`. This is the root that step 5 is most likely to reintroduce verbatim, because a convergence pass that iterates bookmarks inherits exactly this assumption.
+- **Two `dotsync commit` runs overlapping on one machine leave it permanently dead**, reported as four reproductions out of four, with the second run's work lost and both runs exiting 0.
+
+Also reported and not carried elsewhere: a file committed to a path under `~/.local/share/dotsync/` can be written back over the repo's own `git_target`, after which the machine never starts again — the commit path has guards against dotsync's own repo, the sync path does not.
+
+**The warning attached to that review, worth keeping in front of whoever does step 5:** the convergence pass reintroduces both of the type-level roots unchanged if it iterates bookmarks and calls `as_normal()`.
+
 **No one owned the whole model, so the cheapest edit always won.** For an agent adding one feature, the cheapest correct change is another branch in the control flow or another guard at the one call site it can see. Nothing forced consolidation. The fingerprint: the commit path has four guards protecting dotsync's own repo, and the sync path has none — not a disagreement about policy, two paths written by people who could not see each other.
 
 #### 2.3 The refactor sequence, in dependency order
