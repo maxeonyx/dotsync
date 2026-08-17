@@ -132,7 +132,7 @@ Scopes are branches, so a scope has a head. That head is in exactly one of:
 
 Contested is the state that was missing. It is not exotic and it is not a corruption: "The convergence model" below argues that two machines writing to one scope is a routine event rather than an edge case, and contested is simply what that event looks like before it has been converged. A repo holding a contested `linux` is a healthy repo that has been told two things and has not yet been asked to reconcile them.
 
-Two consequences follow, and both are load-bearing:
+Two consequences follow, and both matter:
 
 - **Divergence is not an error class.** A contested head is an input to a merge, not a condition to refuse on. Any command that treats "I cannot read a single commit id out of this head" as "this scope is not in the repo" is stating something false — the scope is in the repo, and it is contested.
 - **Absent and contested are different states and must never share a representation.** They have nothing in common except that neither of them is a single commit id, and collapsing them is what produced the five answers.
@@ -298,7 +298,7 @@ If markers are materialized, "the agent is done" is legible from the file itself
 
 If they are not materialized, home reads identically before the agent starts and after it decides to keep its own side unchanged. "I am done" becomes exactly the thing dotsync cannot find out on its own, and `continue` survives on the standing rule that every write command carries a decision only the user can make. The tempting shortcut — treat an unchanged file as unresolved — is the thing to avoid: it is silently wrong for the agent that legitimately resolved the conflict by keeping its own side.
 - **Conflicted heads are not pushed.** They stay local-ahead — a normal convergence state — until resolved; everything non-conflicted still pushes. This keeps the shared remote free of conflict encodings (which plain git tooling renders poorly) at the cost that only the machine holding the conflict can resolve it.
-- **`abort` goes back to the last fully cascaded machine scope tip.** It abandons the unpushed conflicted commits, returns the affected scope bookmarks to their last non-conflicted positions, and reverts **all** the config files — a full sync of home to the machine scope's last fully cascaded tip, not a selective restore. Conflict markers and the home edit that caused the aborted commit are both gone from home afterward; that's the point of abort. Pushed history is never touched — conflicted heads are never pushed, so everything abandoned is local-only. Clean remote integration discarded along the way costs nothing: the next convergence pass re-derives it.
+- **`abort` goes back to the last fully cascaded machine scope tip.** It abandons the unpushed conflicted commits, returns the affected scope bookmarks to their last non-conflicted positions, and reverts **all** the config files — a full sync of home to the machine scope's last fully cascaded tip, not a selective restore. Whatever the pause put into home, and the home edit that caused the aborted commit, are both gone from home afterward; that's the point of abort. Pushed history is never touched — conflicted heads are never pushed, so everything abandoned is local-only. Clean remote integration discarded along the way costs nothing: the next convergence pass re-derives it.
 
 ## Failure model: no dead ends
 
