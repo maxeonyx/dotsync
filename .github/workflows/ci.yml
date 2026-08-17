@@ -3,6 +3,11 @@ name: CI
 on:
   push:
     branches: [main]
+    # Broad on purpose: anything that can break a build, a test or the published
+    # site should be checked here. Whether a push also publishes a *release* is a
+    # narrower question, answered by ARTIFACT_FILES/ARTIFACT_DIRS in
+    # scripts/check_main_version_bump.py. Those must stay a subset of this list,
+    # and scripts/test_check_main_version_bump.py checks that they are.
     paths:
       - .github/workflows/ci.yml
       - Cargo.toml
@@ -13,7 +18,7 @@ on:
       - .test-status.json
       - rust-toolchain.toml
       - devenv.*
-      - docs/version.json
+      - docs/**
   workflow_dispatch:
 
 permissions:
@@ -54,6 +59,8 @@ jobs:
       - name: Enforce main version bump
         if: github.ref == 'refs/heads/main'
         run: python3 scripts/check_main_version_bump.py range --base ${{ github.event.before }} --head ${{ github.sha }}
+      - name: Test the release guard
+        run: python3 scripts/test_check_main_version_bump.py
       - name: Check formatting
         run: cargo fmt --check
       - name: Clippy
@@ -142,15 +149,18 @@ jobs:
         run: |
           tag="${{ steps.version.outputs.tag }}"
           if gh release view "$tag" >/dev/null 2>&1; then
-            echo "Release $tag already exists. Every push to main must bump the version so CI can publish these changes as a new release." >&2
-            exit 1
+            echo "Release $tag already exists, so this push changed nothing that feeds the binary. Nothing to publish."
+            exit 0
           fi
           gh release create "$tag" artifacts/*/* --title "$tag" --generate-notes
 
   pages:
     name: Pages
     runs-on: ubuntu-latest
-    needs: [build]
+    # After the release, not alongside it: the site publishes docs/version.json,
+    # which the agent-tools umbrella reads to decide what the current release is.
+    # If publishing the release fails, the site must not start advertising it.
+    needs: [release]
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
