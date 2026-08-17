@@ -1,7 +1,12 @@
 // The black-box test harness: a fake remote, per-machine environments that run
 // the real `dotsync` binary against a temporary `HOME`, fixture builders that
 // put state on the remote the way another machine would have, and the
-// assertion helpers the scenarios in `user_flows.rs` share.
+// assertion helpers the scenario files beside this one share.
+//
+// Every scenario file is its own test binary and compiles this module
+// separately, so each one uses only part of it — hence the blanket
+// `dead_code` allow below, which is about the split, not about anything here
+// being unused.
 //
 // The jj-lib reading below is a deliberately separate client from
 // `src/repo.rs`, not duplication waiting to be removed. These are black-box
@@ -13,6 +18,8 @@
 //
 // Everything in `src/repo.rs` is `pub(crate)` anyway, so sharing would mean
 // widening the library's public API for the tests' benefit.
+
+#![allow(dead_code)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
