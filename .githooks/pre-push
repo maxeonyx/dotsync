@@ -25,11 +25,9 @@ if [[ "$pushes_main" -eq 0 ]]; then
     exit 0
 fi
 
+# Only the version check runs here. Clippy and the ratchet are CI's job: running
+# them again costs a minute on every push, and the ratchet cannot run from a hook
+# at all, because git exports GIT_DIR and GIT_WORK_TREE into the test processes
+# (https://github.com/maxeonyx/tdd-ratchet-rs/issues/4).
 printf '%s\n' 'dotsync pre-push: validating main push version bump...'
 python3 scripts/check_main_version_bump.py pre-push <<<"$updates"
-
-printf '%s\n' 'dotsync pre-push: running cargo clippy -- -D warnings...'
-cargo clippy -- -D warnings
-
-printf '%s\n' 'dotsync pre-push: running cargo ratchet...'
-cargo ratchet
