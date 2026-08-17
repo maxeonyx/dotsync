@@ -102,7 +102,7 @@ This lives on the `all` branch (since every machine needs the full graph).
 
 Everything above this section describes what dotsync *does*. This section describes what can *exist*.
 
-That distinction is worth a section of its own because a design which only ever specifies workflows leaves each implementation site to fill the gap on its own. Concretely: a scope's head can be in three states, this document had only ever described two of them, and six places in the code each decided independently what the third one meant. They produced five different answers, two of which were to silently skip the scope. Nobody was careless — there was no definition to conform to, so each site invented one, and the five inventions had no reason to agree.
+That distinction is worth a section of its own because a design which only ever specifies workflows leaves each implementation site to fill the gap on its own. Concretely: a scope's head can be in three states, this document never wrote down that it has states at all, and six places in the code each ended up deciding independently what the third one meant. They produced five different answers, two of which were to silently skip the scope. Nobody was careless — there was no definition to conform to, so each site invented one, and five independent inventions had no reason to agree.
 
 The standard the rest of this section is held to is **make invalid states unrepresentable**, and that is only achievable if the valid states are written down first.
 
@@ -139,7 +139,7 @@ Two consequences follow, and both matter:
 
 ### A managed path has a kind, not just content
 
-"What is at this path" is a kind plus, where the kind has one, some content. The kinds are: absent, regular file (which additionally carries whether it is executable), symlink (whose content is its target string, never the file it points at), and directory.
+"What is at this path" is a kind, and then whatever content that kind carries. The kinds are: absent, regular file (which also carries whether it is executable), symlink (whose content is its target string, never the file it points at), and directory.
 
 Kind is not decoration on top of content, and treating a managed path as bytes alone loses real states. Two paths holding identical bytes can still differ: `.config/app.conf` as a regular file and `.config/app.conf` as a symlink whose target happens to be the same string are different things, and one is not a sync of the other. A shell script that is executable in the repo and not executable in home differs in a way that decides whether it runs. And `.config/app.conf` becoming the directory `.config/app.conf/main.conf` is an ordinary thing for an application to ask of its user, representable only if absent-versus-file-versus-directory is part of the model.
 
