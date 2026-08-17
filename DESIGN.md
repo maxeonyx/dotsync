@@ -294,7 +294,7 @@ This is mostly a corollary of the convergence model: interrupted work leaves loc
 
 The steady-state command is `dotsync`, and it is the one an agent runs by reflex. The others exist because they answer questions `dotsync` cannot: how to join a remote in the first place, what changed here, and what to do when a cascade pauses. `dotsync` itself never splits into commit/cascade/push steps — see "Why one command?" below.
 
-**`dotsync init <remote-url>`**: Clone the remote into the hidden repo, work out this machine's OS and machine scopes, create them if the remote does not have them yet, and sync the resulting machine scope into home. The only command that requires the remote to be reachable: it is the whole of its job. It writes the scope graph to `.config/dotsync/config.toml` with a comment per scope — see "Agent skill" below for why those comments are the load-bearing part.
+**`dotsync init <remote-url>`**: Clone the remote into the hidden repo, work out this machine's OS and machine scopes, create them if the remote does not have them yet, and sync the resulting machine scope into home. The only command that requires the remote to be reachable: it is the whole of its job. It writes the scope graph to `.config/dotsync/config.toml`.
 
 **`dotsync`** (no arguments): Pull and converge scope branches (merging remote changes and cascading, pausing on conflicts), sync repo -> system, push. It does not import home edits; use `dotsync status` and `dotsync commit <scope> -m "message" -- <paths...>` when home changes should be recorded.
 
@@ -337,11 +337,13 @@ dotsync includes an agent skill (`dotfiles`) that triggers whenever any home dir
 
 1. Edit files directly in `~/` at their real locations
 2. Run `dotsync status` to see changed managed files
-3. Read `.config/dotsync/config.toml` from the `all` scope to see available scopes — the config file contains comments explaining what each scope is for and guiding scope selection
+3. Read `.config/dotsync/config.toml` from the `all` scope to see available scopes
 4. Choose the root-est appropriate scope for the change
 5. Run `dotsync commit <scope> -m "description" -- <paths...>` when done
 
-This is the mechanism that makes the system agent-friendly. The tool itself is simple plumbing — the skill is what makes agents use the plumbing correctly. The comments in the config file are load-bearing: they're how agents learn "hyprland stuff goes on `hyprland`, not `linux`."
+This is the mechanism that makes the system agent-friendly. The tool itself is simple plumbing — the skill is what makes agents use the plumbing correctly.
+
+An earlier version of this document claimed the comments in `config.toml` are load-bearing — that they are how an agent learns "hyprland stuff goes on `hyprland`, not `linux`". They are not (Max, 2026-08-14: *"I don't think the scope comments are 'load bearing' lol? they're pretty obvious"*). A scope called `hyprland` says what belongs on it by being called `hyprland`, and step 4 above is the actual rule. Comments there are ordinary commentary, useful when a scope's name is not self-evident and carrying nothing when it is. Read as a requirement, that claim is what produced machinery to generate a comment for every scope at `init` and to preserve comments when a joining machine edits the file; nothing else depends on that machinery existing.
 
 ## What dotsync is NOT
 
