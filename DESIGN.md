@@ -98,6 +98,74 @@ mx-pc-win = { parents = ["windows"] }
 
 This lives on the `all` branch (since every machine needs the full graph).
 
+## The state space
+
+Everything above this section describes what dotsync *does*. This section describes what can *exist*.
+
+That distinction is worth a section of its own because a design which only ever specifies workflows leaves each implementation site to fill the gap on its own. Concretely: a scope's head can be in three states, this document had only ever described two of them, and six places in the code each decided independently what the third one meant. They produced five different answers, two of which were to silently skip the scope. Nobody was careless — there was no definition to conform to, so each site invented one, and the five inventions had no reason to agree.
+
+The standard the rest of this section is held to is **make invalid states unrepresentable**, and that is only achievable if the valid states are written down first.
+
+Written abstractly, on purpose. What the code calls each of these is a separate, explicitly non-authoritative mapping at the end of the section, so that renaming a type or restructuring a module is never a change to this document.
+
+### Three things, and only three
+
+1. **Home** — what this machine has right now at the managed paths.
+2. **The repo** — what every machine should have, layered by scope. Config, conflicts and pause state are all data inside this.
+3. **The mark** — which commit this machine last materialized into home. One id.
+
+The mark is the one people leave out, so here is why it is not optional. Take `.config/app.conf`, where home holds `setting = "b"` and the machine scope holds `setting = "a"`. Those two facts alone do not tell you what to do next. If the mark says this machine last wrote `"a"` into home, then somebody edited the file afterwards, and syncing over it throws that edit away. If the mark says this machine last wrote `"b"`, then the repo moved on somewhere else and syncing over it is the entire job. Identical observations of home and the repo, opposite correct actions. The mark is the only thing that separates them.
+
+That is also why the drift classification in the next section is a three-way comparison rather than a comparison of home against the repo. The "last-synced tree `L`" in that table is the tree of the commit the mark names.
+
+`config.toml` is not a fourth thing. It is a managed file, living in home and on the `all` scope, which is exactly why editing it and committing it propagates like any other config. Its one genuinely special property is a self-reference: the scope graph is needed in order to compute the layering, and it is stored inside the layered thing. That works only because it lives on `all`, the root, which can be read without knowing the graph first.
+
+Everything in this section is small, and that is the point. The essential complexity of the product is a DAG of config scopes, a rule for which scope a change belongs on, and a cascade that layers them down to each machine. jj has no opinion about any of it. Bookmarks, commits and conflict representation are *not* fundamental — they are how (2) happens to be stored, and are free to change.
+
+### A scope head has three states
+
+Scopes are branches, so a scope has a head. That head is in exactly one of:
+
+- **absent** — the repo holds no head for this scope. A scope named in `config.toml` that was never created is here.
+- **exactly one commit** — the ordinary state.
+- **contested** — two machines moved it and it currently holds two candidate values at once. Neither is "the" head.
+
+Contested is the state that was missing. It is not exotic and it is not a corruption: "The convergence model" below argues that two machines writing to one scope is a routine event rather than an edge case, and contested is simply what that event looks like before it has been converged. A repo holding a contested `linux` is a healthy repo that has been told two things and has not yet been asked to reconcile them.
+
+Two consequences follow, and both are load-bearing:
+
+- **Divergence is not an error class.** A contested head is an input to a merge, not a condition to refuse on. Any command that treats "I cannot read a single commit id out of this head" as "this scope is not in the repo" is stating something false — the scope is in the repo, and it is contested.
+- **Absent and contested are different states and must never share a representation.** They have nothing in common except that neither of them is a single commit id, and collapsing them is what produced the five answers.
+
+### A managed path has a kind, not just content
+
+"What is at this path" is a kind plus, where the kind has one, some content. The kinds are: absent, regular file (which additionally carries whether it is executable), symlink (whose content is its target string, never the file it points at), and directory.
+
+Kind is not decoration on top of content, and treating a managed path as bytes alone loses real states. Two paths holding identical bytes can still differ: `.config/app.conf` as a regular file and `.config/app.conf` as a symlink whose target happens to be the same string are different things, and one is not a sync of the other. A shell script that is executable in the repo and not executable in home differs in a way that decides whether it runs. And `.config/app.conf` becoming the directory `.config/app.conf/main.conf` is an ordinary thing for an application to ask of its user, representable only if absent-versus-file-versus-directory is part of the model.
+
+So a difference of kind is a difference: `status` and `diff` report it, and sync replaces rather than writes through. That is the same rule "Repo structure" states for symlinks, generalised to the reason behind it.
+
+### A conflict is a base plus two sides
+
+A conflict is a first-class object with three parts: the base — the content both sides started from — and the two sides themselves. It is not one side with the other discarded, and it is not a file with `<<<<<<<` in it.
+
+The markers are a *rendering* of the object, not the object. That matters twice over. It is why the base can be shown at all, since a rendering can include a part that a two-sided model would have had nowhere to put. And it is why the question of where and whether to render markers is a presentation choice made over a real object that already exists — see "The resolution surface" below, where that choice is still open.
+
+### A non-authoritative map to the code
+
+The names below are where these states lived in the code as of v0.3.26. This table is a reading aid, not a specification. Refactoring is free to move any of it without an edit to this document, and where it disagrees with the abstract states above, the abstract states are right and this table is stale.
+
+| State | Where it lives today |
+| --- | --- |
+| Home | the filesystem, at the managed paths |
+| The repo | the hidden jj repo at `~/.local/share/dotsync/repo/` |
+| The mark | `last_synced_revision` in the machine-local sync state file, beside `machine_scope` |
+| A scope head, three states | jj's `RefTarget`, which is a merge of optional commit ids — absent, single, or contested |
+| The kind of a managed path | jj's `TreeValue`, whose `File` variant carries the executable bit and whose `Symlink` variant carries a target |
+| A conflict | jj's own conflict representation, which is natively a base plus both sides |
+
+Every row is jj's own type or jj's own storage, apart from home itself. That is deliberate, and "The jj decision" below explains why building a parallel model of any of them makes it lossier.
+
 ## Sync and commit direction
 
 Plain sync is always repo -> system. The repo is the durable source of truth, and `dotsync` with no scope materializes the current machine scope into `~/`.
