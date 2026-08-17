@@ -319,7 +319,20 @@ Empty commit message, settled and minimum-effort: `dotsync commit <scope> -m ""`
 
 **Step 8 — bring `config.toml` back as a declaration, with a real reconciler, and delete the imperative scope commands.** Max: *"bring back config.toml with reconciler instead of imperative scope commands."* The imperative commands disappear as user surface but survive as the reconciler's internal operations — the payoff for building them first. Needs step 5 underneath, because rename, reparent and delete all require re-cascading and moving history. Within it, **add** is the easy case: a newly declared scope needs a bookmark whose first commit merges from its declared parents, which is what `init` already does for a machine scope and simply is not run for scopes that appear later. The declaration must also be validated against what dotsync can actually deliver, by the machine publishing it, so an unsupported rearrangement is refused at commit time rather than detonating on someone else's machine. This is where "declared vs actual" gets a real answer and the fleet-killer closes structurally rather than by a guard.
 
-#### 2.4 The process change
+#### 2.4 Where DESIGN still describes the current tool, not the planned one
+
+Step 0 wrote the state space into `DESIGN.md` and made the three corrections it owed (the "abstract jj away entirely" instruction, the load-bearing-comments claim, and conflict materialisation stated as settled). It deliberately left six places where DESIGN documents behaviour that a later step changes, because writing them now would be designing ahead of decisions those steps make. Each one is the step's to update when it lands:
+
+- **`dotsync show conflict`** is its own command in DESIGN, tagged "not implemented — PLAN item 3", and item 3 no longer means that. Step 7 folds it into `view`.
+- **`--force`** has a paragraph in the drift section and a line under exit codes describing its two shapes. Step 7 replaces it with `discard <paths>`.
+- **The four-code exit table**, with 3 as a property of state, is presented as settled. Step 7 collapses exit codes toward worked/didn't with the JSON carrying the kind.
+- **`sync-state.json`** — DESIGN says "the only machine-local state is the sync state file" and specifies `[sync] state_path` in `config.toml`. Step 2 dissolves the file into jj's own working-copy record. The *mark* survives either way, which is why the new state space section says nothing about how it is stored.
+- **`config.toml` has no reconciler in DESIGN**, and DESIGN says nothing about how a scope gets created after `init` — which is precisely the gap the "declare a scope, get no bookmark" breakage lives in. Steps 4 and 8 own this.
+- **DESIGN line 47**: *"dotsync knows which scope is current from machine-local sync state and the configured scope graph."* Step 2 supplies machine identity from repo state and step 4 derives the graph from actual state, so both halves stop being true.
+
+One deliberate inconsistency to leave alone for now: PLAN says fifteen drift classes (the code's count) and DESIGN's table has thirteen rows. Step 0 declined to put a number in DESIGN rather than contradict the table beneath it.
+
+#### 2.5 The process change
 
 Every batch on 2026-08-14 went to a fresh agent with a tightly scoped task. That is efficient, and it is precisely the process that produces four guards on the commit path and none on the sync path. For this rewrite, **one agent owns the model** across steps 2 through 6, with reviewers checking its work. Scoped agents remain right for the mechanical parts: the test split, the input tests, the error consolidation.
 
