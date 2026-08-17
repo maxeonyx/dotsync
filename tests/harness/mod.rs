@@ -1,7 +1,12 @@
 // The black-box test harness: a fake remote, per-machine environments that run
 // the real `dotsync` binary against a temporary `HOME`, fixture builders that
 // put state on the remote the way another machine would have, and the
-// assertion helpers the scenarios in `user_flows.rs` share.
+// assertion helpers the scenario files beside this one share.
+//
+// Every scenario file is its own test binary and compiles this module
+// separately, so each one uses only part of it — hence the blanket
+// `dead_code` allow below, which is about the split, not about anything here
+// being unused.
 //
 // The jj-lib reading below is a deliberately separate client from
 // `src/repo.rs`, not duplication waiting to be removed. These are black-box
@@ -13,6 +18,8 @@
 //
 // Everything in `src/repo.rs` is `pub(crate)` anyway, so sharing would mean
 // widening the library's public API for the tests' benefit.
+
+#![allow(dead_code)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1110,47 +1117,108 @@ pub fn quoted_dotsync_invocations(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// A conflict as DESIGN asks for it to be materialized: git-style markers
-/// ("Agents have deep priors on this exact format"), the base included, and
-/// the sides labelled with the scopes whose changes are colliding rather than
-/// with commit ids.
+/// A conflict has to reach the agent whole: both sides and the version they
+/// both came from. Anything less and the agent is asked to merge something it
+/// can only see part of.
 ///
-/// The labels are asked of the marker lines only, and only that the scope
-/// names appear on them — where each one goes, and what else the line says, is
-/// jj's materialization and the implementer's.
-pub fn assert_materialized_conflict(
-    contents: &str,
-    colliding_scopes: [&str; 2],
+/// **Where** it reaches the agent is deliberately open. PLAN §2.3 step 6:
+/// "Conflict presentation is not settled and is decided by the agent
+/// validation loop, not here" — writing `<<<<<<<` into live config is one
+/// answer and describing the conflict without touching the file is another,
+/// and which one an agent actually works better with is an empirical question
+/// nobody has run yet. The base is in either answer (Max: "Yes the base is
+/// supposed to be included"), and a jj conflict is natively a base plus both
+/// sides, so this is a rendering choice over a real object.
+///
+/// So the channels here are the two the agent has without going anywhere: what
+/// the run that stopped said, on both streams, and the file in home. A design
+/// that writes markers passes through the second; a design that describes the
+/// conflict in the stop passes through the first. Nothing here says which.
+pub fn assert_the_conflict_is_in_front_of_the_agent(
+    machine: &MachineEnvironment,
+    stop: &Output,
+    path: &str,
     versions: [&str; 3],
-    context: &str,
 ) {
-    for marker in ["<<<<<<<", "|||||||", "=======", ">>>>>>>"] {
-        assert!(
-            contents.lines().any(|line| line.starts_with(marker)),
-            "home holds no `{marker}` line, so the conflict is not in front of the agent at all\n--- home ---\n{contents}\n--- the run that paused ---\n{context}"
-        );
+    let in_home = if machine.file_exists(path) {
+        machine.read_file(path)
+    } else {
+        String::from("(nothing at that path)")
+    };
+    let presented = format!(
+        "--- what the run that stopped said ---\n{}\n--- home: {path} ---\n{in_home}",
+        render_output(stop)
+    );
+
+    let missing: Vec<&str> = versions
+        .into_iter()
+        .filter(|version| !presented.contains(version))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the agent is asked to merge a conflict it cannot see all of: {} reached it through neither the run that stopped nor home\n{presented}",
+        missing
+            .iter()
+            .map(|version| format!("`{version}`"))
+            .collect::<Vec<_>>()
+            .join(" and ")
+    );
+}
+
+/// The no-dead-ends principle, asked as a question a machine can answer:
+/// "Every state dotsync can produce ... must be a state that dotsync commands
+/// alone can diagnose and recover from ... Never 'go do repo surgery.'"
+///
+/// Run dotsync. If it worked, this machine is fine and there is nothing to
+/// recover from. If it stopped, do what it said to do — every dotsync
+/// invocation it quoted — and run dotsync again. That second run is the
+/// question.
+///
+/// Following dotsync's own advice rather than a fixed sequence is the whole
+/// point: this makes no claim about which command the route back is, whether
+/// there is one command or three, or what any of them are called. Only that
+/// dotsync names it. A machine that is told what is wrong but not how to get
+/// out of it fails here, and so does one that is told nothing at all.
+pub fn assert_dotsync_can_get_this_machine_working(machine: &MachineEnvironment) {
+    let stop = machine.run("dotsync");
+    if stop.status.success() {
+        return;
     }
-    for version in versions {
-        assert!(
-            contents.contains(version),
-            "the materialized conflict is missing `{version}`, and the base is one of the three\n--- home ---\n{contents}"
-        );
+
+    let said = render_output(&stop);
+    let mut followed = String::new();
+    for invocation in quoted_dotsync_invocations(&said) {
+        let output = machine.run(&invocation);
+        followed.push_str(&format!(
+            "--- {invocation} ---\n{}\n",
+            render_output(&output)
+        ));
     }
-    let labels: String = contents
-        .lines()
-        .filter(|line| {
-            ["<<<<<<<", "|||||||", "=======", ">>>>>>>"]
-                .iter()
-                .any(|marker| line.starts_with(marker))
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    for scope in colliding_scopes {
-        assert!(
-            labels.contains(scope),
-            "the sides have to be labelled with the scopes whose changes are colliding, and `{scope}` is not on any marker line\n--- marker lines ---\n{labels}"
-        );
+
+    let again = machine.run("dotsync");
+    assert!(
+        again.status.success(),
+        "this machine has no route back: `dotsync` stopped, and doing everything it said to do left it stopped\n--- dotsync ---\n{said}\n{followed}--- dotsync, having followed that advice ---\n{}",
+        render_output(&again)
+    );
+}
+
+/// Which scope dotsync says is this machine's own, or `None` if it will not
+/// say — because the run failed, or because it answered without naming one.
+///
+/// A test that wants to act on "this machine's own scope" has to ask, rather
+/// than assume the hostname: what dotsync calls this machine is the thing
+/// under test wherever this is used.
+pub fn machine_scope_reported_by(machine: &MachineEnvironment) -> Option<String> {
+    let status = machine.run("dotsync status --output json");
+    if !status.status.success() {
+        return None;
     }
+    serde_json::from_slice::<serde_json::Value>(&status.stdout)
+        .ok()?
+        .get("machine_scope")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// Removes every machine-local record dotsync keeps beside its repo, so a test

@@ -10,6 +10,12 @@ This file guides AI agents working on the dotsync codebase itself. This tool is 
 - Read `README.md` when updating public-facing positioning, quick-start content, or outbound links.
 - Read `docs/SKILL.md` only when editing the end-user dotfiles workflow skill that agents load while changing config files.
 
+## Stakes, and how to write about them
+
+Don't reach for "safety", "risk" or data-loss drama when describing this repo's work. Max, 2026-08-14: *"I don't care about 'safety' in this repo, frankly. It's low stakes. Just do the work - regression is not a 'problem' per say, it's just inconvenient (and the whole point of this project is convenience)."*
+
+Tests, review and the ratchet are here because they make the work faster and less annoying, not because a regression is a disaster. Describe a defect by what it does to the person using it — "the machine stops syncing until you fix the file by hand" — rather than by how alarming it sounds.
+
 ## Project Overview
 
 `dotsync` is a Rust CLI that wraps `jj` (Jujutsu) workflows for dotfile synchronization using scope branches and merge cascades.
@@ -35,7 +41,7 @@ Core flows implemented: `dotsync init`, sync, commit with cascade, conflict paus
 
 This project uses strict TDD via [tdd-ratchet](https://tdd-ratchet.maxeonyx.com). Run `cargo ratchet` instead of `cargo test`. New tests must fail first (committed as `pending`), then pass in a separate commit. See `.test-status.json` for current test states.
 
-**Renaming or deleting a test is supported — use the `renames` and `removals` entries in `.test-status.json`, edited in the same commit as the change.** Commit `1deeb74` already did this when it retired the commit/continue-era tests. Write this down here rather than relying on knowing it: the v0.3.24 harness extraction declined to split `tests/user_flows.rs` because nextest ids carry the module path, so moving a test renames it — and, not knowing about the renames bridge, it reasoned that a rename would look to the ratchet like a removal plus a brand-new test passing on its first run. That reasoning is sound and the conclusion was wrong, purely because the mechanism was undocumented in this repo.
+**Renaming or deleting a test is supported — use the `renames` and `removals` entries in `.test-status.json`, edited in the same commit as the change.** `renames` maps **new name to old name**; the ratchet takes the old name's recorded state, moves it onto the new name, and requires that the old name is tracked, the new name is not yet tracked, and the run saw the new name and not the old one. It reads the applied renames back out of the commit's history snapshot afterwards, so the entry is a one-commit bridge: drop it in the next commit or every future run warns that it is stale. Commits `1deeb74` and `39f73c6` both used it — the second moved all 146 scenarios out of `tests/user_flows.rs` into eleven area files, since nextest ids carry the module path and moving a test therefore renames it.
 
 ## CI and Release
 
