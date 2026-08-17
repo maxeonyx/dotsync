@@ -11,6 +11,14 @@ from dataclasses import dataclass
 ZERO_OID = "0" * 40
 DOCS_VERSION_PATH = "docs/version.json"
 
+# A push only has to mint a release when the binary CI publishes could differ
+# from the one already published. These are the paths that feed `cargo build`:
+# the sources, the manifest, the locked dependency versions, and the toolchain
+# pin. Markdown, tests, CI config and dev-shell files change how the repo is
+# worked on, not what comes out of the compiler, so they push freely.
+ARTIFACT_FILES = frozenset({"Cargo.toml", "Cargo.lock", "rust-toolchain.toml"})
+ARTIFACT_DIRS = ("src/",)
+
 
 @dataclass(frozen=True)
 class PackageVersion:
@@ -61,6 +69,16 @@ def git_first_parent(ref: str) -> str | None:
     if len(parents) < 2:
         return None
     return parents[1]
+
+
+def path_feeds_binary(path: str) -> bool:
+    return path in ARTIFACT_FILES or path.startswith(ARTIFACT_DIRS)
+
+
+def artifact_changes(base_ref: str, head_ref: str) -> list[str]:
+    """The changed paths between two trees that could change the built binary."""
+    changed = git_stdout("diff", "--name-only", "--no-renames", base_ref, head_ref)
+    return sorted(path for path in changed.decode("utf-8").splitlines() if path_feeds_binary(path))
 
 
 def git_ref_exists(ref: str) -> bool:
@@ -140,29 +158,40 @@ def ensure_versions_consistent(ref: str) -> PackageVersion:
     return package
 
 
-def ensure_release_tag_unused(package: PackageVersion, head_ref: str) -> None:
+def describe_changes(changed: list[str]) -> str:
+    if len(changed) <= 5:
+        return ", ".join(changed)
+    return ", ".join(changed[:5]) + f", and {len(changed) - 5} more"
+
+
+def ensure_release_tag_unused(package: PackageVersion, head_ref: str, changed: list[str]) -> None:
     tag_ref = f"refs/tags/v{package.version}"
     if git_ref_exists(tag_ref):
         raise VersionCheckError(
-            f"{head_ref} sets {package.name} to version {package.version}, but tag v{package.version} already exists. "
-            "Every push to main must use a fresh crate version so CI publishes these changes as a new release."
+            f"{head_ref} changes what CI would build ({describe_changes(changed)}) and sets {package.name} to "
+            f"version {package.version}, but tag v{package.version} already exists. Use a fresh crate version so "
+            "CI publishes these changes as a new release."
         )
 
 
-def ensure_main_version_bumped(base_ref: str, head_ref: str) -> None:
-    base_package = load_package_version(base_ref)
-    head_package = ensure_versions_consistent(head_ref)
-    if base_package.name != head_package.name:
+def ensure_version_bumped(
+    baseline: VersionBaseline,
+    head_package: PackageVersion,
+    head_ref: str,
+    changed: list[str],
+) -> None:
+    if baseline.package.name != head_package.name:
         raise VersionCheckError(
-            f"package name changed from {base_package.name} to {head_package.name}; "
-            "main push guard expects the same package"
+            f"package name changed from {baseline.package.name} at {baseline.ref} to {head_package.name} "
+            f"at {head_ref}; main push guard expects the same package"
         )
-    if base_package.version == head_package.version:
-        raise VersionCheckError(
-            f"main push would keep {head_package.name} at version {head_package.version}. "
-            f"Every push to main must bump Cargo.toml, Cargo.lock and {DOCS_VERSION_PATH} first "
-            "so CI publishes the new changes as a new release."
-        )
+    if baseline.package.version != head_package.version:
+        return
+    raise VersionCheckError(
+        f"main push changes what CI would build ({describe_changes(changed)}) but keeps {head_package.name} at "
+        f"version {head_package.version}, the same version as {baseline.ref}. Bump Cargo.toml, Cargo.lock and "
+        f"{DOCS_VERSION_PATH} together so CI publishes these changes as a new release."
+    )
 
 
 def load_fallback_baseline(head_ref: str) -> VersionBaseline | None:
@@ -177,51 +206,48 @@ def load_fallback_baseline(head_ref: str) -> VersionBaseline | None:
     return None
 
 
-def handle_range(base_ref: str, head_ref: str) -> None:
-    head_package = ensure_versions_consistent(head_ref)
-    ensure_release_tag_unused(head_package, head_ref)
-    if base_ref == ZERO_OID:
-        return
-
+def resolve_baseline(base_ref: str, head_ref: str) -> VersionBaseline:
     if git_commit_exists(base_ref):
-        ensure_main_version_bumped(base_ref, head_ref)
-        return
+        return VersionBaseline(ref=base_ref, package=load_package_version(base_ref))
 
     fallback = load_fallback_baseline(head_ref)
     if fallback is None:
         raise VersionCheckError(
             f"cannot read rewritten main base {base_ref}, and no local fallback baseline is available for {head_ref}."
         )
+    print(f"dotsync release guard: cannot read main base {base_ref}; comparing against {fallback.ref} instead.")
+    return fallback
 
-    if fallback.package.name != head_package.name:
-        raise VersionCheckError(
-            f"package name changed from {fallback.package.name} at fallback baseline {fallback.ref} "
-            f"to {head_package.name} at {head_ref}; main push guard expects the same package"
-        )
 
-    if fallback.package.version == head_package.version:
-        raise VersionCheckError(
-            f"cannot read rewritten main base {base_ref}; fallback baseline {fallback.ref} still has "
-            f"{head_package.name} at version {head_package.version}. Every push to main must bump Cargo.toml, "
-            f"Cargo.lock and {DOCS_VERSION_PATH} first so CI publishes the new changes as a new release."
+def handle_range(base_ref: str, head_ref: str) -> None:
+    head_package = ensure_versions_consistent(head_ref)
+    if base_ref == ZERO_OID:
+        return
+
+    baseline = resolve_baseline(base_ref, head_ref)
+    changed = artifact_changes(baseline.ref, head_ref)
+    if not changed:
+        print(
+            f"dotsync release guard: nothing between {baseline.ref} and {head_ref} feeds the binary, "
+            "so no version bump is needed."
         )
+        return
+
+    ensure_version_bumped(baseline, head_package, head_ref, changed)
+    ensure_release_tag_unused(head_package, head_ref, changed)
 
 
 def handle_pre_push() -> None:
-    saw_main_update = False
     for line in sys.stdin:
         stripped = line.strip()
         if not stripped:
             continue
-        local_ref, local_oid, remote_ref, remote_oid = stripped.split()
+        _local_ref, local_oid, remote_ref, remote_oid = stripped.split()
         if remote_ref != "refs/heads/main":
             continue
-        saw_main_update = True
         if local_oid == ZERO_OID:
             raise VersionCheckError("refusing to delete refs/heads/main")
         handle_range(remote_oid, local_oid)
-    if not saw_main_update:
-        return
 
 
 def parse_args() -> argparse.Namespace:
