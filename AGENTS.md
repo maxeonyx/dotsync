@@ -12,7 +12,7 @@ This file guides AI agents working on the dotsync codebase itself. This tool is 
 
 ## Stakes, and how to write about them
 
-Don't reach for "safety", "risk" or data-loss drama when describing this repo's work. Max, 2026-08-14: *"I don't care about 'safety' in this repo, frankly. It's low stakes. Just do the work - regression is not a 'problem' per say, it's just inconvenient (and the whole point of this project is convenience)."*
+Don't reach for "safety", "risk" or data-loss drama when describing this repo's work. Max, 2026-08-14: _"I don't care about 'safety' in this repo, frankly. It's low stakes. Just do the work - regression is not a 'problem' per say, it's just inconvenient (and the whole point of this project is convenience)."_
 
 Tests, review and the ratchet are here because they make the work faster and less annoying, not because a regression is a disaster. Describe a defect by what it does to the person using it — "the machine stops syncing until you fix the file by hand" — rather than by how alarming it sounds.
 
@@ -54,6 +54,7 @@ Every push to `main` must bump the version in all three of `Cargo.toml`, `Cargo.
 When preparing a clone for local release work, set `git config core.hooksPath .githooks` so the repo-local `pre-push` hook actually runs.
 
 **After pushing a release:** install the new binary locally:
+
 ```bash
 gh release download <tag> --repo maxeonyx/dotsync --pattern 'dotsync-x86_64-linux' --dir /tmp/ --clobber
 chmod +x /tmp/dotsync-x86_64-linux

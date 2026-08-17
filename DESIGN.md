@@ -10,7 +10,7 @@ Dotfile management breaks down along several axes:
 
 1. **Syncing** — copying files between a repo and the live system is tedious and error-prone. People forget, things drift, and nobody notices until something breaks on a fresh machine.
 
-2. **Multiple versions** — the same *kind* of config (e.g. "shell config") might differ between linux and windows, or between your laptop and your server. Most dotfile tools either ignore this (one branch, one machine) or punt to symlink farms with conditionals baked into the files themselves.
+2. **Multiple versions** — the same _kind_ of config (e.g. "shell config") might differ between linux and windows, or between your laptop and your server. Most dotfile tools either ignore this (one branch, one machine) or punt to symlink farms with conditionals baked into the files themselves.
 
 3. **Contributing changes** — when an agent (or human) edits a config file, getting that change into the right place in the repo should be frictionless. If it's not, agents make mistakes and humans stop doing it, and the repo rots.
 
@@ -22,13 +22,13 @@ Dotfile management breaks down along several axes:
 
 - **Symlink managers (stow, etc.)**: stow creates symlinks from a package directory into `~/`. Multi-machine is DIY — you pick which "packages" to install per machine, but there's no built-in scoping. Agents don't know which package a file belongs to without being told.
 
-- **Chezmoi**: the closest existing tool to what we want. It handles multi-machine via Go templates embedded in config files (`{{ if eq .chezmoi.os "linux" }}`), has a proper `diff`/`apply` workflow, and supports secrets. It would work. But templates mean the file in the repo is *not* the file on the system — agents editing config need to understand both the config syntax and the template syntax. Our approach puts plain files in the repo, and uses git's merge machinery for scoping instead of templates. This means an agent edits exactly the file that ends up on the system, with no indirection.
+- **Chezmoi**: the closest existing tool to what we want. It handles multi-machine via Go templates embedded in config files (`{{ if eq .chezmoi.os "linux" }}`), has a proper `diff`/`apply` workflow, and supports secrets. It would work. But templates mean the file in the repo is _not_ the file on the system — agents editing config need to understand both the config syntax and the template syntax. Our approach puts plain files in the repo, and uses git's merge machinery for scoping instead of templates. This means an agent edits exactly the file that ends up on the system, with no indirection.
 
 - **Naive branching**: some people use git branches for per-machine config. This works until you need to propagate a universal change to all machines — you're manually cherry-picking or rebasing across N branches, re-solving the same conflicts. dotsync automates the propagation and uses merge commits to preserve conflict resolutions.
 
 ## The scope DAG
 
-The core insight: machines aren't the only unit of variation. There are *scopes* — overlapping categories that a machine belongs to. A linux laptop with hyprland belongs to scopes "all", "linux", and "hyprland". A windows desktop belongs to "all" and "windows".
+The core insight: machines aren't the only unit of variation. There are _scopes_ — overlapping categories that a machine belongs to. A linux laptop with hyprland belongs to scopes "all", "linux", and "hyprland". A windows desktop belongs to "all" and "windows".
 
 These scopes form a directed acyclic graph (DAG):
 
@@ -80,7 +80,7 @@ The hidden repo mirrors `~/`. A repo path `.config/fish/config.fish` corresponds
 
 Files are implicitly tracked by existing in the repo. There is no whitelist file. If a file is in the repo on the current branch, it gets synced. If you don't want a file synced, don't put it in the repo. This eliminates an entire class of "forgot to add to the whitelist" bugs.
 
-**Symlinks are treated as files, and are never followed** (Max, 2026-08-13: "for almost all intents we should treat symlinks as files and not follow them"). A link's content is its target string, so `commit` records a symlink as a symlink and sync writes it back into home as a symlink with the same target. Dotsync never reads the file a link points at, and never writes through a link — a home path that is a link where the repo holds a regular file is a difference in *kind*, reported as a change and replaced by sync rather than written through. This keeps `~/.config/nvim -> ~/src/nvim-config` recordable as what it is, and it keeps `commit -- selflink/` (a link to home) one entry rather than a walk of the whole home directory. Windows probably rejects symlinks on its scopes; that half is undecided in detail.
+**Symlinks are treated as files, and are never followed** (Max, 2026-08-13: "for almost all intents we should treat symlinks as files and not follow them"). A link's content is its target string, so `commit` records a symlink as a symlink and sync writes it back into home as a symlink with the same target. Dotsync never reads the file a link points at, and never writes through a link — a home path that is a link where the repo holds a regular file is a difference in _kind_, reported as a change and replaced by sync rather than written through. This keeps `~/.config/nvim -> ~/src/nvim-config` recordable as what it is, and it keeps `commit -- selflink/` (a link to home) one entry rather than a walk of the whole home directory. Windows probably rejects symlinks on its scopes; that half is undecided in detail.
 
 The only config file is the scope graph:
 
@@ -100,7 +100,7 @@ This lives on the `all` branch (since every machine needs the full graph).
 
 ## The state space
 
-Everything above this section describes what dotsync *does*. This section describes what can *exist*.
+Everything above this section describes what dotsync _does_. This section describes what can _exist_.
 
 That distinction is worth a section of its own because a design which only ever specifies workflows leaves each implementation site to fill the gap on its own. Concretely: a scope's head can be in three states, this document never wrote down that it has states at all, and six places in the code each ended up deciding independently what the third one meant. They produced five different answers, two of which were to silently skip the scope. Nobody was careless — there was no definition to conform to, so each site invented one, and five independent inventions had no reason to agree.
 
@@ -120,7 +120,7 @@ That is also why the drift classification in the next section is a three-way com
 
 `config.toml` is not a fourth thing. It is a managed file, living in home and on the `all` scope, which is exactly why editing it and committing it propagates like any other config. Its one genuinely special property is a self-reference: the scope graph is needed in order to compute the layering, and it is stored inside the layered thing. That works only because it lives on `all`, the root, which can be read without knowing the graph first.
 
-Everything in this section is small, and that is the point. The essential complexity of the product is a DAG of config scopes, a rule for which scope a change belongs on, and a cascade that layers them down to each machine. jj has no opinion about any of it. Bookmarks, commits and conflict representation are *not* fundamental — they are how (2) happens to be stored, and are free to change.
+Everything in this section is small, and that is the point. The essential complexity of the product is a DAG of config scopes, a rule for which scope a change belongs on, and a cascade that layers them down to each machine. jj has no opinion about any of it. Bookmarks, commits and conflict representation are _not_ fundamental — they are how (2) happens to be stored, and are free to change.
 
 ### A scope head has three states
 
@@ -149,7 +149,7 @@ So a difference of kind is a difference: `status` and `diff` report it, and sync
 
 A conflict is a first-class object with three parts: the base — the content both sides started from — and the two sides themselves. It is not one side with the other discarded, and it is not a file with `<<<<<<<` in it.
 
-The markers are a *rendering* of the object, not the object. That matters twice over. It is why the base can be shown at all, since a rendering can include a part that a two-sided model would have had nowhere to put. And it is why the question of where and whether to render markers is a presentation choice made over a real object that already exists — see "The resolution surface" below, where that choice is still open.
+The markers are a _rendering_ of the object, not the object. That matters twice over. It is why the base can be shown at all, since a rendering can include a part that a two-sided model would have had nowhere to put. And it is why the question of where and whether to render markers is a presentation choice made over a real object that already exists — see "The resolution surface" below, where that choice is still open.
 
 ### A non-authoritative map to the code
 
@@ -178,7 +178,7 @@ If a managed home file differs from the repo outside a commit flow, that's drift
 
 Bidirectional sync requires conflict resolution between the repo and the system, which is a fundamentally different (and harder) problem than git merge conflicts. It also makes the mental model ambiguous: "which is the source of truth?" With unidirectional sync, the answer is always "the repo."
 
-dotsync still *reads* system files — it diffs them against the repo, reports status, and imports selected files during an explicit scoped commit. But it never treats arbitrary home drift as something to sync automatically. A repo update and a local home edit are different events, and the command shape makes the user choose which home paths belong in which scope.
+dotsync still _reads_ system files — it diffs them against the repo, reports status, and imports selected files during an explicit scoped commit. But it never treats arbitrary home drift as something to sync automatically. A repo update and a local home edit are different events, and the command shape makes the user choose which home paths belong in which scope.
 
 The cost: to contribute a home change, you must name the scope and paths explicitly. That explicitness is the safety boundary that replaces a visible checkout or a broad "sync everything from home" mode.
 
@@ -195,7 +195,7 @@ dotsync tracks a minimal machine-local sync state file recording which machine s
 The three-way comparison (last-synced tree `L`, home `H`, new tip `T`) classifies every file situation without special cases. Presence and equality across the three sides is the whole domain, so every situation lands in exactly one class:
 
 | Class | `L` / `H` / `T` | Behavior |
-|---|---|---|
+| --- | --- | --- |
 | in sync | all three identical | nothing to do |
 | incoming add | absent / absent / present | not drift — sync writes it |
 | incoming update ("stale, not yours") | present / equal to `L` / changed | not drift — sync writes it; **`commit` refuses it** |
@@ -234,7 +234,7 @@ jj is also git-compatible — the repo is a valid git repo, pushable to GitHub, 
 
 One risk: jj is newer and less well-known than git. AI agents may not have strong intuitions for jj commands and concepts. So **hide jj from the user interface**: agents interact only with `dotsync` commands, never run `jj` directly, and never need to learn what a bookmark is.
 
-That is an instruction about the interface. It is not an instruction about the code, and it is worth saying so explicitly, because an earlier version of this document said only that dotsync "abstracts jj away entirely" and that turned out to read as both. The cheapest way to abstract a rich type is to narrow it where you first touch it — read the one case you care about out of it and pass that along — so that is what happened. A bookmark position, which jj models as absent, single, *or* contested, was read out through a helper that answers only the single case; the five sites downstream then each decided what the missing answer meant, and one of them says the scope is not in the repo when in fact the scope is in the repo and contested. The message is wrong because the type it was derived from could not hold the truth.
+That is an instruction about the interface. It is not an instruction about the code, and it is worth saying so explicitly, because an earlier version of this document said only that dotsync "abstracts jj away entirely" and that turned out to read as both. The cheapest way to abstract a rich type is to narrow it where you first touch it — read the one case you care about out of it and pass that along — so that is what happened. A bookmark position, which jj models as absent, single, _or_ contested, was read out through a helper that answers only the single case; the five sites downstream then each decided what the missing answer meant, and one of them says the scope is not in the repo when in fact the scope is in the repo and contested. The message is wrong because the type it was derived from could not hold the truth.
 
 The corrected instruction: **hide jj from the user; do not narrow jj's types in the code — or, where a narrower type is genuinely wanted, prove it can hold everything the wider one could.**
 
@@ -255,11 +255,11 @@ So dotsync's core operation is a **convergence pass**: for each scope in topolog
 
 Every state a machine can be in — mid-crash, post-failed-push, freshly offline-edited — is just an input to the next convergence pass. There is no separate "recovery."
 
-**Pull first, always.** Every mutating command opens with fetch + convergence, so remote changes are integrated *before* new work builds on top of them — never discovered mid-flow after edits and merges are already in progress. Commit is then: converge, add the new commit, converge again (to cascade it), push.
+**Pull first, always.** Every mutating command opens with fetch + convergence, so remote changes are integrated _before_ new work builds on top of them — never discovered mid-flow after edits and merges are already in progress. Commit is then: converge, add the new commit, converge again (to cascade it), push.
 
 **Push is a loop, not a step.** A rejected push isn't an error; it means another machine pushed first. Fetch, converge, push again. Push happens immediately after history is created — before the home sync — so a sync-side stop (like drift) never strands committed history unpushed.
 
-**Read-only commands never mutate.** `status`, `diff`, and `view` don't move bookmarks, create commits, or touch home. They fetch (when online) and *report* what convergence would do — including "pulling would conflict on these files in scope X" — computed as in-memory merges via jj-lib. Only `dotsync` (sync), `commit`, and `continue` actually converge.
+**Read-only commands never mutate.** `status`, `diff`, and `view` don't move bookmarks, create commits, or touch home. They fetch (when online) and _report_ what convergence would do — including "pulling would conflict on these files in scope X" — computed as in-memory merges via jj-lib. Only `dotsync` (sync), `commit`, and `continue` actually converge.
 
 **Offline is just deferred convergence.** If fetch fails due to network, dotsync skips it and proceeds against last-known remote state. Local history builds up ahead of the remote — which is a normal convergence input, handled the next time the machine is online. There is no offline mode and no queue.
 
@@ -269,7 +269,7 @@ There is deliberately no visible working copy — a working copy next to the liv
 
 ### Conflicts are commits, not a paused mode
 
-jj's defining feature is that conflicts are first-class objects inside commits: a merge commit can be created with a conflicted tree, and descendants inherit the conflict through their own merges until it is resolved. dotsync leans on this fully. **The cascade never pauses structurally** — every convergence pass completes in one atomic transaction, writing every merge commit, conflicted or not. "Paused" is not a stored mode; it is a derived observation: *one or more local scope heads have conflicted trees.* The conflicted heads act as the queue of pending resolution work.
+jj's defining feature is that conflicts are first-class objects inside commits: a merge commit can be created with a conflicted tree, and descendants inherit the conflict through their own merges until it is resolved. dotsync leans on this fully. **The cascade never pauses structurally** — every convergence pass completes in one atomic transaction, writing every merge commit, conflicted or not. "Paused" is not a stored mode; it is a derived observation: _one or more local scope heads have conflicted trees._ The conflicted heads act as the queue of pending resolution work.
 
 An earlier design stored pause intent in a machine-local state file (merge parent ids, remaining cascade steps, pre-pause heads) and refused to create conflicted history. That was a holdover from the working-copy era and created a class of dead ends: the file was written outside the repo transaction (crash = half-cascaded bookmarks with no record), it was invisible (no command displayed it), and it was the only copy of the intent. With conflicts in history, every piece of that state is derivable: the conflicted scope and files from the head trees, the merge parents and description from the conflicted commit itself, and nothing else is needed because there are no "remaining steps" — the cascade already completed around the conflict.
 
@@ -277,9 +277,9 @@ An earlier design stored pause intent in a machine-local state file (merge paren
 
 ### The resolution surface
 
-**Settled**: when a merge conflicts, the conflict is put in front of the agent that has to resolve it, showing both sides *and* the base, with the sides labeled by scope name rather than commit id. The base is in because a conflict *is* a base plus two sides — see "The state space" above — and jj carries all three, so omitting it would mean discarding a part dotsync already holds. Max, on that: *"Yes the base is supposed to be included. I'm sure JJ supports that."*
+**Settled**: when a merge conflicts, the conflict is put in front of the agent that has to resolve it, showing both sides _and_ the base, with the sides labeled by scope name rather than commit id. The base is in because a conflict _is_ a base plus two sides — see "The state space" above — and jj carries all three, so omitting it would mean discarding a part dotsync already holds. Max, on that: _"Yes the base is supposed to be included. I'm sure JJ supports that."_
 
-**Not settled: where.** There are two candidates. One materializes the conflict into the affected home files through ordinary sync, as standard `<<<<<<<` / `|||||||` / `=======` / `>>>>>>>` markers written by jj's own conflict-materialization code — agents have deep priors on exactly that format. The other presents the same three parts without writing anything into home. Max: *"I like the idea of the agent being presented with the conflict but not actually materializing it but it will need to be tested empirically with a real agent before we actually know."* The cost of materializing is concrete and lands on the person using the machine: while markers sit in the live config, that file is not valid config, so the application it configures reads a broken file for as long as the pause lasts.
+**Not settled: where.** There are two candidates. One materializes the conflict into the affected home files through ordinary sync, as standard `<<<<<<<` / `|||||||` / `=======` / `>>>>>>>` markers written by jj's own conflict-materialization code — agents have deep priors on exactly that format. The other presents the same three parts without writing anything into home. Max: _"I like the idea of the agent being presented with the conflict but not actually materializing it but it will need to be tested empirically with a real agent before we actually know."_ The cost of materializing is concrete and lands on the person using the machine: while markers sit in the live config, that file is not valid config, so the application it configures reads a broken file for as long as the pause lasts.
 
 **It is decided empirically by the agent validation loop** (PLAN item 3) — by watching a real agent resolve a real conflict, not by argument here. Because the conflict is already a real object with all three parts, this is a rendering choice over that object rather than a design still to be invented, and nothing above this paragraph changes whichever way it goes.
 
@@ -297,6 +297,7 @@ The same experiment decides it, and the reasoning is worth writing down so the e
 If markers are materialized, "the agent is done" is legible from the file itself: the markers are gone. `continue` is then the agent restating a fact dotsync can check for itself, and it deletes.
 
 If they are not materialized, home reads identically before the agent starts and after it decides to keep its own side unchanged. "I am done" becomes exactly the thing dotsync cannot find out on its own, and `continue` survives on the standing rule that every write command carries a decision only the user can make. The tempting shortcut — treat an unchanged file as unresolved — is the thing to avoid: it is silently wrong for the agent that legitimately resolved the conflict by keeping its own side.
+
 - **Conflicted heads are not pushed.** They stay local-ahead — a normal convergence state — until resolved; everything non-conflicted still pushes. This keeps the shared remote free of conflict encodings (which plain git tooling renders poorly) at the cost that only the machine holding the conflict can resolve it.
 - **`abort` goes back to the last fully cascaded machine scope tip.** It abandons the unpushed conflicted commits, returns the affected scope bookmarks to their last non-conflicted positions, and reverts **all** the config files — a full sync of home to the machine scope's last fully cascaded tip, not a selective restore. Whatever the pause put into home, and the home edit that caused the aborted commit, are both gone from home afterward; that's the point of abort. Pushed history is never touched — conflicted heads are never pushed, so everything abandoned is local-only. Clean remote integration discarded along the way costs nothing: the next convergence pass re-derives it.
 
@@ -314,7 +315,7 @@ The steady-state command is `dotsync`, and it is the one an agent runs by reflex
 
 **`dotsync`** (no arguments): Pull and converge scope branches (merging remote changes and cascading, pausing on conflicts), sync repo -> system, push. It does not import home edits; use `dotsync status` and `dotsync commit <scope> -m "message" -- <paths...>` when home changes should be recorded.
 
-**`dotsync commit <scope> -m "message" <path>...`**: Commit the selected home-relative file/directory paths to the named scope branch, merge cascade through all descendant scopes, sync repo -> system, push to remote. It refuses a named path whose home content is not a change made on this machine — see the drift classification above. **The scope must be one this machine belongs to** — its own machine scope or an ancestor of it. Committing to a scope this machine does not descend from is refused (Max, 2026-08-13): home only ever moves forward, and the config it holds is supposed to stay valid, so there is no version of another machine's branch that this machine can claim to have started from. To contribute to a machine family you are not on, put the shared material and the pattern for it on the common ancestor, and leave it to an agent running on that family to add its own drop-ins on its own scope. Note this is only about *choosing* a commit target: a cascade from a shared ancestor still merges into descendant scopes this machine is not on, so conflicts outside this machine's ancestry remain a normal event — see "Conflict resolution in home".
+**`dotsync commit <scope> -m "message" <path>...`**: Commit the selected home-relative file/directory paths to the named scope branch, merge cascade through all descendant scopes, sync repo -> system, push to remote. It refuses a named path whose home content is not a change made on this machine — see the drift classification above. **The scope must be one this machine belongs to** — its own machine scope or an ancestor of it. Committing to a scope this machine does not descend from is refused (Max, 2026-08-13): home only ever moves forward, and the config it holds is supposed to stay valid, so there is no version of another machine's branch that this machine can claim to have started from. To contribute to a machine family you are not on, put the shared material and the pattern for it on the common ancestor, and leave it to an agent running on that family to add its own drop-ins on its own scope. Note this is only about _choosing_ a commit target: a cascade from a shared ancestor still merges into descendant scopes this machine is not on, so conflicts outside this machine's ancestry remain a normal event — see "Conflict resolution in home".
 
 **`dotsync commit <scope> -m "message"`** (no paths): Commit every managed file this machine has changed, which is exactly the set `dotsync status` lists as changes. It does not scan all of home for unrelated new files; new paths are intentionally opted into with explicit path arguments.
 
@@ -324,9 +325,9 @@ The steady-state command is `dotsync`, and it is the one an agent runs by reflex
 
 **`dotsync view`**: Show a read-only overview of checked-in scope and file state. With `--scope <scope>`, show the managed file tree visible on that scope. With `--file <path>`, show the scopes where that file exists. With both `--scope <scope>` and `--file <path>`, print that file as it exists on that scope.
 
-**`dotsync show conflict`** *(not implemented — PLAN item 3)*: Re-render the current paused cascade: DAG position, paused scope, colliding scopes, conflicted files, and resolution instructions. Works at any time while a pause exists, for agents that lost the original output.
+**`dotsync show conflict`** _(not implemented — PLAN item 3)_: Re-render the current paused cascade: DAG position, paused scope, colliding scopes, conflicted files, and resolution instructions. Works at any time while a pause exists, for agents that lost the original output.
 
-**`dotsync continue`** *(existence conditional — see "Whether `continue` survives")*: Continue a paused cascade once the conflict has been resolved, recording the resolved contents at the rootmost conflicted scope. Refuses a resolution that still holds conflict markers.
+**`dotsync continue`** _(existence conditional — see "Whether `continue` survives")_: Continue a paused cascade once the conflict has been resolved, recording the resolved contents at the rootmost conflicted scope. Refuses a resolution that still holds conflict markers.
 
 **`dotsync abort`**: Abort a paused cascade, restore scope branches to their pre-pause revisions, clear the pause marker, and sync the current machine home back to the restored repo state.
 
@@ -359,7 +360,7 @@ dotsync includes an agent skill (`dotfiles`) that triggers whenever any home dir
 
 This is the mechanism that makes the system agent-friendly. The tool itself is simple plumbing — the skill is what makes agents use the plumbing correctly.
 
-An earlier version of this document claimed the comments in `config.toml` are load-bearing — that they are how an agent learns "hyprland stuff goes on `hyprland`, not `linux`". They are not (Max, 2026-08-14: *"I don't think the scope comments are 'load bearing' lol? they're pretty obvious"*). A scope called `hyprland` says what belongs on it by being called `hyprland`, and step 4 above is the actual rule. Comments there are ordinary commentary, useful when a scope's name is not self-evident and carrying nothing when it is. Read as a requirement, that claim is what produced machinery to generate a comment for every scope at `init` and to preserve comments when a joining machine edits the file; nothing else depends on that machinery existing.
+An earlier version of this document claimed the comments in `config.toml` are load-bearing — that they are how an agent learns "hyprland stuff goes on `hyprland`, not `linux`". They are not (Max, 2026-08-14: _"I don't think the scope comments are 'load bearing' lol? they're pretty obvious"_). A scope called `hyprland` says what belongs on it by being called `hyprland`, and step 4 above is the actual rule. Comments there are ordinary commentary, useful when a scope's name is not self-evident and carrying nothing when it is. Read as a requirement, that claim is what produced machinery to generate a comment for every scope at `init` and to preserve comments when a joining machine edits the file; nothing else depends on that machinery existing.
 
 ## What dotsync is NOT
 
