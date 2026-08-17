@@ -265,7 +265,7 @@ Every state a machine can be in — mid-crash, post-failed-push, freshly offline
 
 ## Conflict resolution in home
 
-There is deliberately no visible working copy — a working copy next to the live config would mean three copies of everything. But the live config directory **is the working copy for all intents and purposes**, and it gets the full working-copy treatment. The user can never move it backward or sideways to another version or scope (inspection is done via `dotsync view`); it only ever goes forward. And when a merge conflicts, the conflict is materialized where the user works.
+There is deliberately no visible working copy — a working copy next to the live config would mean three copies of everything. But the live config directory **is the working copy for all intents and purposes**, and it gets the full working-copy treatment. The user can never move it backward or sideways to another version or scope (inspection is done via `dotsync view`); it only ever goes forward. And when a merge conflicts, the conflict has to be put in front of whoever resolves it — whether that means writing it into the files they work in is the one open question here, and "The resolution surface" below is where it is left open.
 
 ### Conflicts are commits, not a paused mode
 
@@ -277,10 +277,26 @@ An earlier design stored pause intent in a machine-local state file (merge paren
 
 ### The resolution surface
 
-- **Conflicts materialize into home via ordinary sync.** A conflict anywhere in this machine's scope ancestry propagates down into the machine scope's tree, so syncing writes standard conflict markers (`<<<<<<<` / `|||||||` / `=======` / `>>>>>>>`, base included, sides labeled with scope names rather than commit ids) into the affected home files — using jj's own conflict-materialization code. Agents have deep priors on this exact format. While markers are materialized, drift detection treats them as the expected home content.
+**Settled**: when a merge conflicts, the conflict is put in front of the agent that has to resolve it, showing both sides *and* the base, with the sides labeled by scope name rather than commit id. The base is in because a conflict *is* a base plus two sides — see "The state space" above — and jj carries all three, so omitting it would mean discarding a part dotsync already holds. Max, on that: *"Yes the base is supposed to be included. I'm sure JJ supports that."*
+
+**Not settled: where.** There are two candidates. One materializes the conflict into the affected home files through ordinary sync, as standard `<<<<<<<` / `|||||||` / `=======` / `>>>>>>>` markers written by jj's own conflict-materialization code — agents have deep priors on exactly that format. The other presents the same three parts without writing anything into home. Max: *"I like the idea of the agent being presented with the conflict but not actually materializing it but it will need to be tested empirically with a real agent before we actually know."* The cost of materializing is concrete and lands on the person using the machine: while markers sit in the live config, that file is not valid config, so the application it configures reads a broken file for as long as the pause lasts.
+
+**It is decided empirically by the agent validation loop** (PLAN item 3) — by watching a real agent resolve a real conflict, not by argument here. Because the conflict is already a real object with all three parts, this is a rendering choice over that object rather than a design still to be invented, and nothing above this paragraph changes whichever way it goes.
+
+The bullets below say which of them assume an answer.
+
+- **If markers are materialized**, a conflict anywhere in this machine's scope ancestry propagates down into the machine scope's tree, so ordinary sync writes it into the affected home files. Drift detection then treats those markers as the expected home content while they are there — which is what stops a forced sync from replacing a resolution in progress with the unresolved file.
 - **`dotsync show conflict` renders the conflict state at any time**: DAG position, the rootmost conflicted scope, which scopes' changes are colliding, the conflicted files, and the instructions. Because it renders derived state rather than a stored record, it is automatically correct after any crash, on any machine. `status` points here whenever conflicts exist.
-- **`continue` verifies the markers are gone**, applies the resolution at the rootmost conflicted scope, and propagates it: descendant merges that inherited the same conflict resolve automatically through jj's descendant rewriting. `commit` refuses while any local scope head is conflicted, pointing at the resolution flow.
-- **Conflicts outside this machine's ancestry** (e.g. a cascade from `all` conflicting only in the `windows` subtree while this machine is linux) don't appear in home naturally. `show conflict` still reports them, and the affected home path serves as a temporary resolution buffer — with the mode-switch stated loudly: "this file temporarily contains the conflicted merge for scope `windows`; it is not your machine's config; after `continue` or `abort` it will be restored to your machine's version."
+- **`continue` applies the resolution at the rootmost conflicted scope and propagates it**: descendant merges that inherited the same conflict resolve automatically through jj's descendant rewriting. It refuses a resolution that still holds conflict markers, since markers recorded as the merged contents would cascade to every descendant and reach every other machine. `commit` refuses while any local scope head is conflicted, pointing at the resolution flow. Whether `continue` exists at all rides on the same experiment — see below.
+- **Conflicts outside this machine's ancestry** (e.g. a cascade from `all` conflicting only in the `windows` subtree while this machine is linux) don't appear in home naturally. `show conflict` reports them either way. The mode switch has to be stated loudly whichever presentation wins — "this is the conflicted merge for scope `windows`; it is not your machine's config; after `continue` or `abort` your machine's version comes back" — because without it the agent reads another machine's config as its own. If markers do go into home, the affected home path is the temporary resolution buffer, and that sentence is what keeps it legible as one.
+
+#### Whether `continue` survives
+
+The same experiment decides it, and the reasoning is worth writing down so the experiment's result can be applied without re-deriving it.
+
+If markers are materialized, "the agent is done" is legible from the file itself: the markers are gone. `continue` is then the agent restating a fact dotsync can check for itself, and it deletes.
+
+If they are not materialized, home reads identically before the agent starts and after it decides to keep its own side unchanged. "I am done" becomes exactly the thing dotsync cannot find out on its own, and `continue` survives on the standing rule that every write command carries a decision only the user can make. The tempting shortcut — treat an unchanged file as unresolved — is the thing to avoid: it is silently wrong for the agent that legitimately resolved the conflict by keeping its own side.
 - **Conflicted heads are not pushed.** They stay local-ahead — a normal convergence state — until resolved; everything non-conflicted still pushes. This keeps the shared remote free of conflict encodings (which plain git tooling renders poorly) at the cost that only the machine holding the conflict can resolve it.
 - **`abort` goes back to the last fully cascaded machine scope tip.** It abandons the unpushed conflicted commits, returns the affected scope bookmarks to their last non-conflicted positions, and reverts **all** the config files — a full sync of home to the machine scope's last fully cascaded tip, not a selective restore. Conflict markers and the home edit that caused the aborted commit are both gone from home afterward; that's the point of abort. Pushed history is never touched — conflicted heads are never pushed, so everything abandoned is local-only. Clean remote integration discarded along the way costs nothing: the next convergence pass re-derives it.
 
@@ -310,7 +326,7 @@ The steady-state command is `dotsync`, and it is the one an agent runs by reflex
 
 **`dotsync show conflict`** *(not implemented — PLAN item 3)*: Re-render the current paused cascade: DAG position, paused scope, colliding scopes, conflicted files, and resolution instructions. Works at any time while a pause exists, for agents that lost the original output.
 
-**`dotsync continue`**: Continue a paused cascade after the conflict markers in the affected home files have been edited away to the resolved contents. Refuses if markers remain.
+**`dotsync continue`** *(existence conditional — see "Whether `continue` survives")*: Continue a paused cascade once the conflict has been resolved, recording the resolved contents at the rootmost conflicted scope. Refuses a resolution that still holds conflict markers.
 
 **`dotsync abort`**: Abort a paused cascade, restore scope branches to their pre-pause revisions, clear the pause marker, and sync the current machine home back to the restored repo state.
 
@@ -321,7 +337,7 @@ The steady-state command is `dotsync`, and it is the one an agent runs by reflex
 | 0 | The command did what it says. |
 | 1 | dotsync stopped, or `dotsync diff` found changes. Under `--output json` the payload's `status` separates the two: `"error"` for a stop, `"ok"` for the changes `diff` found. |
 | 2 | The command line was wrong. |
-| 3 | A paused cascade is waiting: resolve the conflicted files in home and run `dotsync continue`, or run `dotsync abort` to discard it. |
+| 3 | A paused cascade is waiting: resolve the conflict and run `dotsync continue`, or run `dotsync abort` to discard it. |
 
 3 is a property of the state, not of the command that met it: the run that creates a pause, a `commit` that runs into one, and a `continue` that finds nothing resolved all exit 3, because they all have the same remedy. Only `diff` ever exits non-zero without having stopped, and it does so because a script needs to tell clean from dirty without parsing.
 
