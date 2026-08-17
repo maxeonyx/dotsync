@@ -41,11 +41,11 @@
     "dotsync::commit_selection$forcing_a_stale_commit_records_what_it_overwrote": "passing",
     "dotsync::commit_selection$naming_one_unusable_path_reads_as_one_path": "passing",
     "dotsync::commit_selection$selected_add_modify_and_delete_are_applied_without_touching_unselected_changes": "passing",
-    "dotsync::conflicts$a_pause_materializes_the_conflict_into_home": "pending",
-    "dotsync::conflicts$a_pause_on_another_machines_scope_leaves_the_conflict_in_home_as_a_buffer": "pending",
+    "dotsync::conflicts$a_pause_on_another_machines_scope_puts_that_conflict_in_front_of_the_agent": "pending",
     "dotsync::conflicts$a_pause_on_another_machines_scope_says_whose_config_is_in_the_file": "pending",
     "dotsync::conflicts$a_pause_on_another_machines_scope_still_publishes_this_machines_own": "pending",
     "dotsync::conflicts$a_pause_publishes_the_scopes_it_did_not_conflict_on": "pending",
+    "dotsync::conflicts$a_pause_puts_the_conflict_in_front_of_the_agent": "pending",
     "dotsync::conflicts$a_pause_survives_losing_every_machine_local_record_of_it": "pending",
     "dotsync::conflicts$a_paused_cascade_is_the_same_answer_whichever_command_meets_it": "passing",
     "dotsync::conflicts$abort_paused_cascade_restores_non_conflicting_selected_paths": "passing",
@@ -97,6 +97,9 @@
     "dotsync::help_text$init_help_explains_remote_url_and_setup": "passing",
     "dotsync::help_text$top_level_help_documents_the_exit_codes": "passing",
     "dotsync::help_text$top_level_help_explains_scope_and_basic_workflow": "passing",
+    "dotsync::hostile_inputs$a_machine_named_after_a_shared_scope_does_not_publish_its_private_config": "pending",
+    "dotsync::hostile_inputs$a_machine_whose_scope_the_fleet_renamed_has_a_route_back": "pending",
+    "dotsync::hostile_inputs$view_still_answers_on_every_machine_after_a_scope_joins_the_graph": "pending",
     "dotsync::init_and_config$a_machine_joining_keeps_the_comments_already_in_the_config": "passing",
     "dotsync::init_and_config$init_creates_no_visible_git_directory": "passing",
     "dotsync::init_and_config$init_on_an_initialized_machine_says_what_to_run_instead": "passing",
@@ -154,5 +157,9 @@
     "dotsync::sync_and_drift$the_drift_stop_lists_files_the_way_status_does_and_apart_from_its_instructions": "passing",
     "dotsync::sync_and_drift$v03_plain_sync_ignores_unrelated_home_changes": "passing",
     "dotsync::version_json$version_json_flag_prints_machine_readable_version": "passing"
+  },
+  "renames": {
+    "dotsync::conflicts$a_pause_on_another_machines_scope_puts_that_conflict_in_front_of_the_agent": "dotsync::conflicts$a_pause_on_another_machines_scope_leaves_the_conflict_in_home_as_a_buffer",
+    "dotsync::conflicts$a_pause_puts_the_conflict_in_front_of_the_agent": "dotsync::conflicts$a_pause_materializes_the_conflict_into_home"
   }
 }

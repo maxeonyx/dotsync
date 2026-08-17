@@ -1526,61 +1526,62 @@ fn a_pause_survives_losing_every_machine_local_record_of_it() {
     );
 }
 
-/// DESIGN: "A conflict anywhere in this machine's scope ancestry propagates
-/// down into the machine scope's tree, so syncing writes standard conflict
-/// markers ... into the affected home files — using jj's own
-/// conflict-materialization code."
+/// The pause tells the agent to "edit the conflicted file in home to the
+/// merged contents you want", and gives it nothing to merge *from*: home holds
+/// exactly the bytes the agent last typed there, and neither the version this
+/// change is colliding with nor the version they both came from is anywhere in
+/// what the run said. The `linux` side is reachable, but only by knowing to
+/// run `dotsync view --scope linux --file .config/app.conf`; the base is not
+/// reachable at all.
 ///
-/// Nothing materializes today: home holds exactly the bytes the agent last
-/// typed there, which is why the interim DL-2 guard has to ask "did this file
-/// change" instead of "are the markers gone", and why the pause's instruction
-/// to "edit the conflicted file to the merged contents you want" gives the
-/// agent nothing to merge *from*. The version being merged away is only
-/// reachable through `dotsync view --scope linux --file .config/app.conf`, and
-/// only if the agent reads far enough into the refusal to find that out.
+/// That is also why the interim DL-2 guard has to ask "did this file change"
+/// rather than "are the markers gone" — there are no markers, because there is
+/// nothing of the conflict in the file.
+///
+/// Whether the answer is markers written into home or a description that
+/// leaves home alone is PLAN §2.3 step 6's open question, so this asserts only
+/// that all three versions reach the agent.
 #[test]
-fn a_pause_materializes_the_conflict_into_home() {
+fn a_pause_puts_the_conflict_in_front_of_the_agent() {
     let harness = TestHarness::new();
     let (machine, pause) = pause_a_conflict_on_linux(&harness);
 
-    let home = machine.read_file(".config/app.conf");
-    assert_materialized_conflict(
-        &home,
-        ["all", "linux"],
+    assert_the_conflict_is_in_front_of_the_agent(
+        &machine,
+        &pause,
+        ".config/app.conf",
         [
-            "setting = \"all\"",
             "setting = \"base\"",
+            "setting = \"all\"",
             "setting = \"linux\"",
         ],
-        &render_output(&pause),
     );
 }
 
-/// The same materialization for a conflict this machine is not on, where it
-/// has to be done deliberately rather than by propagation: `goof-b`'s tree is
-/// a clean merge, so nothing about syncing this machine's own scope would ever
-/// put the `goof-a` conflict in front of the agent.
+/// The same, for a conflict this machine is not on — where it has to be put in
+/// front of the agent deliberately rather than by propagation. `goof-b`'s tree
+/// is a clean merge, so nothing about syncing this machine's own scope would
+/// ever show it the `goof-a` collision it is being asked to resolve.
 ///
-/// DESIGN: conflicts outside this machine's ancestry "don't appear in home
-/// naturally ... the affected home path serves as a temporary resolution
-/// buffer". Without the buffer, the agent is asked to resolve a merge it
-/// cannot see either side of, which is what makes today's answer — leave the
-/// file alone, or write anything at all, and `continue` records it — so easy
-/// to get wrong.
+/// DESIGN calls the home path "a temporary resolution buffer" for this case,
+/// which is one answer to step 6's question and not the settled one. What is
+/// settled either way: the agent is asked to resolve a merge, so it has to be
+/// able to see both sides of it and the base. Today it can see neither the
+/// other side nor the base, which is what makes leaving the file alone — or
+/// writing anything at all into it — so easy to get wrong.
 #[test]
-fn a_pause_on_another_machines_scope_leaves_the_conflict_in_home_as_a_buffer() {
+fn a_pause_on_another_machines_scope_puts_that_conflict_in_front_of_the_agent() {
     let harness = TestHarness::new();
     let (_machine_a, machine_b, pause) = pause_a_conflict_on(&harness, "goof-a");
 
-    let home = machine_b.read_file(".config/app.conf");
-    assert_materialized_conflict(
-        &home,
-        ["all", "goof-a"],
+    assert_the_conflict_is_in_front_of_the_agent(
+        &machine_b,
+        &pause,
+        ".config/app.conf",
         [
-            "setting = \"all\"",
             "setting = \"base\"",
+            "setting = \"all\"",
             "setting = \"goof-a\"",
         ],
-        &render_output(&pause),
     );
 }

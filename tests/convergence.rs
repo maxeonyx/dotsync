@@ -373,14 +373,14 @@ fn two_machines_that_both_moved_a_scope_converge_into_a_merge() {
 /// wall" earns its keep: the answer is the ordinary conflict, put in front of
 /// the agent in home, resolved with the ordinary command.
 ///
-/// Today the run stops with `scope_diverged` before anything is merged, so
-/// home still holds only this machine's own version, and the only way out of
-/// the state is repo surgery.
+/// Today the run stops with `scope_diverged` before anything is merged, so the
+/// agent is shown neither the version it is colliding with nor the version
+/// they both came from, and the only way out of the state is repo surgery.
 ///
-/// The marker lines are asserted for the three versions and not for their
-/// labels. DESIGN asks for "sides labeled with scope names", and both sides of
-/// a divergence are the same scope — what to call them is the implementer's,
-/// and naming one here would decide it.
+/// Where the three versions reach the agent is not asserted: PLAN §2.3 step 6
+/// leaves conflict presentation to the agent validation loop, so markers in
+/// home and a description that leaves home alone are both live answers. What
+/// they have to hold is the same either way.
 #[test]
 fn a_divergence_over_one_file_is_a_conflict_to_resolve_rather_than_a_wall() {
     let harness = TestHarness::new();
@@ -406,24 +406,16 @@ fn a_divergence_over_one_file_is_a_conflict_to_resolve_rather_than_a_wall() {
     machine_a.run_ok("dotsync commit all -m 'set from a' -- .config/app.conf");
 
     let converge = machine_b.run("dotsync");
-    let home = machine_b.read_file(".config/app.conf");
-    for marker in ["<<<<<<<", "|||||||", "=======", ">>>>>>>"] {
-        assert!(
-            home.lines().any(|line| line.starts_with(marker)),
-            "a divergence that collides has to be put in front of the agent as an ordinary conflict, and home holds no `{marker}` line\n--- home ---\n{home}\n--- the run that met the divergence ---\n{}",
-            render_output(&converge)
-        );
-    }
-    for version in [
-        "setting = \"base\"",
-        "setting = \"from a\"",
-        "setting = \"from b\"",
-    ] {
-        assert!(
-            home.contains(version),
-            "the materialized conflict is missing `{version}`, and the base is one of the three\n--- home ---\n{home}"
-        );
-    }
+    assert_the_conflict_is_in_front_of_the_agent(
+        &machine_b,
+        &converge,
+        ".config/app.conf",
+        [
+            "setting = \"base\"",
+            "setting = \"from a\"",
+            "setting = \"from b\"",
+        ],
+    );
 
     // Conflicted heads are never pushed, so the remote still holds exactly
     // what machine A published while this machine works on it.
