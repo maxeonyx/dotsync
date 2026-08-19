@@ -283,11 +283,8 @@ impl Home {
         if merged.has_conflict() {
             return Ok(Materialized::Conflicted { merged });
         }
-        self.switch_to(session, head.id().clone(), merged).await?;
-        self.locked
-            .check_out(&self.wc_commit)
-            .await
-            .map_err(|err| jj_error(format!("materialize into home: {err}")))?;
+        self.switch_and_check_out(session, head.id().clone(), merged)
+            .await?;
         Ok(Materialized::Applied)
     }
 
@@ -346,15 +343,12 @@ impl Home {
             .await
             .map_err(|err| jj_error(format!("write the resolved tree: {err}")))?;
 
-        self.switch_to(session, head.id().clone(), resolved).await?;
-        // Refuses a tree that is still conflicted, which is what keeps the
-        // no-markers rule true here: home's side of every conflicted path was
-        // just written over the merge, so a conflict left in it would be a bug
-        // in this method rather than a state to materialize.
-        self.locked
-            .check_out(&self.wc_commit)
-            .await
-            .map_err(|err| jj_error(format!("materialize into home: {err}")))?;
+        // `check_out` refuses a tree that is still conflicted, which is what
+        // keeps the no-markers rule true here: home's side of every conflicted
+        // path was just written over the merge, so a conflict left in it would
+        // be a bug in this method rather than a state to materialize.
+        self.switch_and_check_out(session, head.id().clone(), resolved)
+            .await?;
         Ok(Resolved::Applied)
     }
 
@@ -381,12 +375,8 @@ impl Home {
         if head.id() == mark.id() && self.wc_commit.tree_ids() == head.tree().tree_ids() {
             return Ok(Materialized::AlreadyThere);
         }
-        self.switch_to(session, head.id().clone(), head.tree())
+        self.switch_and_check_out(session, head.id().clone(), head.tree())
             .await?;
-        self.locked
-            .check_out(&self.wc_commit)
-            .await
-            .map_err(|err| jj_error(format!("materialize into home: {err}")))?;
         Ok(Materialized::Applied)
     }
 
@@ -508,10 +498,7 @@ impl Home {
             // sync: complete it, carrying them. Amend-then-check-out is the
             // ordinary materialization shape with the parent already right.
             self.amend_if_changed(session, merged).await?;
-            self.locked
-                .check_out(&self.wc_commit)
-                .await
-                .map_err(|err| jj_error(format!("materialize into home: {err}")))?;
+            self.check_out().await?;
             return Ok(());
         }
 
@@ -554,6 +541,36 @@ impl Home {
             .get_commit(wc_id)
             .map_err(|err| jj_error(format!("load the old working copy commit: {err}")))?;
         Ok(old_wc.parent_ids()[0].clone())
+    }
+
+    /// The wc commit moves and home follows: the two halves of materializing a
+    /// tree, which are only ever done together.
+    ///
+    /// Every command that moves home to a new head ends here — the ordinary
+    /// merge, the resolution `continue` writes, and the head-wins tree
+    /// `--force` asks for — because the difference between them is entirely in
+    /// which tree they arrive with. Keeping the pair in one place is what makes
+    /// "the wc commit describes home" hold by construction rather than by three
+    /// call sites each remembering the second half.
+    async fn switch_and_check_out(
+        &mut self,
+        session: &mut Session,
+        parent: CommitId,
+        tree: MergedTree,
+    ) -> Result<(), DotsyncError> {
+        self.switch_to(session, parent, tree).await?;
+        self.check_out().await
+    }
+
+    /// Writes the wc commit's tree into home. Separate from the switch for the
+    /// repair alone, which amends rather than switches because the parent is
+    /// already the commit home is heading for.
+    async fn check_out(&mut self) -> Result<(), DotsyncError> {
+        self.locked
+            .check_out(&self.wc_commit)
+            .await
+            .map_err(|err| jj_error(format!("materialize into home: {err}")))?;
+        Ok(())
     }
 
     /// Switches the wc commit onto a new parent with a new (resolved) tree.
