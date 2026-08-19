@@ -183,9 +183,9 @@ async fn sync_home(
 
 /// The sync itself: `merge(home, mark, head)` and what it came to.
 ///
-/// The classification is read before the merge writes anything, because two of
-/// the three trees it reads stop existing the moment the merge lands — and it
-/// is what says which home files a forced sync discarded.
+/// The classification is read before the merge moves anything, because two of
+/// its three sides are the working copy's own and the merge replaces them —
+/// and it is what says which home files a forced sync discarded.
 async fn materialize_machine_scope(
     session: &mut Session,
     home: &mut Home,
@@ -214,30 +214,34 @@ async fn materialize_machine_scope(
     // coexist. It goes when the commit path moves onto `Home`.
     save_sync_state(session.paths(), session.config(), &machine_scope, head.id())?;
 
-    Ok(SyncReport {
-        current_scope: machine_scope,
-        synced_paths: head_paths.into_keys().collect(),
-        // A forced sync overwrote every local change; a merged one overwrote
-        // none, and carried them instead.
-        drifts: if discard_local {
+    // Every local change went one way or the other: a forced sync discarded all
+    // of them, a merged one carried all of them.
+    let (drifts, carried_changes) = if discard_local {
+        (
             local_changes
                 .iter()
                 .map(|(relative, path)| file_drift(session.paths(), relative, path))
-                .collect()
-        } else {
-            Vec::new()
-        },
-        carried_changes: if discard_local {
-            Vec::new()
-        } else {
+                .collect(),
+            Vec::new(),
+        )
+    } else {
+        (
+            Vec::new(),
             local_changes
                 .iter()
                 .map(|(relative, path)| FileChange {
                     path: relative.clone(),
                     state: path.state,
                 })
-                .collect()
-        },
+                .collect(),
+        )
+    };
+
+    Ok(SyncReport {
+        current_scope: machine_scope,
+        synced_paths: head_paths.into_keys().collect(),
+        drifts,
+        carried_changes,
     })
 }
 

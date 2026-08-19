@@ -30,8 +30,6 @@
 //! repairs exactly that, and the repair is the subtlest code in this module —
 //! its comments carry the reasoning.
 
-#![allow(dead_code)]
-
 use jj_lib::backend::{CommitId, Signature, Timestamp};
 use jj_lib::commit::Commit;
 use jj_lib::gitignore::GitIgnoreFile;
@@ -41,9 +39,7 @@ use jj_lib::merged_tree::MergedTree;
 use jj_lib::op_store::OperationId;
 use jj_lib::ref_name::WorkspaceNameBuf;
 use jj_lib::repo::Repo as _;
-use jj_lib::working_copy::{
-    CheckoutStats, LockedWorkingCopy as _, SnapshotOptions, WorkingCopyFreshness,
-};
+use jj_lib::working_copy::{LockedWorkingCopy as _, SnapshotOptions, WorkingCopyFreshness};
 
 use crate::config::DotsyncPaths;
 use crate::error::{jj_error, DotsyncError};
@@ -66,7 +62,7 @@ pub(crate) enum Materialized {
     /// Home already matched: the head is the mark and nothing had changed.
     AlreadyThere,
     /// The merge resolved; home moved whole, local edits carried across.
-    Applied { stats: CheckoutStats },
+    Applied,
     /// The merge conflicted; home was not touched. The tree holds the base
     /// and both sides for every conflicted path — presentation reads them
     /// out; nothing stores them, so a rerun recomputes the same facts.
@@ -185,10 +181,6 @@ impl Home {
         &self.machine_scope
     }
 
-    pub(crate) fn wc_commit(&self) -> &Commit {
-        &self.wc_commit
-    }
-
     /// Widens home's snapshot to cover every path `head` holds, and re-reads
     /// them.
     ///
@@ -204,7 +196,13 @@ impl Home {
         session: &mut Session,
         head: &Commit,
     ) -> Result<(), DotsyncError> {
-        self.locked.probe_also(tree_paths(&head.tree())?);
+        if !self.locked.probe_also(tree_paths(&head.tree())?) {
+            // `acquire` already read every path this head holds, which is the
+            // ordinary case — a head that has not added a file holds no path
+            // the mark does not. Home's side of the merge is already complete,
+            // so there is nothing to re-read.
+            return Ok(());
+        }
         let snapshot = self.snapshot_home().await?;
         self.amend_if_changed(session, snapshot).await
     }
@@ -232,12 +230,11 @@ impl Home {
             return Ok(Materialized::Conflicted { merged });
         }
         self.switch_to(session, head.id().clone(), merged).await?;
-        let stats = self
-            .locked
+        self.locked
             .check_out(&self.wc_commit)
             .await
             .map_err(|err| jj_error(format!("materialize into home: {err}")))?;
-        Ok(Materialized::Applied { stats })
+        Ok(Materialized::Applied)
     }
 
     /// Records that home derives from `head` now, without touching home.
@@ -285,12 +282,11 @@ impl Home {
         }
         self.switch_to(session, head.id().clone(), head.tree())
             .await?;
-        let stats = self
-            .locked
+        self.locked
             .check_out(&self.wc_commit)
             .await
             .map_err(|err| jj_error(format!("materialize into home: {err}")))?;
-        Ok(Materialized::Applied { stats })
+        Ok(Materialized::Applied)
     }
 
     /// Ends the run at the home boundary: persists which operation home has

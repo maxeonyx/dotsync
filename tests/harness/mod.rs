@@ -472,16 +472,8 @@ impl MachineEnvironment {
         self.home_dir.join(self.sync_state_relative_path())
     }
 
-    pub fn delete_sync_state(&self) {
-        fs::remove_file(self.sync_state_path()).expect("delete sync state file");
-    }
-
     pub fn write_sync_state_raw(&self, contents: &str) {
         write_file_at(&self.sync_state_path(), contents);
-    }
-
-    pub fn read_sync_state_raw(&self) -> String {
-        fs::read_to_string(self.sync_state_path()).expect("read sync state file")
     }
 
     pub fn modified_time(&self, relative: &str) -> std::time::SystemTime {

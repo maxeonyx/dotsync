@@ -154,9 +154,5 @@
     "dotsync::sync_and_drift$the_conflict_stop_lists_files_the_way_status_does_and_apart_from_its_instructions": "passing",
     "dotsync::sync_and_drift$v03_plain_sync_ignores_unrelated_home_changes": "passing",
     "dotsync::version_json$version_json_flag_prints_machine_readable_version": "passing"
-  },
-  "renames": {
-    "dotsync::sync_and_drift$deleting_a_managed_file_is_a_change_the_sync_carries_and_commit_records": "dotsync::sync_and_drift$deleting_a_managed_file_blocks_sync_and_is_committable",
-    "dotsync::sync_and_drift$the_conflict_stop_lists_files_the_way_status_does_and_apart_from_its_instructions": "dotsync::sync_and_drift$the_drift_stop_lists_files_the_way_status_does_and_apart_from_its_instructions"
   }
 }

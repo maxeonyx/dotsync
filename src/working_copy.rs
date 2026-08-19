@@ -1,11 +1,11 @@
 //! Home as jj's working copy, over the managed path set.
 //!
-//! This module implements jj's `WorkingCopy` / `LockedWorkingCopy` /
-//! `WorkingCopyFactory` traits with `$HOME` (a sandboxed stand-in in tests) as
-//! the working directory and the managed paths as the tracked set. It is the
-//! step-2 replacement for the hand-rolled working copy: `snapshot()` is what
-//! drift detection was, `check_out()` is what sync's home writes were, and the
-//! working copy's position in the repo view is what `sync-state.json` was.
+//! This module implements jj's `WorkingCopy` and `LockedWorkingCopy` traits
+//! with `$HOME` (a sandboxed stand-in in tests) as the working directory and
+//! the managed paths as the tracked set. `Home` constructs these types
+//! directly, so there is no `WorkingCopyFactory`: nothing loads this working
+//! copy through jj's own loader, and a factory that no loader is registered
+//! with would be a claim rather than a capability.
 //!
 //! Three properties are load-bearing, and every method holds them:
 //!
@@ -24,10 +24,6 @@
 //! takes a file lock beside the persisted state, so two dotsync runs on one
 //! machine serialize at the working copy instead of corrupting each other.
 
-// The session wires this module in over the following commits on this branch;
-// the allow comes off with the wiring.
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -42,11 +38,10 @@ use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
 use jj_lib::ref_name::{WorkspaceName, WorkspaceNameBuf};
 use jj_lib::repo_path::RepoPathBuf;
-use jj_lib::settings::UserSettings;
 use jj_lib::store::Store;
 use jj_lib::working_copy::{
     CheckoutError, CheckoutStats, LockedWorkingCopy, ResetError, SnapshotError, SnapshotOptions,
-    SnapshotStats, WorkingCopy, WorkingCopyFactory, WorkingCopyStateError,
+    SnapshotStats, WorkingCopy, WorkingCopyStateError,
 };
 
 pub(crate) const WORKING_COPY_TYPE: &str = "dotsync-home";
@@ -381,15 +376,22 @@ pub(crate) struct HomeLockedWorkingCopy {
 }
 
 impl HomeLockedWorkingCopy {
-    /// Adds paths to the set snapshot examines. The working copy itself only
-    /// knows what it materialized; the session also knows the mark (the wc
-    /// commit's parent) and calls this with its paths.
-    pub(crate) fn probe_also(&mut self, paths: impl IntoIterator<Item = RepoPathBuf>) {
+    /// Adds paths to the set snapshot examines, and says whether any of them
+    /// were new — so a caller can tell a widening that needs another read of
+    /// home from one that changes nothing.
+    ///
+    /// The working copy itself only knows what it materialized; the caller also
+    /// knows the mark (the wc commit's parent) and the head it is heading for,
+    /// and calls this with their paths.
+    pub(crate) fn probe_also(&mut self, paths: impl IntoIterator<Item = RepoPathBuf>) -> bool {
+        let mut widened = false;
         for path in paths {
             if !self.probe.contains(&path) {
                 self.probe.push(path);
+                widened = true;
             }
         }
+        widened
     }
 
     /// Probed paths that home holds as something with no content to read: a
@@ -645,48 +647,4 @@ fn make_symlink(_target: &str, disk: &Path) -> Result<(), CheckoutError> {
         "symlinks are not materialized on this platform",
         "symlink on non-unix platform",
     ))
-}
-
-/// The factory jj's loader wants. dotsync constructs the concrete types
-/// directly, but the factory keeps this working copy loadable by anything
-/// that speaks jj's protocol (and writes the `type` file contract).
-pub(crate) struct HomeWorkingCopyFactory {
-    pub(crate) home: PathBuf,
-    pub(crate) repo_root: PathBuf,
-}
-
-impl WorkingCopyFactory for HomeWorkingCopyFactory {
-    fn init_working_copy(
-        &self,
-        store: Arc<Store>,
-        _working_copy_path: PathBuf,
-        state_path: PathBuf,
-        operation_id: OperationId,
-        workspace_name: WorkspaceNameBuf,
-        _settings: &UserSettings,
-    ) -> Result<Box<dyn WorkingCopy>, WorkingCopyStateError> {
-        Ok(Box::new(HomeWorkingCopy::init(
-            store,
-            self.home.clone(),
-            self.repo_root.clone(),
-            state_path,
-            operation_id,
-            workspace_name,
-        )?))
-    }
-
-    fn load_working_copy(
-        &self,
-        store: Arc<Store>,
-        _working_copy_path: PathBuf,
-        state_path: PathBuf,
-        _settings: &UserSettings,
-    ) -> Result<Box<dyn WorkingCopy>, WorkingCopyStateError> {
-        Ok(Box::new(HomeWorkingCopy::load(
-            store,
-            self.home.clone(),
-            self.repo_root.clone(),
-            state_path,
-        )?))
-    }
 }
