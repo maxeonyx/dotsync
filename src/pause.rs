@@ -94,6 +94,11 @@ pub struct AbortReport {
     pub sync: SyncReport,
 }
 
+/// Home contents of the conflicted files, recorded when a cascade pauses so
+/// `continue` can tell a resolution from an untouched file.
+///
+/// A conflict can be about a file this machine has never held, so home is
+/// widened to cover these paths before they are read.
 pub(crate) async fn home_contents(
     session: &mut Session,
     home: &mut Home,

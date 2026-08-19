@@ -190,12 +190,12 @@ async fn commit_in_session(
 
     // Whether this commit's bytes reach this machine at all. When the target
     // scope is an ancestor of the machine scope the cascade carries them down
-    // into home, so home has a version of the target scope it started from and
-    // will have a version of it to catch up to. When it is not — another
-    // machine's leaf, a sibling branch of the DAG — neither is true, and both
-    // the merge base and the sync baseline below fall back to what dotsync did
-    // before this wave. Whether such commits should be allowed without an
-    // explicit per-path force is still open (PLAN.md §1.5, D6).
+    // into home, so home has a version of the target scope it started from —
+    // the mark descends from it. When it is not — another machine's leaf, a
+    // sibling branch of the DAG — that is not true, and the merge base below
+    // falls back to the scope's own head. Whether such commits should be
+    // allowed without an explicit per-path force is still open (PLAN.md §1.5,
+    // D6).
     let cascades_into_home = scope_is_ancestor_or_self(&graph, &options.scope, &machine_scope);
 
     let repo = session.repo().clone();
@@ -416,6 +416,20 @@ async fn commit_in_session(
     })
 }
 
+/// The tree a home edit is a change *against*: the target scope as it stood
+/// when this machine last materialized it.
+///
+/// Home derives from the mark, and the mark descends from the target scope's
+/// head as it was at that moment — so the common ancestor of the target
+/// scope's head now and the mark is exactly the version of the target scope
+/// home was derived from. When nobody else has moved the scope, that ancestor
+/// *is* the current head and the merge below degenerates into the plain
+/// assignment dotsync has always done. When somebody has, it is what turns
+/// their change into a three-way merge instead of a silent overwrite.
+///
+/// Falls back to the scope's own head when the commit does not cascade into
+/// this home: home was never derived from such a scope, so there is no version
+/// of it this machine can claim to have started from.
 async fn commit_merge_base_tree(
     mut_repo: &mut jj_lib::repo::MutableRepo,
     cascades_into_home: bool,
