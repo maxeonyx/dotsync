@@ -27,6 +27,7 @@ use crate::error::{
     SkippedCommitPath,
 };
 use crate::home::{Home, Resolved};
+use crate::machine::machine_signature;
 use crate::repo::{
     collect_managed_tree_entries, load_scope_commit, push_scope_updates, read_tree_entry_bytes,
     PushReport,
@@ -318,6 +319,7 @@ async fn commit_in_session(
             &CascadeCommand {
                 root_scope: options.scope.clone(),
                 description: format!("dotsync: cascade from {}", options.scope),
+                author: machine_signature(&machine_scope),
             },
         )
         .iter()
@@ -364,6 +366,7 @@ async fn commit_in_session(
         .repo_mut()
         .new_commit(vec![base_commit.id().clone()], new_tree)
         .set_description(&options.message)
+        .set_author(machine_signature(&machine_scope))
         .write()
         .await
         .map_err(|err| DotsyncError::Jj {
@@ -378,6 +381,7 @@ async fn commit_in_session(
     let cascade_command = CascadeCommand {
         root_scope: options.scope.clone(),
         description: format!("dotsync: cascade from {}", options.scope),
+        author: machine_signature(&machine_scope),
     };
     let plan = build_cascade_plan(&graph, &scope_heads, &cascade_command);
     match execute_cascade_steps(tx.repo_mut(), &mut scope_heads, &plan, &cascade_command).await? {
@@ -1210,6 +1214,7 @@ async fn continue_in_session(
             resolved_tree,
         )
         .set_description(&state.description)
+        .set_author(machine_signature(&state.machine_scope))
         .write()
         .await
         .map_err(|err| DotsyncError::Jj {
@@ -1227,6 +1232,7 @@ async fn continue_in_session(
     let command = CascadeCommand {
         root_scope: state.paused_scope.clone(),
         description: state.description.clone(),
+        author: machine_signature(&state.machine_scope),
     };
     let remaining_plan = state
         .remaining_steps

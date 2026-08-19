@@ -14,7 +14,7 @@ use crate::config::{
 };
 use crate::error::{jj_error, DotsyncError};
 use crate::home::Home;
-use crate::machine::{detect_machine, MachineIdentity};
+use crate::machine::{detect_machine, machine_signature, MachineIdentity};
 use crate::repo::{
     add_origin_remote, default_settings, fetch_origin, load_repo_direct, push_scope_updates,
     PushReport,
@@ -167,6 +167,7 @@ pub(crate) async fn bootstrap_empty_remote(
         .repo_mut()
         .new_commit(vec![root_commit.id().clone()], config_tree)
         .set_description("dotsync: initialize all scope")
+        .set_author(machine_signature(&identity.machine_scope))
         .write()
         .await
         .map_err(|err| jj_error(format!("write all scope commit: {err}")))?;
@@ -177,6 +178,7 @@ pub(crate) async fn bootstrap_empty_remote(
         .repo_mut()
         .new_commit(vec![all_commit.id().clone()], all_commit.tree())
         .set_description(format!("dotsync: create {} scope", identity.os_scope))
+        .set_author(machine_signature(&identity.machine_scope))
         .write()
         .await
         .map_err(|err| jj_error(format!("write os scope commit: {err}")))?;
@@ -189,6 +191,7 @@ pub(crate) async fn bootstrap_empty_remote(
         .repo_mut()
         .new_commit(vec![os_commit.id().clone()], os_commit.tree())
         .set_description(format!("dotsync: create {} scope", identity.machine_scope))
+        .set_author(machine_signature(&identity.machine_scope))
         .write()
         .await
         .map_err(|err| jj_error(format!("write machine scope commit: {err}")))?;
@@ -238,6 +241,7 @@ pub(crate) async fn join_existing_remote(
         .repo_mut()
         .new_commit(vec![all_head.id().clone()], config_tree)
         .set_description("dotsync: update scope config")
+        .set_author(machine_signature(&identity.machine_scope))
         .write()
         .await
         .map_err(|err| jj_error(format!("write config update commit: {err}")))?;
@@ -250,6 +254,7 @@ pub(crate) async fn join_existing_remote(
     let cascade_command = CascadeCommand {
         root_scope: "all".to_string(),
         description: "dotsync: cascade init config".to_string(),
+        author: machine_signature(&identity.machine_scope),
     };
     let cascade_plan = build_cascade_plan(&updated_graph, &scope_heads, &cascade_command);
     match execute_cascade_steps(
@@ -280,6 +285,7 @@ pub(crate) async fn join_existing_remote(
             .repo_mut()
             .new_commit(vec![parent.id().clone()], parent.tree())
             .set_description(format!("dotsync: create {} scope", identity.os_scope))
+            .set_author(machine_signature(&identity.machine_scope))
             .write()
             .await
             .map_err(|err| jj_error(format!("write new os scope: {err}")))?;
@@ -296,6 +302,7 @@ pub(crate) async fn join_existing_remote(
             .repo_mut()
             .new_commit(vec![parent.id().clone()], parent.tree())
             .set_description(format!("dotsync: create {} scope", identity.machine_scope))
+            .set_author(machine_signature(&identity.machine_scope))
             .write()
             .await
             .map_err(|err| jj_error(format!("write new machine scope: {err}")))?;
