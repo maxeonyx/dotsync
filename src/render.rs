@@ -148,6 +148,9 @@ pub(crate) fn render_change_line(path: &Path, state: FileState) -> String {
 fn change_marker(state: FileState) -> &'static str {
     match state {
         FileState::EditedInHome | FileState::EditedInHomeButRemovedFromRepo => "M",
+        // A kind difference is the same shape of change as an edit — home holds
+        // something the scope does not — so it reads as one.
+        FileState::KindDiffersFromScope => "M",
         FileState::DeletedInHome | FileState::DeletedInHomeTipAlsoChanged => "D",
         FileState::DivergedEdit
         | FileState::IncomingNewCollidesWithUntrackedHome

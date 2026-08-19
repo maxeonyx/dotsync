@@ -70,6 +70,12 @@ pub enum FileState {
     /// A local edit that was never recorded. Edit drift — blocks.
     EditedInHome,
 
+    /// Home and the scope hold the same bytes as different *kinds* of file: a
+    /// symlink here where the scope has a regular file, or the reverse. Drift,
+    /// because a link and a file are not the same thing however equal their
+    /// content reads — a link's content is its target string.
+    KindDiffersFromScope,
+
     /// A local edit to a file that someone else deleted from the repo. Still
     /// edit drift; home holds real unsynced content either way.
     EditedInHomeButRemovedFromRepo,
@@ -110,6 +116,7 @@ impl FileState {
         matches!(
             self,
             Self::EditedInHome
+                | Self::KindDiffersFromScope
                 | Self::EditedInHomeButRemovedFromRepo
                 | Self::DeletedInHome
                 | Self::DeletedInHomeTipAlsoChanged
@@ -151,6 +158,9 @@ impl FileState {
     pub fn reason(self) -> &'static str {
         match self {
             Self::EditedInHome => "edited here since the last sync",
+            Self::KindDiffersFromScope => {
+                "a symlink here where the scope has a regular file, or the reverse: the same bytes, a different kind of file"
+            }
             Self::EditedInHomeButRemovedFromRepo => {
                 "edited here since the last sync, and removed from the repo on another machine"
             }
@@ -180,6 +190,7 @@ impl FileState {
     pub fn code(self) -> &'static str {
         match self {
             Self::EditedInHome => "modified",
+            Self::KindDiffersFromScope => "kind_differs",
             Self::EditedInHomeButRemovedFromRepo => "modified_removed_from_repo",
             Self::DeletedInHome => "deleted",
             Self::DeletedInHomeTipAlsoChanged => "deleted_changed_in_repo",
@@ -280,13 +291,19 @@ pub(crate) async fn classify_managed_trees(
         let last_synced_bytes = read_entry_bytes(store, &relative, mark.get(&relative)).await?;
         let home_bytes = read_entry_bytes(store, &relative, snapshot.get(&relative)).await?;
         let tip_bytes = read_entry_bytes(store, &relative, head.get(&relative)).await?;
+        let state = classify(
+            last_synced_bytes.as_deref(),
+            home_bytes.as_deref(),
+            tip_bytes.as_deref(),
+        );
         classified.insert(
-            relative,
+            relative.clone(),
             ClassifiedPath {
-                state: classify(
-                    last_synced_bytes.as_deref(),
-                    home_bytes.as_deref(),
-                    tip_bytes.as_deref(),
+                state: with_kind(
+                    state,
+                    mark.get(&relative),
+                    snapshot.get(&relative),
+                    head.get(&relative),
                 ),
                 home_bytes,
                 tip_bytes,
@@ -294,6 +311,33 @@ pub(crate) async fn classify_managed_trees(
         );
     }
     Ok(classified)
+}
+
+/// A difference in kind is a difference, whatever the bytes say.
+///
+/// `classify` compares content, and content is the only thing the three sides
+/// have in common — but a symlink's content *is* its target string, so a link
+/// to `real.conf` and a regular file holding the nine characters `real.conf`
+/// read as identical to it. They are not the same file, and the trees say so:
+/// `TreeValue::Symlink` and `TreeValue::File` are different variants. So the
+/// kind is asked of the tree, and only where the content comparison found a
+/// difference already does that answer not matter.
+fn with_kind(
+    state: FileState,
+    mark: Option<&TreeValue>,
+    snapshot: Option<&TreeValue>,
+    head: Option<&TreeValue>,
+) -> FileState {
+    let is_link = |value: Option<&TreeValue>| matches!(value, Some(TreeValue::Symlink(_)));
+    if is_link(snapshot) == is_link(head) {
+        return state;
+    }
+    if is_link(snapshot) == is_link(mark) {
+        // Home is what it always was and the scope changed kind, which is the
+        // same shape as any other change that arrived from another machine.
+        return FileState::StaleNotYours;
+    }
+    FileState::KindDiffersFromScope
 }
 
 /// The paths `classify_managed_trees` reported a state for that a reader has
