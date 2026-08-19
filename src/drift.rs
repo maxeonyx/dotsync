@@ -52,12 +52,6 @@ pub enum FileState {
     /// version would destroy home content nothing has a record of.
     IncomingNewCollidesWithUntrackedHome,
 
-    /// Home and the scope disagree, and there is no sync state to say which
-    /// side moved. Drift, for the same reason as the collision above — but a
-    /// different reason to report, because the missing record is the actual
-    /// problem and the file may well be one dotsync itself wrote.
-    NoSyncRecord,
-
     /// Was synced here and then deleted from home. Deletion drift — blocks
     /// like an edit, and is recorded to a scope like any other change.
     DeletedInHome,
@@ -122,7 +116,6 @@ impl FileState {
                 | Self::DeletedInHomeTipAlsoChanged
                 | Self::DivergedEdit
                 | Self::IncomingNewCollidesWithUntrackedHome
-                | Self::NoSyncRecord
         )
     }
 
@@ -148,7 +141,6 @@ impl FileState {
                 | Self::IncomingNew
                 | Self::RemovedFromRepo
                 | Self::IncomingNewCollidesWithUntrackedHome
-                | Self::NoSyncRecord
         )
     }
 
@@ -172,9 +164,6 @@ impl FileState {
             Self::IncomingNewCollidesWithUntrackedHome => {
                 "never synced here, and the repo has just added a different file at this path"
             }
-            Self::NoSyncRecord => {
-                "this machine has no sync record, so dotsync cannot tell an edit of yours here from a change that arrived from another machine"
-            }
             Self::IncomingNew => "added on another machine",
             Self::StaleNotYours => "changed on another machine, and not edited here",
             Self::RemovedFromRepo => "removed on another machine",
@@ -196,7 +185,6 @@ impl FileState {
             Self::DeletedInHomeTipAlsoChanged => "deleted_changed_in_repo",
             Self::DivergedEdit => "conflicted",
             Self::IncomingNewCollidesWithUntrackedHome => "untracked_collision",
-            Self::NoSyncRecord => "no_sync_record",
             Self::IncomingNew => "incoming_add",
             Self::StaleNotYours => "incoming_update",
             Self::RemovedFromRepo => "incoming_delete",

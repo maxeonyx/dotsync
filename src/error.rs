@@ -162,9 +162,6 @@ impl RefusedCommitPath {
             FileState::IncomingNewCollidesWithUntrackedHome => format!(
                 "`{path}` has never been synced here, and the repo has just added a different file at the same path. Committing home's copy would discard the one that arrived."
             ),
-            FileState::NoSyncRecord => format!(
-                "`{path}` differs from the scope, and this machine has no sync record — so dotsync cannot tell whether you edited it here or another machine changed it. Committing home's copy would discard the other possibility."
-            ),
             other => format!("`{path}` is {}.", other.reason()),
         }
     }

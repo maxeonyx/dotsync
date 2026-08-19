@@ -152,9 +152,7 @@ fn change_marker(state: FileState) -> &'static str {
         // something the scope does not — so it reads as one.
         FileState::KindDiffersFromScope => "M",
         FileState::DeletedInHome | FileState::DeletedInHomeTipAlsoChanged => "D",
-        FileState::DivergedEdit
-        | FileState::IncomingNewCollidesWithUntrackedHome
-        | FileState::NoSyncRecord => "C",
+        FileState::DivergedEdit | FileState::IncomingNewCollidesWithUntrackedHome => "C",
         FileState::IncomingNew => "A",
         FileState::StaleNotYours => "U",
         FileState::RemovedFromRepo => "R",
