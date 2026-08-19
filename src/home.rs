@@ -312,7 +312,6 @@ impl Home {
         session: &mut Session,
         head: &Commit,
     ) -> Result<Materialized, DotsyncError> {
-        self.observe(session, head).await?;
         let mark = self.mark().await?;
         if head.id() == mark.id() {
             return Ok(Materialized::AlreadyThere);
@@ -345,17 +344,18 @@ impl Home {
         session: &mut Session,
         head: &Commit,
     ) -> Result<Resolved, DotsyncError> {
-        self.observe(session, head).await?;
         let mark = self.mark().await?;
         if head.id() == mark.id() {
             return Ok(Resolved::NothingToResolve);
         }
-        let snapshot = self.snapshot_tree();
         let merged = self.merge_with(session, head).await?;
         if !merged.has_conflict() {
             return Ok(Resolved::NothingToResolve);
         }
 
+        // Taken after `merge_with`, whose observation may have widened the
+        // snapshot — home's side of the resolution has to be the widened one.
+        let snapshot = self.snapshot_tree();
         let conflicted = merged
             .conflicts()
             .map(|(path, value)| {
