@@ -817,6 +817,17 @@ pub fn remote_branch_revision(machine: &MachineEnvironment, branch: &str) -> Str
         .to_string()
 }
 
+/// Who git says wrote the tip of a remote branch. Read from the remote rather
+/// than from the local repo because that is where the other machines read it.
+pub fn remote_branch_author(machine: &MachineEnvironment, branch: &str) -> String {
+    let output = git_in(&machine.remote_dir, &["log", "-1", "--format=%an", branch]);
+    assert!(output.status.success(), "{}", render_output(&output));
+    String::from_utf8(output.stdout)
+        .expect("git log output should be utf-8")
+        .trim()
+        .to_string()
+}
+
 pub fn remote_branch_file_contents(
     machine: &MachineEnvironment,
     branch: &str,

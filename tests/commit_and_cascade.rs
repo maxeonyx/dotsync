@@ -369,3 +369,34 @@ fn multiple_machines_can_contribute_to_all_without_losing_changes() {
         "from machine b\n"
     );
 }
+
+/// History has to be able to say which machine made a change (PLAN §2.3 step 2;
+/// Max: "just an oversight from how we're using JJ I guess, but yeah a good one
+/// to fix"). Every commit dotsync writes on this machine's behalf carries the
+/// machine, and there are two kinds of them: the commit that records what you
+/// selected, and the cascade commits that carry it down to every scope below.
+/// A cascade commit with no author is the more misleading of the two — it is
+/// the one every *other* machine's scope ends up pointing at.
+#[test]
+fn history_says_which_machine_made_a_change() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    machine.init_ok();
+
+    machine.write_file(".apprc", "ui_theme = dark\n");
+    machine.run_ok("dotsync commit all -m 'add apprc' -- .apprc");
+
+    assert_eq!(
+        remote_branch_author(&machine, "all"),
+        "mx-xps-cy",
+        "the commit that recorded the change says which machine recorded it"
+    );
+    for cascaded in ["linux", "mx-xps-cy"] {
+        assert_eq!(
+            remote_branch_author(&machine, cascaded),
+            "mx-xps-cy",
+            "and so does the cascade commit that carried it down to `{cascaded}`"
+        );
+    }
+}

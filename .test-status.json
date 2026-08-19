@@ -19,6 +19,7 @@
     "dotsync::commit_and_cascade$commit_to_machine_scope_does_not_cascade": "passing",
     "dotsync::commit_and_cascade$committing_to_a_scope_this_machine_is_not_on_is_refused": "pending",
     "dotsync::commit_and_cascade$explicit_commit_command_adds_file_to_scope_and_syncs": "passing",
+    "dotsync::commit_and_cascade$history_says_which_machine_made_a_change": "pending",
     "dotsync::commit_and_cascade$multiple_machines_can_contribute_to_all_without_losing_changes": "passing",
     "dotsync::commit_and_cascade$noop_commit_names_the_scope_it_targeted": "passing",
     "dotsync::commit_selection$a_commit_says_which_files_it_started_tracking": "passing",
@@ -151,9 +152,5 @@
     "dotsync::sync_and_drift$the_conflict_stop_lists_files_the_way_status_does_and_apart_from_its_instructions": "passing",
     "dotsync::sync_and_drift$v03_plain_sync_ignores_unrelated_home_changes": "passing",
     "dotsync::version_json$version_json_flag_prints_machine_readable_version": "passing"
-  },
-  "renames": {
-    "dotsync::convergence$a_home_conflict_during_commit_does_not_strand_unpushed_history": "dotsync::convergence$drift_stop_during_commit_does_not_strand_unpushed_history",
-    "dotsync::file_kinds$a_path_that_reaches_its_file_through_a_symlink_is_refused": "dotsync::file_kinds$a_symlinked_selection_path_is_refused_whether_it_is_a_file_or_a_directory"
   }
 }
