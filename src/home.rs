@@ -179,6 +179,18 @@ impl Home {
         self.wc_commit.tree()
     }
 
+    /// What home holds at one path, as a tree entry: bytes *and* kind, which is
+    /// what makes recording an executable script or a symlink work. Absent when
+    /// home holds nothing there, which is how a deletion reads.
+    pub(crate) fn entry(
+        &self,
+        relative: &std::path::Path,
+    ) -> Result<Merge<Option<jj_lib::backend::TreeValue>>, DotsyncError> {
+        self.snapshot_tree()
+            .path_value(repo_path_of(relative)?.as_ref())
+            .map_err(|err| jj_error(format!("read home's {}: {err}", relative.display())))
+    }
+
     /// The commit this machine last materialized. Local changes are exactly
     /// `diff(mark tree, snapshot tree)`.
     pub(crate) async fn mark(&self) -> Result<Commit, DotsyncError> {
@@ -662,6 +674,18 @@ async fn merge_trees(
     MergedTree::merge(merge)
         .await
         .map_err(|err| jj_error(format!("merge trees: {err}")))
+}
+
+/// A home-relative path as jj names it. Home-relative because that is how
+/// dotsync records a path and how every machine on the scope reads it back.
+pub(crate) fn repo_path_of(
+    relative: &std::path::Path,
+) -> Result<jj_lib::repo_path::RepoPathBuf, DotsyncError> {
+    let relative_str = relative.to_str().ok_or_else(|| DotsyncError::NonUtf8Path {
+        path: relative.to_path_buf(),
+    })?;
+    jj_lib::repo_path::RepoPathBuf::from_internal_string(relative_str)
+        .map_err(|err| jj_error(format!("invalid repo path {}: {err}", relative.display())))
 }
 
 fn tree_paths(tree: &MergedTree) -> Result<Vec<jj_lib::repo_path::RepoPathBuf>, DotsyncError> {

@@ -121,7 +121,7 @@ pub async fn view(
         };
 
         Ok(ViewReport {
-            paused_cascade: crate::commit::paused_cascade_scope(session.paths())?,
+            paused_cascade: crate::pause::paused_cascade_scope(session.paths())?,
             found,
         })
     })
@@ -223,7 +223,7 @@ async fn diff_report(session: &mut Session, home: &mut Home) -> Result<DiffRepor
 
     Ok(DiffReport {
         machine_scope,
-        paused_cascade: crate::commit::paused_cascade_scope(session.paths())?,
+        paused_cascade: crate::pause::paused_cascade_scope(session.paths())?,
         drifts,
     })
 }

@@ -9,7 +9,7 @@ use crate::drift::{
     changed_paths, classify_managed_trees, read_entry_bytes, ClassifiedPath, FileState,
 };
 use crate::error::{jj_error, ConflictRole, ConflictedFile, ConflictedVersion, DotsyncError};
-use crate::home::{Home, Materialized};
+use crate::home::{repo_path_of, Home, Materialized};
 use crate::repo::{
     collect_managed_tree_entries, load_scope_commit, pending_push_scopes, push_scope_updates,
     PushReport,
@@ -113,7 +113,7 @@ async fn sync_home(
     // interrupted run must reach the remote even if the home sync stops.
     // The exception is a paused cascade, whose scopes are only half
     // cascaded.
-    let push = match crate::commit::paused_cascade_scope(session.paths())? {
+    let push = match crate::pause::paused_cascade_scope(session.paths())? {
         Some(paused_scope) => PushReport::WithheldPausedCascade {
             scopes: pending_push_scopes(session),
             paused_scope,
@@ -251,14 +251,6 @@ async fn sync_conflict(
         scope: machine_scope.to_string(),
         files,
     })
-}
-
-fn repo_path_of(relative: &Path) -> Result<jj_lib::repo_path::RepoPathBuf, DotsyncError> {
-    let relative_str = relative.to_str().ok_or_else(|| DotsyncError::NonUtf8Path {
-        path: relative.to_path_buf(),
-    })?;
-    jj_lib::repo_path::RepoPathBuf::from_internal_string(relative_str)
-        .map_err(|err| jj_error(format!("invalid repo path {}: {err}", relative.display())))
 }
 
 async fn conflicted_version(

@@ -74,7 +74,7 @@ async fn status_report(
 
     Ok(StatusReport {
         machine_scope,
-        paused_cascade: crate::commit::paused_cascade_scope(session.paths())?,
+        paused_cascade: crate::pause::paused_cascade_scope(session.paths())?,
         changes: file_changes(FileState::is_drift),
         incoming: file_changes(FileState::is_incoming),
     })
