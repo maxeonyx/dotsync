@@ -28,6 +28,11 @@
 //! in-memory merge. Partial materialization is unrepresentable here because
 //! the only write path is `check_out` of one resolved tree.
 //!
+//! That merge is `merge_with`, and it is the only one a run makes: `drift`'s
+//! classification asks it which paths conflict, so what `status` reports and
+//! what a sync writes are two readings of one object rather than two answers
+//! to the same question.
+//!
 //! The wc commit is always a resolved snapshot of home: snapshot amends it
 //! (parent unchanged), sync switches it (new parent, merged tree). It never
 //! holds a conflict — jj's own convention allows that only because jj
@@ -63,6 +68,9 @@ pub(crate) struct Home {
     locked: HomeLockedWorkingCopy,
     wc_commit: Commit,
     machine_scope: String,
+    /// The last `merge(snapshot, mark, head)` this handle computed, keyed by
+    /// the wc commit and the head it was computed from. See `merge_with`.
+    merged: Option<(CommitId, CommitId, MergedTree)>,
 }
 
 /// What completing a sync conflict came to.
@@ -153,6 +161,7 @@ impl Home {
             locked,
             wc_commit,
             machine_scope,
+            merged: None,
         };
         match freshness {
             WorkingCopyFreshness::Fresh => {
@@ -222,16 +231,12 @@ impl Home {
     /// materialization could write has to be read before the merge decides
     /// anything about it, which is what this is.
     ///
-    /// Every method that can write home or move the mark calls this itself,
-    /// so no caller can merge against an unobserved head by forgetting to.
-    /// It stays public because `status` and `diff` want the widened snapshot
-    /// with no materialization at all. Re-observing the same head is free —
-    /// the probe set does not widen twice.
-    pub(crate) async fn observe(
-        &mut self,
-        session: &mut Session,
-        head: &Commit,
-    ) -> Result<(), DotsyncError> {
+    /// Every method here that merges against a head or writes one into home
+    /// calls this itself, so a caller cannot reach a merge against an
+    /// unobserved head by forgetting to — `status` and `diff` get the widened
+    /// snapshot from the merge they classify against. Re-observing the same
+    /// head is free: the probe set does not widen twice.
+    async fn observe(&mut self, session: &mut Session, head: &Commit) -> Result<(), DotsyncError> {
         self.observe_paths(session, tree_paths(&head.tree())?).await
     }
 
@@ -260,6 +265,45 @@ impl Home {
         self.amend_if_changed(session, snapshot).await
     }
 
+    /// `merge(snapshot, mark, head)`: the one merge a run makes.
+    ///
+    /// It is rule 3's merge, and it is also where "is this path a conflict?"
+    /// gets its answer for the classification in `drift`. Those have to be the
+    /// same object rather than two computations that agree by inspection — a
+    /// second opinion about conflicts is how `status` came to call a file
+    /// conflicted that a plain `dotsync` then merged without complaint.
+    ///
+    /// Computed once per run and remembered, because the wc commit and the head
+    /// between them fix all three sides: the snapshot is the wc commit's tree,
+    /// the mark is its parent, and every method here that moves either writes a
+    /// new wc commit. A second call with the same pair could only recompute the
+    /// same tree.
+    pub(crate) async fn merge_with(
+        &mut self,
+        session: &mut Session,
+        head: &Commit,
+    ) -> Result<MergedTree, DotsyncError> {
+        self.observe(session, head).await?;
+        if let Some((wc_commit, merged_head, merged)) = &self.merged {
+            if wc_commit == self.wc_commit.id() && merged_head == head.id() {
+                return Ok(merged.clone());
+            }
+        }
+        let mark = self.mark().await?;
+        let merged = merge_trees(
+            (self.snapshot_tree(), "local changes in home"),
+            (mark.tree(), "what this machine last synced"),
+            (head.tree(), &self.machine_scope),
+        )
+        .await?;
+        self.merged = Some((
+            self.wc_commit.id().clone(),
+            head.id().clone(),
+            merged.clone(),
+        ));
+        Ok(merged)
+    }
+
     /// Moves home to `head`: rule 3. `merge(snapshot, mark, head)` in
     /// memory; resolved materializes whole (a new wc commit on `head`, local
     /// edits carried), conflicted touches nothing and hands back the merge.
@@ -267,19 +311,13 @@ impl Home {
         &mut self,
         session: &mut Session,
         head: &Commit,
-        head_label: &str,
     ) -> Result<Materialized, DotsyncError> {
         self.observe(session, head).await?;
         let mark = self.mark().await?;
         if head.id() == mark.id() {
             return Ok(Materialized::AlreadyThere);
         }
-        let merged = merge_trees(
-            (self.snapshot_tree(), "local changes in home"),
-            (mark.tree(), "what this machine last synced"),
-            (head.tree(), head_label),
-        )
-        .await?;
+        let merged = self.merge_with(session, head).await?;
         if merged.has_conflict() {
             return Ok(Materialized::Conflicted { merged });
         }
@@ -306,7 +344,6 @@ impl Home {
         &mut self,
         session: &mut Session,
         head: &Commit,
-        head_label: &str,
     ) -> Result<Resolved, DotsyncError> {
         self.observe(session, head).await?;
         let mark = self.mark().await?;
@@ -314,12 +351,7 @@ impl Home {
             return Ok(Resolved::NothingToResolve);
         }
         let snapshot = self.snapshot_tree();
-        let merged = merge_trees(
-            (snapshot.clone(), "local changes in home"),
-            (mark.tree(), "what this machine last synced"),
-            (head.tree(), head_label),
-        )
-        .await?;
+        let merged = self.merge_with(session, head).await?;
         if !merged.has_conflict() {
             return Ok(Resolved::NothingToResolve);
         }

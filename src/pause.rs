@@ -27,12 +27,13 @@ use crate::cascade::{
     execute_cascade_steps, CascadeCommand, CascadeOutcome, CascadeStep, ScopeHeads,
 };
 use crate::config::DotsyncPaths;
-use crate::drift::{changed_paths, read_entry_bytes, FileState};
+use crate::drift::{changed_paths, FileState};
 use crate::error::DotsyncError;
 use crate::home::{repo_path_of, Home, Resolved};
 use crate::machine::machine_signature;
 use crate::repo::{
-    collect_managed_tree_entries, load_scope_commit, push_scope_updates, PushReport,
+    collect_managed_tree_entries, load_scope_commit, push_scope_updates, read_entry_bytes,
+    PushReport,
 };
 use crate::session::{in_session, Run, Session};
 use crate::status::FileChange;
@@ -336,10 +337,7 @@ async fn complete_a_sync_conflict(
 ) -> Result<ContinueReport, DotsyncError> {
     let machine_scope = home.machine_scope().to_string();
     let head = load_scope_commit(session.repo().as_ref(), &machine_scope)?;
-    match home
-        .resolve_with_home_bytes(session, &head, &machine_scope)
-        .await?
-    {
+    match home.resolve_with_home_bytes(session, &head).await? {
         // Home and the head merge cleanly, so there is nothing here that only
         // the agent could have decided.
         Resolved::NothingToResolve => return Err(DotsyncError::NoPausedCascade),

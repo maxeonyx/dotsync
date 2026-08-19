@@ -484,19 +484,6 @@ fn an_edit_here_and_a_change_elsewhere_in_the_same_file_combine_instead_of_confl
         render_output(&status)
     );
 
-    // Recording home's copy on its own would drop the change that arrived, so
-    // the commit is refused — and what it points at is the sync that merges.
-    let refused = machine_b.run_expecting(
-        "dotsync commit all -m 'b edits the top' -- .config/app.conf",
-        1,
-    );
-    let refusal = String::from_utf8_lossy(&refused.stderr).into_owned();
-    assert!(
-        refusal.contains(".config/app.conf")
-            && refusal.contains("run `dotsync` to bring this machine up to date"),
-        "the refusal has to name the file and the command that resolves it\n{refusal}"
-    );
-
     let both = base
         .replace("line 1\n", "line 1 edited on b\n")
         .replace("line 90\n", "line 90 edited on a\n");
@@ -507,8 +494,29 @@ fn an_edit_here_and_a_change_elsewhere_in_the_same_file_combine_instead_of_confl
         "the sync combines the two edits rather than choosing between them"
     );
 
-    // Having merged, this machine holds an ordinary uncommitted local edit,
-    // and committing it publishes both changes.
+    // Having merged, this is an ordinary uncommitted local edit and says so —
+    // both sides of the file are in home now, so there is only one change left
+    // at this path.
+    let after = machine_b.run_ok("dotsync status --output json");
+    let payload = parse_stdout_json(&after);
+    let change = payload["changes"]
+        .as_array()
+        .expect("status answers with a changes array")
+        .iter()
+        .find(|change| change["path"] == ".config/app.conf")
+        .unwrap_or_else(|| {
+            panic!(
+                "the edit is still uncommitted, so it is still a change\n{}",
+                render_output(&after)
+            )
+        });
+    assert_eq!(
+        change["state"],
+        "modified",
+        "nothing is arriving any more, so this is a plain local edit\n{}",
+        render_output(&after)
+    );
+
     machine_b.run_ok("dotsync commit all -m 'b edits the top' -- .config/app.conf");
     assert_eq!(
         remote_branch_file_contents(&machine_b, "all", ".config/app.conf"),

@@ -394,6 +394,20 @@ pub(crate) fn collect_managed_tree_entries(
     Ok(entries)
 }
 
+/// The content of a tree entry that may not be there. Absent is not empty —
+/// a path no tree holds has no content, which is how a deletion and an
+/// addition read on their respective sides.
+pub(crate) async fn read_entry_bytes(
+    store: &Arc<jj_lib::store::Store>,
+    relative: &Path,
+    value: Option<&TreeValue>,
+) -> Result<Option<Vec<u8>>, DotsyncError> {
+    match value {
+        Some(value) => Ok(Some(read_tree_entry_bytes(store, relative, value).await?)),
+        None => Ok(None),
+    }
+}
+
 pub(crate) async fn read_tree_entry_bytes(
     store: &Arc<jj_lib::store::Store>,
     relative: &Path,

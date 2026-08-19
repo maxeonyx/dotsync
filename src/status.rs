@@ -59,8 +59,6 @@ async fn status_report(
     session.fetch().await?;
     let machine_scope = home.machine_scope().to_string();
     let head = load_scope_commit(session.repo().as_ref(), &machine_scope)?;
-    home.observe(session, &head).await?;
-
     let classified = classify_home_against_head(session, home, &head).await?;
     let file_changes = |include: fn(FileState) -> bool| {
         changed_paths(&classified, include)

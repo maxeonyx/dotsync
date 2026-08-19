@@ -23,13 +23,15 @@ use jj_lib::repo::Repo as _;
 
 use crate::commit::CommitOptions;
 use crate::config::{DotsyncPaths, ALL_SCOPE, DOTSYNC_CONFIG_RELATIVE_PATH};
-use crate::drift::{read_entry_bytes, state_of, FileState};
+use crate::drift::state_of;
 use crate::error::{
     CommitPathProblem, DotsyncError, RefusedCommitPath, RejectedCommitPath, SkipReason,
     SkippedCommitPath,
 };
 use crate::home::{repo_path_of, Home};
-use crate::repo::{collect_managed_tree_entries, load_scope_commit, read_tree_entry_bytes};
+use crate::repo::{
+    collect_managed_tree_entries, load_scope_commit, read_entry_bytes, read_tree_entry_bytes,
+};
 use crate::session::Session;
 use crate::sync::classify_home_against_head;
 
@@ -172,10 +174,7 @@ pub(crate) async fn select_changes_to_record(
 
     let forced_overwrites = selected_paths
         .iter()
-        .filter(|relative| {
-            let state = state_of(&classified, relative);
-            state.blocks_commit() || state == FileState::DivergedEdit
-        })
+        .filter(|relative| state_of(&classified, relative).forcing_decides_something())
         .cloned()
         .collect::<Vec<_>>();
     Ok(Selection {

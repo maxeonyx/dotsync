@@ -5,14 +5,12 @@ use std::sync::Arc;
 use jj_lib::repo::Repo as _;
 
 use crate::config::DotsyncPaths;
-use crate::drift::{
-    changed_paths, classify_managed_trees, read_entry_bytes, ClassifiedPath, FileState,
-};
+use crate::drift::{changed_paths, classify_managed_trees, ClassifiedPath, FileState};
 use crate::error::{jj_error, ConflictRole, ConflictedFile, ConflictedVersion, DotsyncError};
 use crate::home::{repo_path_of, Home, Materialized};
 use crate::repo::{
     collect_managed_tree_entries, load_scope_commit, pending_push_scopes, push_scope_updates,
-    PushReport,
+    read_entry_bytes, PushReport,
 };
 use crate::session::{in_session, Run, Session};
 use crate::status::FileChange;
@@ -142,8 +140,6 @@ pub(crate) async fn sync_home_to_machine_scope(
 ) -> Result<SyncReport, DotsyncError> {
     let machine_scope = home.machine_scope().to_string();
     let head = load_scope_commit(session.repo().as_ref(), &machine_scope)?;
-    home.observe(session, &head).await?;
-
     let classified = classify_home_against_head(session, home, &head).await?;
     let local_changes = changed_paths(&classified, FileState::is_drift);
     let head_paths = collect_managed_tree_entries(&head.tree())?;
@@ -151,22 +147,22 @@ pub(crate) async fn sync_home_to_machine_scope(
     let materialized = if discard_local {
         home.materialize_discarding_local(session, &head).await?
     } else {
-        home.materialize(session, &head, &machine_scope).await?
+        home.materialize(session, &head).await?
     };
     if let Materialized::Conflicted { merged } = materialized {
         return Err(sync_conflict(session, &machine_scope, &classified, &merged).await?);
     }
 
     // Every local change went one way or the other: a forced sync discarded all
-    // of them, a merged one carried all of them.
+    // of them, a merged one carried all of them. Only the discarded ones are
+    // rendered as a two-sided diff, so only those pay for their content — the
+    // classification carried tree entries, not bytes.
     let (drifts, carried_changes) = if discard_local {
-        (
-            local_changes
-                .iter()
-                .map(|(relative, path)| file_drift(session.paths(), relative, path))
-                .collect(),
-            Vec::new(),
-        )
+        let mut drifts = Vec::new();
+        for (relative, path) in &local_changes {
+            drifts.push(file_drift(session, relative, path).await?);
+        }
+        (drifts, Vec::new())
     } else {
         (
             Vec::new(),
@@ -188,20 +184,16 @@ pub(crate) async fn sync_home_to_machine_scope(
     })
 }
 
-/// Home against a head, across the three trees `Home` holds.
+/// Home against a head: the three trees `Home` holds, and the merge of them
+/// that a sync would write.
 pub(crate) async fn classify_home_against_head(
-    session: &Session,
-    home: &Home,
+    session: &mut Session,
+    home: &mut Home,
     head: &jj_lib::commit::Commit,
 ) -> Result<BTreeMap<PathBuf, ClassifiedPath>, DotsyncError> {
+    let merged = home.merge_with(session, head).await?;
     let mark = home.mark().await?;
-    classify_managed_trees(
-        session.repo().store(),
-        &mark.tree(),
-        &home.snapshot_tree(),
-        &head.tree(),
-    )
-    .await
+    classify_managed_trees(&mark.tree(), &home.snapshot_tree(), &head.tree(), &merged)
 }
 
 /// Reads a conflicted merge out into the stop that presents it: every
@@ -267,12 +259,20 @@ async fn conflicted_version(
     })
 }
 
-fn file_drift(paths: &DotsyncPaths, relative: &Path, path: &ClassifiedPath) -> FileDrift {
-    FileDrift {
+/// One classified path with both sides' content read out, for the renderings
+/// that show a diff. Read here rather than during classification because a run
+/// shows a handful of paths and classifies every managed one.
+pub(crate) async fn file_drift(
+    session: &Session,
+    relative: &Path,
+    path: &ClassifiedPath,
+) -> Result<FileDrift, DotsyncError> {
+    let store = session.repo().store();
+    Ok(FileDrift {
         repo_path: relative.to_path_buf(),
-        system_path: paths.home_dir.join(relative),
+        system_path: session.paths().home_dir.join(relative),
         state: path.state,
-        repo_bytes: path.tip_bytes.clone(),
-        home_bytes: path.home_bytes.clone(),
-    }
+        repo_bytes: read_entry_bytes(store, relative, path.tip.as_ref()).await?,
+        home_bytes: read_entry_bytes(store, relative, path.home.as_ref()).await?,
+    })
 }

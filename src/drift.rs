@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use jj_lib::backend::TreeValue;
 use jj_lib::merged_tree::MergedTree;
 
-use crate::error::DotsyncError;
-use crate::repo::{collect_managed_tree_entries, read_tree_entry_bytes};
+use crate::error::{jj_error, DotsyncError};
+use crate::home::repo_path_of;
+use crate::repo::collect_managed_tree_entries;
 
 /// Where one managed path stands across the three sides dotsync knows about:
 ///
@@ -25,8 +25,20 @@ use crate::repo::{collect_managed_tree_entries, read_tree_entry_bytes};
 /// another machine's published change.
 ///
 /// The variants are the full cross of presence for the three sides, collapsed
-/// by equality wherever two present sides hold the same bytes. Every situation
-/// therefore lands in exactly one variant, and none needs a special case.
+/// by equality wherever two present sides hold the same tree entry. Every
+/// situation therefore lands in exactly one variant, and none needs a special
+/// case.
+///
+/// Two sides are the same when their `TreeValue`s are: same kind, same content
+/// id, same executable bit. That is what a difference *is* here, so a chmod is
+/// a change and a symlink is not a regular file that happens to hold its own
+/// target — neither needs a rule of its own. It is also free, because the trees
+/// already hold the ids.
+///
+/// Whether the two sides that both moved can be reconciled is not a question
+/// this vocabulary answers on its own: it is answered by the same
+/// `merge(home, mark, head)` the sync materializes, so `DivergedEdit` and
+/// `DivergedEditThatMerges` cannot disagree with what the sync then does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileState {
     /// Absent from all three sides. Only reachable when a caller asks about a
@@ -48,8 +60,13 @@ pub enum FileState {
     IncomingNewAlreadyMatchesHome,
 
     /// Home holds real content dotsync has never seen, and the repo has just
-    /// introduced a different file at the same path. Drift: writing the repo's
-    /// version would destroy home content nothing has a record of.
+    /// introduced a file at the same path that will not merge with it. Drift:
+    /// writing the repo's version would destroy home content nothing has a
+    /// record of.
+    ///
+    /// Two adds that *do* merge are `DivergedEditThatMerges` — an add from
+    /// nothing is still a change, and jj merges two of them against an empty
+    /// base like any other pair.
     IncomingNewCollidesWithUntrackedHome,
 
     /// Was synced here and then deleted from home. Deletion drift — blocks
@@ -64,10 +81,12 @@ pub enum FileState {
     /// A local edit that was never recorded. Edit drift — blocks.
     EditedInHome,
 
-    /// Home and the scope hold the same bytes as different *kinds* of file: a
-    /// symlink here where the scope has a regular file, or the reverse. Drift,
-    /// because a link and a file are not the same thing however equal their
-    /// content reads — a link's content is its target string.
+    /// A local edit that changed what the path *is*: a symlink here where the
+    /// scope has a regular file, or the reverse. The same drift as
+    /// `EditedInHome`, and it exists only to be able to say so — a reader told
+    /// that a file was "edited here" goes looking for edited lines, and a link
+    /// to `real.conf` against a file holding the nine characters `real.conf`
+    /// has none to find.
     KindDiffersFromScope,
 
     /// A local edit to a file that someone else deleted from the repo. Still
@@ -75,15 +94,30 @@ pub enum FileState {
     EditedInHomeButRemovedFromRepo,
 
     /// Home and the tip both moved away from the last-synced tree, to the same
-    /// bytes. Most often this run's own commit: home already held the bytes
+    /// entry. Most often this run's own commit: home already held the bytes
     /// because the commit read them from there, and the tip holds them because
     /// the commit just wrote them. Not drift — already applied.
     AlreadyApplied,
 
-    /// Home and the tip both moved away from the last-synced tree, differently.
-    /// This machine's unrecorded edit against someone else's published change:
-    /// a real three-way conflict, which only `commit` can resolve.
+    /// Home and the tip both moved away from the last-synced tree, differently,
+    /// and the merge cannot reconcile them. This machine's unrecorded edit
+    /// against someone else's published change, in the same place: a real
+    /// three-way conflict, which only the agent can resolve.
     DivergedEdit,
+
+    /// Home and the tip both moved away from the last-synced tree, differently,
+    /// and the merge reconciles them: an edit here *and* a change from another
+    /// machine, which combine.
+    ///
+    /// Drift, because home holds a change of this machine's own — and nothing
+    /// more than drift, because both of the things that can happen next combine
+    /// the two rather than choosing: a plain `dotsync` merges them into home,
+    /// and a `commit` merges home's side into the scope against the version home
+    /// started from. It is `EditedInHome` with a second thing also true, which
+    /// is the whole of why it is worth saying separately: a reader told only
+    /// "edited here" would not know a sync is about to change the file under
+    /// them.
+    DivergedEditThatMerges,
 
     /// Home is exactly what was last synced here, and the tip has moved on.
     /// Not drift and not this machine's business — plain `dotsync` applies it.
@@ -97,7 +131,7 @@ pub enum FileState {
     /// Deleted from home and from the repo. Already converged.
     RemovedEverywhere,
 
-    /// Byte-identical on all three sides.
+    /// The same entry on all three sides.
     InSync,
 }
 
@@ -115,6 +149,7 @@ impl FileState {
                 | Self::DeletedInHome
                 | Self::DeletedInHomeTipAlsoChanged
                 | Self::DivergedEdit
+                | Self::DivergedEditThatMerges
                 | Self::IncomingNewCollidesWithUntrackedHome
         )
     }
@@ -134,6 +169,11 @@ impl FileState {
     /// contribute one. `commit` refuses these unless the same command forces
     /// the path, which is what makes "a machine that is merely behind reverts
     /// another machine's work" unrepresentable rather than merely unlikely.
+    ///
+    /// The two states where home *and* the tip both moved are not here, because
+    /// `commit` does not write home's bytes over the tip: it merges them against
+    /// the version home started from, so the other machine's change survives
+    /// without anyone being refused. What it cannot merge, it pauses on.
     pub fn blocks_commit(self) -> bool {
         matches!(
             self,
@@ -144,6 +184,15 @@ impl FileState {
         )
     }
 
+    /// Forcing this path decided something. Without `--force` the commit would
+    /// have been refused, or it would have merged home's bytes with a change
+    /// that arrived from another machine rather than writing them over it — and
+    /// a forced commit does write over it, so a run that forced this owes the
+    /// reader the path.
+    pub fn forcing_decides_something(self) -> bool {
+        self.blocks_commit() || matches!(self, Self::DivergedEdit | Self::DivergedEditThatMerges)
+    }
+
     /// What happened, naming every side that moved. The remedy depends on
     /// which ones did, so a message that mentions only home leaves the reader
     /// to guess at the rest.
@@ -151,7 +200,7 @@ impl FileState {
         match self {
             Self::EditedInHome => "edited here since the last sync",
             Self::KindDiffersFromScope => {
-                "a symlink here where the scope has a regular file, or the reverse: the same bytes, a different kind of file"
+                "a symlink here where the scope has a regular file, or the reverse: a different kind of file, not a different set of lines"
             }
             Self::EditedInHomeButRemovedFromRepo => {
                 "edited here since the last sync, and removed from the repo on another machine"
@@ -161,8 +210,11 @@ impl FileState {
                 "deleted here since the last sync, and changed in the repo on another machine"
             }
             Self::DivergedEdit => "edited here, and changed in the repo on another machine",
+            Self::DivergedEditThatMerges => {
+                "edited here, and changed in the repo on another machine; the two changes combine"
+            }
             Self::IncomingNewCollidesWithUntrackedHome => {
-                "never synced here, and the repo has just added a different file at this path"
+                "never synced here, and the repo has just added a file at this path that will not merge with it"
             }
             Self::IncomingNew => "added on another machine",
             Self::StaleNotYours => "changed on another machine, and not edited here",
@@ -184,6 +236,7 @@ impl FileState {
             Self::DeletedInHome => "deleted",
             Self::DeletedInHomeTipAlsoChanged => "deleted_changed_in_repo",
             Self::DivergedEdit => "conflicted",
+            Self::DivergedEditThatMerges => "modified_changed_in_repo",
             Self::IncomingNewCollidesWithUntrackedHome => "untracked_collision",
             Self::IncomingNew => "incoming_add",
             Self::StaleNotYours => "incoming_update",
@@ -198,19 +251,38 @@ impl FileState {
     }
 }
 
-/// Classifies one path from the bytes each side holds. Pure: no repo, no
-/// filesystem, no rendering.
+/// Classifies one path from the tree entry each side holds, plus the merge's
+/// own answer about whether the two moving sides can be reconciled there.
+/// Pure: no repo, no filesystem, no rendering.
+///
+/// `merge_reconciles` is only consulted where both home and the tip moved,
+/// which is the only question the three entries cannot settle between them. It
+/// comes from the merged tree the sync materializes, so a path this calls
+/// `DivergedEdit` is a path that sync stops on, and one it calls
+/// `DivergedEditThatMerges` is one sync carries.
 pub(crate) fn classify(
-    last_synced: Option<&[u8]>,
-    home: Option<&[u8]>,
-    tip: Option<&[u8]>,
+    last_synced: Option<&TreeValue>,
+    home: Option<&TreeValue>,
+    tip: Option<&TreeValue>,
+    merge_reconciles: bool,
 ) -> FileState {
+    // Both sides moved to something different. Whether that is a conflict is
+    // the merge's answer, not a comparison's — and the two ways of reaching
+    // here differ only in what to call the conflict.
+    let both_moved = || match (merge_reconciles, last_synced) {
+        (true, _) => FileState::DivergedEditThatMerges,
+        // Two adds of different things, with no version between them to merge
+        // against. Home's is the one nothing has a record of, which is what
+        // makes this worth a reason of its own.
+        (false, None) => FileState::IncomingNewCollidesWithUntrackedHome,
+        (false, Some(_)) => FileState::DivergedEdit,
+    };
     match (last_synced, home, tip) {
         (None, None, None) => FileState::AbsentEverywhere,
         (None, None, Some(_)) => FileState::IncomingNew,
         (None, Some(_), None) => FileState::UntrackedInHome,
         (None, Some(home), Some(tip)) if home == tip => FileState::IncomingNewAlreadyMatchesHome,
-        (None, Some(_), Some(_)) => FileState::IncomingNewCollidesWithUntrackedHome,
+        (None, Some(_), Some(_)) => both_moved(),
         (Some(_), None, None) => FileState::RemovedEverywhere,
         (Some(last), None, Some(tip)) if last == tip => FileState::DeletedInHome,
         (Some(_), None, Some(_)) => FileState::DeletedInHomeTipAlsoChanged,
@@ -219,49 +291,55 @@ pub(crate) fn classify(
         (Some(last), Some(home), Some(tip)) => match (last == home, last == tip) {
             (true, true) => FileState::InSync,
             (true, false) => FileState::StaleNotYours,
-            (false, true) => FileState::EditedInHome,
+            (false, true) => edited_in_home(home, tip),
             (false, false) if home == tip => FileState::AlreadyApplied,
-            (false, false) => FileState::DivergedEdit,
+            (false, false) => both_moved(),
         },
     }
 }
 
-/// One classified path together with the bytes the sides hold, read once so
-/// that the consumers never go back to the repo or to home for them.
-#[derive(Debug, Clone)]
-pub(crate) struct ClassifiedPath {
-    pub(crate) state: FileState,
-    pub(crate) home_bytes: Option<Vec<u8>>,
-    pub(crate) tip_bytes: Option<Vec<u8>>,
-}
-
-pub(crate) async fn read_entry_bytes(
-    store: &Arc<jj_lib::store::Store>,
-    relative: &Path,
-    value: Option<&TreeValue>,
-) -> Result<Option<Vec<u8>>, DotsyncError> {
-    match value {
-        Some(value) => Ok(Some(read_tree_entry_bytes(store, relative, value).await?)),
-        None => Ok(None),
+/// An edit home made and the tip did not, said the way it will read best: a
+/// link where the scope has a file has no changed lines to show, so the reason
+/// has to be about the kind rather than about the content.
+fn edited_in_home(home: &TreeValue, tip: &TreeValue) -> FileState {
+    let is_link = |value: &TreeValue| matches!(value, TreeValue::Symlink(_));
+    if is_link(home) == is_link(tip) {
+        FileState::EditedInHome
+    } else {
+        FileState::KindDiffersFromScope
     }
 }
 
-/// Classifies every managed path across the three trees a run holding `Home`
-/// has: the mark, home's snapshot, and the head home is being compared
-/// against.
+/// One classified path together with the tree entries the two sides a consumer
+/// might render hold. Entries rather than bytes: an id and a mode are what the
+/// classification needs, and the handful of paths that are actually shown or
+/// recorded read their content from these.
+#[derive(Debug, Clone)]
+pub(crate) struct ClassifiedPath {
+    pub(crate) state: FileState,
+    pub(crate) home: Option<TreeValue>,
+    pub(crate) tip: Option<TreeValue>,
+}
+
+/// Classifies every managed path across the trees a run holding `Home` has:
+/// the mark, home's snapshot, the head home is being compared against, and the
+/// merge of the three.
 ///
-/// These are the same three sides `classify` has always taken — what this
-/// machine last synced, what is in home now, what the scope holds now — so
-/// every state, marker and reason keeps its meaning. What changed is where
-/// they are read from: three trees, so there is no state file to lose and no
-/// second read of home. `Home::acquire` made the middle side true by
-/// snapshotting home into the wc commit, and `Home::observe` widened it to
-/// cover every path the head holds.
-pub(crate) async fn classify_managed_trees(
-    store: &Arc<jj_lib::store::Store>,
+/// The first three are the sides `classify` has always taken — what this
+/// machine last synced, what is in home now, what the scope holds now — read
+/// from trees, so there is no state file to lose and no second read of home.
+/// `Home::acquire` made the middle side true by snapshotting home into the wc
+/// commit, and `Home::observe` widened it to cover every path the head holds.
+///
+/// `merged` is the fourth, and it is the one that keeps this honest: it is the
+/// very merge `Home::materialize` writes into home, so "is this path a
+/// conflict?" has one answer for the whole run instead of one here and a
+/// different one at the moment of the write.
+pub(crate) fn classify_managed_trees(
     mark: &MergedTree,
     snapshot: &MergedTree,
     head: &MergedTree,
+    merged: &MergedTree,
 ) -> Result<BTreeMap<PathBuf, ClassifiedPath>, DotsyncError> {
     let mark = collect_managed_tree_entries(mark)?;
     let snapshot = collect_managed_tree_entries(snapshot)?;
@@ -276,56 +354,29 @@ pub(crate) async fn classify_managed_trees(
 
     let mut classified = BTreeMap::new();
     for relative in domain {
-        let last_synced_bytes = read_entry_bytes(store, &relative, mark.get(&relative)).await?;
-        let home_bytes = read_entry_bytes(store, &relative, snapshot.get(&relative)).await?;
-        let tip_bytes = read_entry_bytes(store, &relative, head.get(&relative)).await?;
+        // Asked of the merge per path, the same way the conflict presentation
+        // asks it, so the two cannot name different paths: a merge as a whole
+        // can be conflicted while most of its paths resolved perfectly well.
+        let merge_reconciles = merged
+            .path_value(repo_path_of(&relative)?.as_ref())
+            .map_err(|err| jj_error(format!("read merged {}: {err}", relative.display())))?
+            .is_resolved();
         let state = classify(
-            last_synced_bytes.as_deref(),
-            home_bytes.as_deref(),
-            tip_bytes.as_deref(),
+            mark.get(&relative),
+            snapshot.get(&relative),
+            head.get(&relative),
+            merge_reconciles,
         );
         classified.insert(
             relative.clone(),
             ClassifiedPath {
-                state: with_kind(
-                    state,
-                    mark.get(&relative),
-                    snapshot.get(&relative),
-                    head.get(&relative),
-                ),
-                home_bytes,
-                tip_bytes,
+                state,
+                home: snapshot.get(&relative).cloned(),
+                tip: head.get(&relative).cloned(),
             },
         );
     }
     Ok(classified)
-}
-
-/// A difference in kind is a difference, whatever the bytes say.
-///
-/// `classify` compares content, and content is the only thing the three sides
-/// have in common — but a symlink's content *is* its target string, so a link
-/// to `real.conf` and a regular file holding the nine characters `real.conf`
-/// read as identical to it. They are not the same file, and the trees say so:
-/// `TreeValue::Symlink` and `TreeValue::File` are different variants. So the
-/// kind is asked of the tree, and only where the content comparison found a
-/// difference already does that answer not matter.
-fn with_kind(
-    state: FileState,
-    mark: Option<&TreeValue>,
-    snapshot: Option<&TreeValue>,
-    head: Option<&TreeValue>,
-) -> FileState {
-    let is_link = |value: Option<&TreeValue>| matches!(value, Some(TreeValue::Symlink(_)));
-    if is_link(snapshot) == is_link(head) {
-        return state;
-    }
-    if is_link(snapshot) == is_link(mark) {
-        // Home is what it always was and the scope changed kind, which is the
-        // same shape as any other change that arrived from another machine.
-        return FileState::StaleNotYours;
-    }
-    FileState::KindDiffersFromScope
 }
 
 /// The paths `classify_managed_trees` reported a state for that a reader has

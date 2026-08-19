@@ -10,7 +10,7 @@ use crate::home::Home;
 use crate::repo::{collect_managed_tree_entries, load_scope_commit, read_tree_entry_bytes};
 use crate::scope_graph::scope_depth;
 use crate::session::{in_session, Run, Session};
-use crate::sync::{classify_home_against_head, finishing, FileDrift};
+use crate::sync::{classify_home_against_head, file_drift, finishing, FileDrift};
 
 #[derive(Debug, Clone)]
 pub struct ScopeInfo {
@@ -204,22 +204,15 @@ async fn diff_report(session: &mut Session, home: &mut Home) -> Result<DiffRepor
     session.fetch().await?;
     let machine_scope = home.machine_scope().to_string();
     let head = load_scope_commit(session.repo().as_ref(), &machine_scope)?;
-    home.observe(session, &head).await?;
 
     // The same changes `status` reports, with the two sides shown. A remote
     // advance this machine has not applied yet is not one of them, so `diff`
     // neither reports it nor exits non-zero for it.
     let classified = classify_home_against_head(session, home, &head).await?;
-    let drifts = changed_paths(&classified, FileState::is_drift)
-        .into_iter()
-        .map(|(relative, classified)| FileDrift {
-            system_path: session.paths().home_dir.join(&relative),
-            repo_path: relative,
-            state: classified.state,
-            repo_bytes: classified.tip_bytes,
-            home_bytes: classified.home_bytes,
-        })
-        .collect();
+    let mut drifts = Vec::new();
+    for (relative, classified) in changed_paths(&classified, FileState::is_drift) {
+        drifts.push(file_drift(session, &relative, &classified).await?);
+    }
 
     Ok(DiffReport {
         machine_scope,

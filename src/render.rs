@@ -151,6 +151,10 @@ fn change_marker(state: FileState) -> &'static str {
         // A kind difference is the same shape of change as an edit — home holds
         // something the scope does not — so it reads as one.
         FileState::KindDiffersFromScope => "M",
+        // So is an edit the repo has moved under: home holds a change of this
+        // machine's own, and the reason line is where "and so does the repo"
+        // belongs, because nothing about it needs resolving.
+        FileState::DivergedEditThatMerges => "M",
         FileState::DeletedInHome | FileState::DeletedInHomeTipAlsoChanged => "D",
         FileState::DivergedEdit | FileState::IncomingNewCollidesWithUntrackedHome => "C",
         FileState::IncomingNew => "A",
