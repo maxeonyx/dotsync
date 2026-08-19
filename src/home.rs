@@ -198,6 +198,12 @@ impl Home {
     /// writes over home content dotsync has never seen. Every path a
     /// materialization could write has to be read before the merge decides
     /// anything about it, which is what this is.
+    ///
+    /// Every method that can write home or move the mark calls this itself,
+    /// so no caller can merge against an unobserved head by forgetting to.
+    /// It stays public because `status` and `diff` want the widened snapshot
+    /// with no materialization at all. Re-observing the same head is free —
+    /// the probe set does not widen twice.
     pub(crate) async fn observe(
         &mut self,
         session: &mut Session,
@@ -223,6 +229,7 @@ impl Home {
         head: &Commit,
         head_label: &str,
     ) -> Result<Materialized, DotsyncError> {
+        self.observe(session, head).await?;
         let mark = self.mark().await?;
         if head.id() == mark.id() {
             return Ok(Materialized::AlreadyThere);
@@ -261,6 +268,7 @@ impl Home {
         session: &mut Session,
         head: &Commit,
     ) -> Result<(), DotsyncError> {
+        self.observe(session, head).await?;
         let mark = self.mark().await?;
         if mark.id() == head.id() {
             return Ok(());
@@ -283,6 +291,11 @@ impl Home {
         session: &mut Session,
         head: &Commit,
     ) -> Result<Materialized, DotsyncError> {
+        // Observed even though home's side is about to be dropped: check_out
+        // diffs against the snapshot, so an unobserved path on disk would
+        // read as absent and be blindly overwritten instead of counted as a
+        // local change this discard is discarding.
+        self.observe(session, head).await?;
         let mark = self.mark().await?;
         if head.id() == mark.id() && self.wc_commit.tree_ids() == head.tree().tree_ids() {
             return Ok(Materialized::AlreadyThere);
