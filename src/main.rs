@@ -642,7 +642,7 @@ async fn run_abort() -> Result<CliOutput, DotsyncError> {
 
 async fn run_sync(force: bool) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let run = sync(&paths, blanket_force(force)).await;
+    let run = sync(&paths, force).await;
     Ok(output_of("dotsync", run, |report| {
         render::synced_output(
             "sync",
@@ -1025,6 +1025,16 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
             if !error_report.drifts.is_empty() {
                 eprintln!("\nChanged files:");
                 for line in render::render_drifts_human(&error_report.drifts) {
+                    eprintln!("{line}");
+                }
+            }
+            // The conflict itself, after the teaching block and apart from it,
+            // because it is the material to work from rather than more
+            // instructions — and because it is what dotsync hands over
+            // *instead* of writing markers into the file.
+            if !error_report.conflicts.is_empty() {
+                eprintln!("\nConflicted files:");
+                for line in render::render_conflicts_human(&error_report.conflicts) {
                     eprintln!("{line}");
                 }
             }

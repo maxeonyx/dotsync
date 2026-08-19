@@ -1,11 +1,12 @@
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::config::DotsyncPaths;
-use crate::drift::{classify_home_against_scope, FileState, RecordedFromHome};
+use crate::drift::{changed_paths, FileState};
 use crate::error::DotsyncError;
+use crate::home::Home;
+use crate::repo::load_scope_commit;
 use crate::session::{in_session, Run};
-use crate::sync::{load_sync_state, resolve_current_scope};
+use crate::sync::{classify_home_against_head, finishing};
 
 /// What `status` found, split by whether anyone has to decide anything.
 ///
@@ -37,37 +38,44 @@ pub struct FileChange {
 }
 
 pub async fn status(paths: &DotsyncPaths) -> Run<Result<StatusReport, DotsyncError>> {
-    in_session(paths, async |session, _paths| {
-        session.fetch().await?;
-        let sync_state = load_sync_state(session.paths(), session.config())?;
-        let machine_scope = resolve_current_scope(session.config(), sync_state.as_ref(), None)?;
-        let classification = classify_home_against_scope(
-            session,
-            sync_state.as_ref(),
-            &machine_scope,
-            &BTreeSet::new(),
-            &RecordedFromHome::default(),
-        )
-        .await?;
-
-        let file_changes = |include: fn(FileState) -> bool| {
-            classification
-                .paths
-                .iter()
-                .filter(|(_, path)| include(path.state))
-                .map(|(relative, path)| FileChange {
-                    path: relative.clone(),
-                    state: path.state,
-                })
-                .collect::<Vec<_>>()
-        };
-
-        Ok(StatusReport {
-            machine_scope,
-            paused_cascade: crate::commit::paused_cascade_scope(session.paths())?,
-            changes: file_changes(FileState::is_drift),
-            incoming: file_changes(FileState::is_incoming),
-        })
+    in_session(paths, async |session, paths| {
+        // `status` acquires home for the same reason a sync does: home's own
+        // bytes are one of the three sides of every answer it gives, and the
+        // working copy is what reads them. Acquiring writes snapshot
+        // operations to the op log, which is jj's own convention and is not a
+        // change to anything a caller can see — no scope bookmark moves and
+        // nothing is written into home.
+        let mut home = Home::acquire(session, paths).await?;
+        let outcome = status_report(session, &mut home).await;
+        finishing(home, session, outcome).await
     })
     .await
+}
+
+async fn status_report(
+    session: &mut crate::session::Session,
+    home: &mut Home,
+) -> Result<StatusReport, DotsyncError> {
+    session.fetch().await?;
+    let machine_scope = home.machine_scope().to_string();
+    let head = load_scope_commit(session.repo().as_ref(), &machine_scope)?;
+    home.observe(session, &head).await?;
+
+    let classified = classify_home_against_head(session, home, &head).await?;
+    let file_changes = |include: fn(FileState) -> bool| {
+        changed_paths(&classified, include)
+            .into_iter()
+            .map(|(path, classified)| FileChange {
+                path,
+                state: classified.state,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    Ok(StatusReport {
+        machine_scope,
+        paused_cascade: crate::commit::paused_cascade_scope(session.paths())?,
+        changes: file_changes(FileState::is_drift),
+        incoming: file_changes(FileState::is_incoming),
+    })
 }

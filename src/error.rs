@@ -21,6 +21,62 @@ pub struct ErrorReport {
     /// Empty for every error raised before a run can overwrite anything, which
     /// is all of them except a commit that failed after writing its history.
     pub forced_overwrites: Vec<PathBuf>,
+    /// The files a stop could not merge, each with every version of it.
+    pub conflicts: Vec<ConflictedFile>,
+}
+
+/// One file a merge could not resolve, with every version of it.
+///
+/// Carried structured and whole because resolving a conflict needs all of it:
+/// the two sides *and* the version they both changed. An agent shown two sides
+/// cannot tell an addition from a deletion, or which side changed which line —
+/// Max, 2026-08-19: "Yes the base is supposed to be included."
+///
+/// The versions are not materialized into home. A config file full of
+/// `<<<<<<<` is broken config for exactly as long as the conflict takes to
+/// fix, so the application it configures breaks precisely while somebody is
+/// fixing it (PLAN §2.3 step 6, settled 2026-08-19). This is the object that
+/// carries them instead.
+#[derive(Debug, Clone)]
+pub struct ConflictedFile {
+    pub path: PathBuf,
+    /// Where the file stands across the three sides, so a conflicted file is
+    /// rendered with the same marker and the same reason `status` gives it.
+    pub state: FileState,
+    /// Base first, then the sides, in the order the merge holds them.
+    pub versions: Vec<ConflictedVersion>,
+}
+
+/// One version of a conflicted file: which part of the merge it is, what to
+/// call it, and what it holds.
+#[derive(Debug, Clone)]
+pub struct ConflictedVersion {
+    pub role: ConflictRole,
+    /// What this version is, in words — for a side of a sync conflict, the
+    /// scope it came from or the fact that it is home's own bytes. jj carries
+    /// these on the merge itself, so they are the labels the merge was built
+    /// with rather than a second naming of the same thing.
+    pub label: String,
+    /// `None` when this version does not hold the file at all, which is a
+    /// version of it: one side added the file, or one side deleted it.
+    pub contents: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictRole {
+    /// The version both sides changed.
+    Base,
+    /// A version that changed it.
+    Side,
+}
+
+impl ConflictRole {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Base => "base",
+            Self::Side => "side",
+        }
+    }
 }
 
 /// One path a commit named that dotsync will not record, and why. Kept
@@ -305,6 +361,17 @@ pub enum DotsyncError {
         count: usize,
         drifts: Vec<FileDrift>,
     },
+    /// Home and the scope changed the same file differently, so the merge a
+    /// sync is could not resolve. The sync stops whole and home is not
+    /// touched: home is derived from one commit, so a home built partly from
+    /// the old head and partly from the new one makes that single parent a
+    /// lie, and an unapplied incoming change then reads as a local edit
+    /// undoing it (`spike.ignore/README.md`, rule 3).
+    #[error("{} home file(s) conflict with what scope `{scope}` holds", files.len())]
+    SyncConflict {
+        scope: String,
+        files: Vec<ConflictedFile>,
+    },
     #[error("cascade paused at scope `{scope}` with conflicts in {conflicted_files}")]
     CascadePaused {
         scope: String,
@@ -382,6 +449,7 @@ impl DotsyncError {
             | DotsyncError::FileNotOnScope { .. }
             | DotsyncError::SyncState { .. }
             | DotsyncError::DriftDetected { .. }
+            | DotsyncError::SyncConflict { .. }
             | DotsyncError::NoPausedCascade
             | DotsyncError::RepoAlreadyExists { .. }
             | DotsyncError::NotInitialized { .. }
@@ -406,6 +474,15 @@ impl DotsyncError {
                         .to_string(),
                 ],
                 forced_overwrites: Vec::new(),
+                conflicts: Vec::new(),
+            },
+            DotsyncError::SyncConflict { files, .. } => ErrorReport {
+                code: "sync_conflict",
+                message: self.to_string(),
+                drifts: Vec::new(),
+                current_state: error_current_state(self),
+                forced_overwrites: Vec::new(),
+                conflicts: files.clone(),
             },
             DotsyncError::InvalidScope { .. } => basic_error_report("invalid_scope", self),
             DotsyncError::ScopeDiverged { .. } => basic_error_report("scope_diverged", self),
@@ -434,6 +511,7 @@ impl DotsyncError {
                 drifts: Vec::new(),
                 current_state: error_current_state(self),
                 forced_overwrites: Vec::new(),
+                conflicts: Vec::new(),
             },
             DotsyncError::MissingHostname => basic_error_report("missing_hostname", self),
             DotsyncError::RemoteUnreachable { .. } => {
@@ -476,6 +554,7 @@ pub(crate) fn basic_error_report(code: &'static str, error: &DotsyncError) -> Er
         drifts: Vec::new(),
         current_state: error_current_state(error),
         forced_overwrites: Vec::new(),
+        conflicts: Vec::new(),
     }
 }
 
@@ -522,6 +601,18 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Vec<String> {
                 .join(", ")
         )],
         DotsyncError::PausedCascadeInProgress { scope } => vec![format!("paused scope: {scope}")],
+        // One entry per file, because one file is one thing to resolve. Every
+        // version of it is printed in full below the teaching block and
+        // carried in the payload; this is the list of decisions to make.
+        DotsyncError::SyncConflict { scope, files } => files
+            .iter()
+            .map(|file| {
+                format!(
+                    "`{}` was changed in home and on `{scope}` since this machine last synced it",
+                    file.path.display()
+                )
+            })
+            .collect(),
         DotsyncError::NotInitialized { path } => vec![format!(
             "expected repo path: {}; standard location: ~/.local/share/dotsync/repo",
             path.display()

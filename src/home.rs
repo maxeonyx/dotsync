@@ -48,7 +48,7 @@ use jj_lib::working_copy::{
 use crate::config::DotsyncPaths;
 use crate::error::{jj_error, DotsyncError};
 use crate::machine::detect_machine;
-use crate::repo::{load_repo_direct, load_scope_commit};
+use crate::repo::load_scope_commit;
 use crate::session::Session;
 use crate::working_copy::{HomeLockedWorkingCopy, HomeWorkingCopy};
 
@@ -116,10 +116,21 @@ impl Home {
         // the working copy under us, and the view we hold is at least as new
         // as anything the state file refers to. This is also what makes
         // `WorkingCopyFreshness::Updated` unreachable below.
-        session.advance_to(load_repo_direct(paths).await?).await?;
+        //
+        // Through the loader, not through the path: a loader built afresh from
+        // the file system builds a second `Store`, and jj asserts that a tree
+        // handed to a commit builder came from the same one the transaction's
+        // repo has. Every tree in this module is read through `store` above,
+        // so the run has to keep one store.
+        let reloaded = session
+            .repo()
+            .loader()
+            .load_at_head()
+            .await
+            .map_err(|err| jj_error(format!("re-read the repo under the lock: {err}")))?;
+        session.advance_to(reloaded).await?;
 
         let wc_commit = ensure_wc_commit(session, &machine_scope, &workspace).await?;
-        shed_sync_state_file(session, paths);
 
         let freshness = WorkingCopyFreshness::check_stale(&locked, &wc_commit, session.repo())
             .map_err(|err| jj_error(format!("check working copy freshness: {err}")))?;
@@ -178,6 +189,26 @@ impl Home {
         &self.wc_commit
     }
 
+    /// Widens home's snapshot to cover every path `head` holds, and re-reads
+    /// them.
+    ///
+    /// `acquire` cannot do this, because it snapshots before the run knows
+    /// which head it is heading for: a path only the head holds is outside its
+    /// probe set, so home's side of the merge reads as *absent* at a path home
+    /// actually holds — and the merge then resolves to the head's side and
+    /// writes over home content dotsync has never seen. Every path a
+    /// materialization could write has to be read before the merge decides
+    /// anything about it, which is what this is.
+    pub(crate) async fn observe(
+        &mut self,
+        session: &mut Session,
+        head: &Commit,
+    ) -> Result<(), DotsyncError> {
+        self.locked.probe_also(tree_paths(&head.tree())?);
+        let snapshot = self.snapshot_home().await?;
+        self.amend_if_changed(session, snapshot).await
+    }
+
     /// Moves home to `head`: rule 3. `merge(snapshot, mark, head)` in
     /// memory; resolved materializes whole (a new wc commit on `head`, local
     /// edits carried), conflicted touches nothing and hands back the merge.
@@ -209,6 +240,59 @@ impl Home {
         Ok(Materialized::Applied { stats })
     }
 
+    /// Records that home derives from `head` now, without touching home.
+    ///
+    /// The mark moves to `head` and the wc commit keeps home's own bytes, so
+    /// anything home holds that `head` does not stays an ordinary local change
+    /// against it. This is what a home sync performed by some other code path
+    /// amounts to at this boundary: the writing already happened, and what is
+    /// left is to say which commit it came from. Without it the mark stays
+    /// wherever the last materialization left it, and every file that other
+    /// path wrote reads afterwards as an edit made here.
+    ///
+    /// Not a merge, so it cannot conflict and cannot fail on a state another
+    /// code path produced.
+    pub(crate) async fn record_mark(
+        &mut self,
+        session: &mut Session,
+        head: &Commit,
+    ) -> Result<(), DotsyncError> {
+        let mark = self.mark().await?;
+        if mark.id() == head.id() {
+            return Ok(());
+        }
+        let snapshot = self.snapshot_tree();
+        self.switch_to(session, head.id().clone(), snapshot).await
+    }
+
+    /// Moves home to `head` with home's side of the merge dropped: the head's
+    /// tree is materialized whole and every local change at a managed path is
+    /// gone.
+    ///
+    /// That is the one question `--force` asks — "overwrite what is in home?" —
+    /// and it cannot be answered by `materialize`, whose whole job is to carry
+    /// local changes across. It is also the operation `discard <paths>` narrows
+    /// to a path list (PLAN §2.3 step 7); the whole-home version is what the
+    /// flag can express.
+    pub(crate) async fn materialize_discarding_local(
+        &mut self,
+        session: &mut Session,
+        head: &Commit,
+    ) -> Result<Materialized, DotsyncError> {
+        let mark = self.mark().await?;
+        if head.id() == mark.id() && self.wc_commit.tree_ids() == head.tree().tree_ids() {
+            return Ok(Materialized::AlreadyThere);
+        }
+        self.switch_to(session, head.id().clone(), head.tree())
+            .await?;
+        let stats = self
+            .locked
+            .check_out(&self.wc_commit)
+            .await
+            .map_err(|err| jj_error(format!("materialize into home: {err}")))?;
+        Ok(Materialized::Applied { stats })
+    }
+
     /// Ends the run at the home boundary: persists which operation home has
     /// seen. Call it after the last transaction, with the session's final
     /// operation.
@@ -229,6 +313,14 @@ impl Home {
         let mark = self.mark().await?;
         self.locked.probe_also(tree_paths(&self.wc_commit.tree())?);
         self.locked.probe_also(tree_paths(&mark.tree())?);
+
+        // Asked before the snapshot opens anything, so a tracked path that is
+        // now a fifo gets dotsync's explanation of what that is instead of a
+        // failure from inside a read — and, before this module existed, instead
+        // of blocking for ever.
+        if let Some(path) = self.locked.irregular_home_paths().into_iter().next() {
+            return Err(DotsyncError::NotARegularFile { path });
+        }
 
         let options = SnapshotOptions {
             base_ignores: GitIgnoreFile::empty(),
@@ -464,17 +556,6 @@ async fn ensure_wc_commit(
         .map_err(|err| jj_error(format!("commit working copy creation: {err}")))?;
     session.advance_to(repo).await?;
     Ok(wc_commit)
-}
-
-/// The sync-state.json era ends the first time a step-2 binary runs: the
-/// file's two facts (machine scope, last synced revision) live in the view's
-/// wc commit now, so the file is deleted wherever the config said it lived.
-/// Best-effort — a missing file is the normal case forever after.
-fn shed_sync_state_file(session: &Session, paths: &DotsyncPaths) {
-    let state_file = paths
-        .home_dir
-        .join(&session.config().sync_state_relative_path);
-    let _ = std::fs::remove_file(state_file);
 }
 
 /// Three labeled trees into jj's merge: one base (the mark), two sides (home

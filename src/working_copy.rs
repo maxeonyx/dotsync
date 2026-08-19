@@ -167,6 +167,18 @@ async fn read_disk_entry(
         // the same behaviour the old classifier had.
         return Ok(Merge::absent());
     }
+    if !metadata.is_file() {
+        // A fifo, a socket, a device. Refused rather than read, because
+        // reading one can never return: `fs::read` on a fifo blocks until
+        // something writes to the other end, and nothing ever does. The
+        // caller checks for these first so the reader gets dotsync's own
+        // explanation; this makes the hang unrepresentable whatever the
+        // caller did.
+        return Err(snapshot_error(
+            irregular_file_message(disk),
+            "unsupported file kind",
+        ));
+    }
     let bytes = std::fs::read(disk)
         .map_err(|err| snapshot_error(format!("read file {}", disk.display()), err))?;
     let executable = file_is_executable(&metadata);
@@ -379,6 +391,37 @@ impl HomeLockedWorkingCopy {
             }
         }
     }
+
+    /// Probed paths that home holds as something with no content to read: a
+    /// fifo, a socket, a device.
+    ///
+    /// Asked before `snapshot`, so the answer is dotsync's own explanation of
+    /// what such a path is rather than a failure from inside a read. A tracked
+    /// file can be replaced by one of these at any time, and every run reads
+    /// every tracked path, so this is on the ordinary path rather than only
+    /// where a command names one.
+    pub(crate) fn irregular_home_paths(&self) -> Vec<PathBuf> {
+        self.probe
+            .iter()
+            .filter_map(|path| home_disk_path(&self.home, &self.repo_root, path).ok())
+            .filter(|disk| {
+                std::fs::symlink_metadata(disk).is_ok_and(|metadata| {
+                    let kind = metadata.file_type();
+                    !kind.is_file() && !kind.is_symlink() && !kind.is_dir()
+                })
+            })
+            .collect()
+    }
+}
+
+/// What a path with no readable content is, in the words dotsync explains it
+/// with. Shared so the refusal reads the same whether it was reached before a
+/// snapshot or inside one.
+pub(crate) fn irregular_file_message(disk: &Path) -> String {
+    format!(
+        "{} is not a regular file, so dotsync cannot record what it holds",
+        disk.display()
+    )
 }
 
 #[async_trait]

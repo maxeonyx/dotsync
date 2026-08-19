@@ -2,8 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use jj_lib::backend::TreeValue;
+use jj_lib::merged_tree::MergedTree;
 
 use crate::config::{internal_repo_paths, DotsyncPaths};
 use crate::error::DotsyncError;
@@ -324,9 +326,11 @@ pub(crate) async fn classify_paths(
     for relative in domain {
         let last_synced_bytes = match recorded_from_home.baseline(relative) {
             Some(recorded) => recorded.clone(),
-            None => read_entry_bytes(repo, relative, last_synced_entries.get(relative)).await?,
+            None => {
+                read_entry_bytes(repo.store(), relative, last_synced_entries.get(relative)).await?
+            }
         };
-        let tip_bytes = read_entry_bytes(repo, relative, tip_entries.get(relative)).await?;
+        let tip_bytes = read_entry_bytes(repo.store(), relative, tip_entries.get(relative)).await?;
         let home_bytes = read_home_bytes(paths, relative)?;
         let mut state = classify(
             last_synced_bytes.as_deref(),
@@ -350,16 +354,78 @@ pub(crate) async fn classify_paths(
 }
 
 pub(crate) async fn read_entry_bytes(
-    repo: &dyn jj_lib::repo::Repo,
+    store: &Arc<jj_lib::store::Store>,
     relative: &Path,
     value: Option<&TreeValue>,
 ) -> Result<Option<Vec<u8>>, DotsyncError> {
     match value {
-        Some(value) => Ok(Some(
-            read_tree_entry_bytes(repo.store(), relative, value).await?,
-        )),
+        Some(value) => Ok(Some(read_tree_entry_bytes(store, relative, value).await?)),
         None => Ok(None),
     }
+}
+
+/// Classifies every managed path across the three trees a run holding `Home`
+/// has: the mark, home's snapshot, and the head home is being compared
+/// against.
+///
+/// These are the same three sides `classify` has always taken — what this
+/// machine last synced, what is in home now, what the scope holds now — so
+/// every state, marker and reason keeps its meaning. What changed is where
+/// they are read from: three trees, so there is no state file to lose and no
+/// second read of home. `Home::acquire` made the middle side true by
+/// snapshotting home into the wc commit, and `Home::observe` widened it to
+/// cover every path the head holds.
+pub(crate) async fn classify_managed_trees(
+    store: &Arc<jj_lib::store::Store>,
+    internal_paths: &BTreeSet<PathBuf>,
+    mark: &MergedTree,
+    snapshot: &MergedTree,
+    head: &MergedTree,
+) -> Result<BTreeMap<PathBuf, ClassifiedPath>, DotsyncError> {
+    let mark = collect_managed_tree_entries(mark, internal_paths)?;
+    let snapshot = collect_managed_tree_entries(snapshot, internal_paths)?;
+    let head = collect_managed_tree_entries(head, internal_paths)?;
+
+    let domain: BTreeSet<PathBuf> = mark
+        .keys()
+        .chain(snapshot.keys())
+        .chain(head.keys())
+        .cloned()
+        .collect();
+
+    let mut classified = BTreeMap::new();
+    for relative in domain {
+        let last_synced_bytes = read_entry_bytes(store, &relative, mark.get(&relative)).await?;
+        let home_bytes = read_entry_bytes(store, &relative, snapshot.get(&relative)).await?;
+        let tip_bytes = read_entry_bytes(store, &relative, head.get(&relative)).await?;
+        classified.insert(
+            relative,
+            ClassifiedPath {
+                state: classify(
+                    last_synced_bytes.as_deref(),
+                    home_bytes.as_deref(),
+                    tip_bytes.as_deref(),
+                ),
+                last_synced_bytes,
+                home_bytes,
+                tip_bytes,
+            },
+        );
+    }
+    Ok(classified)
+}
+
+/// The paths `classify_managed_trees` reported a state for that a reader has
+/// to act on, in the order they read in.
+pub(crate) fn changed_paths(
+    classified: &BTreeMap<PathBuf, ClassifiedPath>,
+    include: fn(FileState) -> bool,
+) -> Vec<(PathBuf, ClassifiedPath)> {
+    classified
+        .iter()
+        .filter(|(_, path)| include(path.state))
+        .map(|(relative, path)| (relative.clone(), path.clone()))
+        .collect()
 }
 
 /// What home holds at a path, or `None` when it holds nothing there.

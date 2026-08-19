@@ -1,18 +1,28 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId;
+use jj_lib::repo::Repo as _;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{DotsyncConfig, DotsyncPaths};
-use crate::drift::{classify_home_against_scope, ClassifiedPath, FileState, RecordedFromHome};
-use crate::error::DotsyncError;
+use crate::config::{internal_repo_paths, DotsyncConfig, DotsyncPaths};
+use crate::drift::{
+    changed_paths, classify_home_against_scope, classify_managed_trees, read_entry_bytes,
+    ClassifiedPath, FileState, RecordedFromHome,
+};
+use crate::error::{jj_error, ConflictRole, ConflictedFile, ConflictedVersion, DotsyncError};
+use crate::home::{Home, Materialized};
 use crate::machine::detect_machine;
-use crate::repo::{pending_push_scopes, push_scope_updates, PushReport};
+use crate::repo::{
+    collect_managed_tree_entries, load_scope_commit, pending_push_scopes, push_scope_updates,
+    PushReport,
+};
 use crate::session::{in_session, Run, Session};
+use crate::status::FileChange;
 
 /// Which drifted home files a run may overwrite.
 ///
@@ -82,6 +92,15 @@ pub struct SyncReport {
     pub current_scope: String,
     pub synced_paths: Vec<PathBuf>,
     pub drifts: Vec<FileDrift>,
+    /// The local changes the sync merged around and left standing in home.
+    ///
+    /// A sync carries an edit it did not collide with rather than stopping on
+    /// it, so a run that applied incoming changes can also have left this
+    /// machine holding uncommitted work — and an agent that reads "synced 4
+    /// file(s)" and exit 0 would otherwise have no reason to think so. The
+    /// edit stays this machine's to decide about, which is only true if the
+    /// run that carried it says it is still there.
+    pub carried_changes: Vec<FileChange>,
 }
 
 /// The `dotsync` (sync) command: what reached home, and what reached the
@@ -104,27 +123,241 @@ pub(crate) struct SyncState {
     pub(crate) last_synced_revision: CommitId,
 }
 
+/// Plain `dotsync`: bring home to this machine's scope.
+///
+/// `discard_local` is `--force`: home loses instead of being merged. Without
+/// it a local edit is an input to the sync rather than a wall in front of it —
+/// the merge carries it across — and only a collision on the same file stops
+/// the run.
 pub async fn sync(
     paths: &DotsyncPaths,
-    force: ForceScope,
+    discard_local: bool,
 ) -> Run<Result<SyncCommandReport, DotsyncError>> {
-    in_session(paths, async |session, _paths| {
-        session.fetch().await?;
-        // Publish before touching home: scope commits left behind by an
-        // interrupted run must reach the remote even if the home sync stops.
-        // The exception is a paused cascade, whose scopes are only half
-        // cascaded.
-        let push = match crate::commit::paused_cascade_scope(session.paths())? {
-            Some(paused_scope) => PushReport::WithheldPausedCascade {
-                scopes: pending_push_scopes(session),
-                paused_scope,
-            },
-            None => push_scope_updates(session).await?,
-        };
-        let sync = sync_repo_to_home(session, force, &RecordedFromHome::default(), None).await?;
-        Ok(SyncCommandReport { sync, push })
+    in_session(paths, async |session, paths| {
+        let mut home = Home::acquire(session, paths).await?;
+        let outcome = sync_home(session, &mut home, discard_local).await;
+        finishing(home, session, outcome).await
     })
     .await
+}
+
+/// Ends a run at the home boundary whichever way the run went.
+///
+/// The working copy holds a lock and a record of where home stands for the
+/// whole run, and both are released here — on the conflict stop and on a
+/// failure just as much as on a success, which is why the outcome passes
+/// through this rather than being returned around it. The run's own failure
+/// wins over a failure to persist, because the run's is what the reader has to
+/// act on.
+pub(crate) async fn finishing<T>(
+    home: Home,
+    session: &Session,
+    outcome: Result<T, DotsyncError>,
+) -> Result<T, DotsyncError> {
+    let persisted = home.finish(session).await;
+    let value = outcome?;
+    persisted?;
+    Ok(value)
+}
+
+async fn sync_home(
+    session: &mut Session,
+    home: &mut Home,
+    discard_local: bool,
+) -> Result<SyncCommandReport, DotsyncError> {
+    session.fetch().await?;
+    // Publish before touching home: scope commits left behind by an
+    // interrupted run must reach the remote even if the home sync stops.
+    // The exception is a paused cascade, whose scopes are only half
+    // cascaded.
+    let push = match crate::commit::paused_cascade_scope(session.paths())? {
+        Some(paused_scope) => PushReport::WithheldPausedCascade {
+            scopes: pending_push_scopes(session),
+            paused_scope,
+        },
+        None => push_scope_updates(session).await?,
+    };
+    let sync = materialize_machine_scope(session, home, discard_local).await?;
+    Ok(SyncCommandReport { sync, push })
+}
+
+/// The sync itself: `merge(home, mark, head)` and what it came to.
+///
+/// The classification is read before the merge writes anything, because two of
+/// the three trees it reads stop existing the moment the merge lands — and it
+/// is what says which home files a forced sync discarded.
+async fn materialize_machine_scope(
+    session: &mut Session,
+    home: &mut Home,
+    discard_local: bool,
+) -> Result<SyncReport, DotsyncError> {
+    let machine_scope = home.machine_scope().to_string();
+    let head = load_scope_commit(session.repo().as_ref(), &machine_scope)?;
+    home.observe(session, &head).await?;
+
+    let classified = classify_home_against_head(session, home, &head).await?;
+    let local_changes = changed_paths(&classified, FileState::is_drift);
+    let head_paths =
+        collect_managed_tree_entries(&head.tree(), &internal_repo_paths(session.config()))?;
+
+    let materialized = if discard_local {
+        home.materialize_discarding_local(session, &head).await?
+    } else {
+        home.materialize(session, &head, &machine_scope).await?
+    };
+    if let Materialized::Conflicted { merged } = materialized {
+        return Err(sync_conflict(session, &machine_scope, &classified, &merged).await?);
+    }
+
+    // The commit path still reads this file to know what this machine last
+    // synced; keeping it in step with the mark is what lets the two paths
+    // coexist. It goes when the commit path moves onto `Home`.
+    save_sync_state(session.paths(), session.config(), &machine_scope, head.id())?;
+
+    Ok(SyncReport {
+        current_scope: machine_scope,
+        synced_paths: head_paths.into_keys().collect(),
+        // A forced sync overwrote every local change; a merged one overwrote
+        // none, and carried them instead.
+        drifts: if discard_local {
+            local_changes
+                .iter()
+                .map(|(relative, path)| file_drift(session.paths(), relative, path))
+                .collect()
+        } else {
+            Vec::new()
+        },
+        carried_changes: if discard_local {
+            Vec::new()
+        } else {
+            local_changes
+                .iter()
+                .map(|(relative, path)| FileChange {
+                    path: relative.clone(),
+                    state: path.state,
+                })
+                .collect()
+        },
+    })
+}
+
+/// Walks the working copy forward over a home sync another code path just did.
+///
+/// The commands that still sync home themselves — `init`, `commit`, `continue`,
+/// `abort` — move a scope head and rewrite home without telling the working
+/// copy. The mark would then stay wherever the last plain `dotsync` left it, and
+/// the very files the run wrote would read afterwards as edits made on this
+/// machine: `status` reporting a change nobody made, and the next sync merging
+/// against a version of home that is two commits old. This says what those runs
+/// made true instead — home derives from the scope's new head — and writes
+/// nothing into home.
+///
+/// It goes when those commands sync through `Home` themselves, which is the
+/// commit path's own chunk of the rewrite.
+pub(crate) async fn record_the_home_sync(
+    session: &mut Session,
+    paths: &DotsyncPaths,
+) -> Result<(), DotsyncError> {
+    let mut home = Home::acquire(session, paths).await?;
+    let outcome = advance_the_mark(session, &mut home).await;
+    finishing(home, session, outcome).await
+}
+
+async fn advance_the_mark(session: &mut Session, home: &mut Home) -> Result<(), DotsyncError> {
+    let machine_scope = home.machine_scope().to_string();
+    let head = load_scope_commit(session.repo().as_ref(), &machine_scope)?;
+    // The paths only the new head holds are the ones the sync just added to
+    // home, so they have to be read before the mark says home derives from it.
+    home.observe(session, &head).await?;
+    home.record_mark(session, &head).await
+}
+
+/// Home against a head, across the three trees `Home` holds.
+pub(crate) async fn classify_home_against_head(
+    session: &Session,
+    home: &Home,
+    head: &jj_lib::commit::Commit,
+) -> Result<BTreeMap<PathBuf, ClassifiedPath>, DotsyncError> {
+    let mark = home.mark().await?;
+    classify_managed_trees(
+        session.repo().store(),
+        &internal_repo_paths(session.config()),
+        &mark.tree(),
+        &home.snapshot_tree(),
+        &head.tree(),
+    )
+    .await
+}
+
+/// Reads a conflicted merge out into the stop that presents it: every
+/// conflicted path, with the base and both sides, labeled.
+///
+/// Nothing is stored. The merge is recomputed from the mark, home and the head
+/// on every run, so a rerun presents the same conflict and a resolution is
+/// visible the moment it is made.
+async fn sync_conflict(
+    session: &Session,
+    machine_scope: &str,
+    classified: &BTreeMap<PathBuf, ClassifiedPath>,
+    merged: &jj_lib::merged_tree::MergedTree,
+) -> Result<DotsyncError, DotsyncError> {
+    let store = session.repo().store();
+    let labels = merged.labels_by_term(machine_scope);
+    let mut files = Vec::new();
+    // The classification is the domain rather than the merged tree, because
+    // every path the merge could touch is in it — it was built from the same
+    // three trees — and it is what says where each file stands.
+    for (relative, path) in classified {
+        let repo_path = repo_path_of(relative)?;
+        let value = merged
+            .path_value(&repo_path)
+            .map_err(|err| jj_error(format!("read merged {}: {err}", relative.display())))?;
+        if value.is_resolved() {
+            continue;
+        }
+        let mut versions = Vec::new();
+        // Base first: it is the version the reader needs to make sense of the
+        // other two, and jj holds the bases and the sides interleaved.
+        for (label, term) in labels.removes().zip(value.removes()) {
+            versions
+                .push(conflicted_version(store, relative, ConflictRole::Base, label, term).await?);
+        }
+        for (label, term) in labels.adds().zip(value.adds()) {
+            versions
+                .push(conflicted_version(store, relative, ConflictRole::Side, label, term).await?);
+        }
+        files.push(ConflictedFile {
+            path: relative.clone(),
+            state: path.state,
+            versions,
+        });
+    }
+    Ok(DotsyncError::SyncConflict {
+        scope: machine_scope.to_string(),
+        files,
+    })
+}
+
+fn repo_path_of(relative: &Path) -> Result<jj_lib::repo_path::RepoPathBuf, DotsyncError> {
+    let relative_str = relative.to_str().ok_or_else(|| DotsyncError::NonUtf8Path {
+        path: relative.to_path_buf(),
+    })?;
+    jj_lib::repo_path::RepoPathBuf::from_internal_string(relative_str)
+        .map_err(|err| jj_error(format!("invalid repo path {}: {err}", relative.display())))
+}
+
+async fn conflicted_version(
+    store: &Arc<jj_lib::store::Store>,
+    relative: &Path,
+    role: ConflictRole,
+    label: &str,
+    term: &Option<jj_lib::backend::TreeValue>,
+) -> Result<ConflictedVersion, DotsyncError> {
+    Ok(ConflictedVersion {
+        role,
+        label: label.to_string(),
+        contents: read_entry_bytes(store, relative, term.as_ref()).await?,
+    })
 }
 
 pub(crate) fn resolve_current_scope(
@@ -239,6 +472,9 @@ pub(crate) async fn sync_repo_to_home(
         current_scope,
         synced_paths,
         drifts,
+        // This path stops on a local change rather than merging around one, so
+        // it never carries any.
+        carried_changes: Vec::new(),
     })
 }
 

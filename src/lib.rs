@@ -22,8 +22,8 @@ pub use crate::commit::{
 pub use crate::config::DotsyncPaths;
 pub use crate::drift::FileState;
 pub use crate::error::{
-    CommitPathProblem, DotsyncError, ErrorReport, RefusedCommitPath, RejectedCommitPath,
-    SkipReason, SkippedCommitPath,
+    CommitPathProblem, ConflictRole, ConflictedFile, ConflictedVersion, DotsyncError, ErrorReport,
+    RefusedCommitPath, RejectedCommitPath, SkipReason, SkippedCommitPath,
 };
 pub use crate::inspect::{diff_home, view, DiffReport, ScopeInfo, ViewAnswer, ViewReport};
 pub use crate::repo::PushReport;

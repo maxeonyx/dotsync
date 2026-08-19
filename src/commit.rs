@@ -453,6 +453,9 @@ async fn commit_in_session(
     )
     .await
     .map_err(stopped)?;
+    crate::sync::record_the_home_sync(session, paths)
+        .await
+        .map_err(stopped)?;
 
     Ok(CommitReport {
         committed_scope: options.scope,
@@ -1315,6 +1318,7 @@ async fn continue_in_session(
         Some(&state.machine_scope),
     )
     .await?;
+    crate::sync::record_the_home_sync(session, paths).await?;
     Ok(ContinueReport { sync, push })
 }
 
@@ -1369,6 +1373,7 @@ async fn abort_in_session(
         Some(&state.machine_scope),
     )
     .await?;
+    crate::sync::record_the_home_sync(session, paths).await?;
 
     Ok(AbortReport {
         paused_scope: state.paused_scope,

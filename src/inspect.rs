@@ -4,12 +4,13 @@ use std::path::{Path, PathBuf};
 use jj_lib::repo::Repo as _;
 
 use crate::config::{internal_repo_paths, DotsyncPaths};
-use crate::drift::{classify_home_against_scope, RecordedFromHome};
+use crate::drift::{changed_paths, FileState};
 use crate::error::{jj_error, DotsyncError};
+use crate::home::Home;
 use crate::repo::{collect_managed_tree_entries, load_scope_commit, read_tree_entry_bytes};
 use crate::scope_graph::scope_depth;
 use crate::session::{in_session, Run, Session};
-use crate::sync::{load_sync_state, resolve_current_scope, FileDrift};
+use crate::sync::{classify_home_against_head, finishing, FileDrift};
 
 #[derive(Debug, Clone)]
 pub struct ScopeInfo {
@@ -192,40 +193,38 @@ async fn scope_file_contents(
 }
 
 pub async fn diff_home(paths: &DotsyncPaths) -> Run<Result<DiffReport, DotsyncError>> {
-    in_session(paths, async |session, _paths| {
-        session.fetch().await?;
-        let sync_state = load_sync_state(session.paths(), session.config())?;
-        let machine_scope = resolve_current_scope(session.config(), sync_state.as_ref(), None)?;
-        let classification = classify_home_against_scope(
-            session,
-            sync_state.as_ref(),
-            &machine_scope,
-            &BTreeSet::new(),
-            &RecordedFromHome::default(),
-        )
-        .await?;
-
-        // Exactly what the sync gate would stop on, and exactly what `status`
-        // counts as a change. A remote advance this machine has not applied yet is
-        // not drift, so `diff` no longer reports one — nor exits non-zero for it.
-        let drifts = classification
-            .paths
-            .iter()
-            .filter(|(_, path)| path.state.is_drift())
-            .map(|(relative, path)| FileDrift {
-                repo_path: relative.clone(),
-                system_path: session.paths().home_dir.join(relative),
-                state: path.state,
-                repo_bytes: path.tip_bytes.clone(),
-                home_bytes: path.home_bytes.clone(),
-            })
-            .collect();
-
-        Ok(DiffReport {
-            machine_scope,
-            paused_cascade: crate::commit::paused_cascade_scope(session.paths())?,
-            drifts,
-        })
+    in_session(paths, async |session, paths| {
+        let mut home = Home::acquire(session, paths).await?;
+        let outcome = diff_report(session, &mut home).await;
+        finishing(home, session, outcome).await
     })
     .await
+}
+
+async fn diff_report(session: &mut Session, home: &mut Home) -> Result<DiffReport, DotsyncError> {
+    session.fetch().await?;
+    let machine_scope = home.machine_scope().to_string();
+    let head = load_scope_commit(session.repo().as_ref(), &machine_scope)?;
+    home.observe(session, &head).await?;
+
+    // The same changes `status` reports, with the two sides shown. A remote
+    // advance this machine has not applied yet is not one of them, so `diff`
+    // neither reports it nor exits non-zero for it.
+    let classified = classify_home_against_head(session, home, &head).await?;
+    let drifts = changed_paths(&classified, FileState::is_drift)
+        .into_iter()
+        .map(|(relative, classified)| FileDrift {
+            system_path: session.paths().home_dir.join(&relative),
+            repo_path: relative,
+            state: classified.state,
+            repo_bytes: classified.tip_bytes,
+            home_bytes: classified.home_bytes,
+        })
+        .collect();
+
+    Ok(DiffReport {
+        machine_scope,
+        paused_cascade: crate::commit::paused_cascade_scope(session.paths())?,
+        drifts,
+    })
 }

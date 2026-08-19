@@ -117,6 +117,7 @@ async fn create_repo_and_join(
         Some(&current_scope),
     )
     .await?;
+    crate::sync::record_the_home_sync(&mut session, paths).await?;
 
     Ok(InitReport { sync, push })
 }
