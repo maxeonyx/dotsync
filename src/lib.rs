@@ -11,6 +11,7 @@ mod scope_graph;
 mod session;
 mod status;
 mod sync;
+mod working_copy;
 
 pub use crate::bootstrap::{init, InitReport};
 pub use crate::commit::{
