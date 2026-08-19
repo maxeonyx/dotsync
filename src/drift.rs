@@ -310,10 +310,13 @@ fn edited_in_home(home: &TreeValue, tip: &TreeValue) -> FileState {
     }
 }
 
-/// One classified path together with the tree entries the two sides a consumer
-/// might render hold. Entries rather than bytes: an id and a mode are what the
-/// classification needs, and the handful of paths that are actually shown or
-/// recorded read their content from these.
+/// Where one path stands, and what home and the tip hold there.
+///
+/// Tree entries rather than content: an id and a mode are all the
+/// classification compares, and the renderings that do want content — `diff`,
+/// and a forced sync saying what it discarded — read it from these for the few
+/// paths they show. Reading it here instead would read every managed file
+/// twice on every `status`.
 #[derive(Debug, Clone)]
 pub(crate) struct ClassifiedPath {
     pub(crate) state: FileState,
