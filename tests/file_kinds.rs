@@ -1,5 +1,6 @@
-// Paths that are not ordinary regular files: symlinks on a scope, in home and
-// in a selection, and the kinds nothing may read through.
+// What a managed path *is* rather than what it holds: symlinks on a scope, in
+// home and in a selection, the kinds nothing may read through, and the
+// executable bit.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -314,6 +315,74 @@ fn a_symlink_to_a_sibling_script_survives_the_round_trip_to_another_machine() {
         PathBuf::from("tool-1.2.0"),
         "pointing at its sibling, not carrying a second copy of it"
     );
+}
+
+/// `chmod +x` is the whole change: the bytes before and after are identical,
+/// and the only thing that moved is the mode. A scope records the mode
+/// (`100644` against `100755`), home carries it, and a script that arrives
+/// without it does not run — so this has to round-trip like any other edit.
+///
+/// It is invisible today because drift is decided by comparing the content of
+/// the three sides, and the content is the same on all three. The tree entries
+/// are not: `TreeValue::File` carries the bit.
+#[test]
+fn making_a_managed_file_executable_is_a_change_that_reaches_another_machine() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    machine_a.write_file(".local/bin/tool", "#!/bin/sh\necho tool\n");
+    machine_a.run_ok("dotsync commit all -m 'add tool' -- .local/bin/tool");
+    machine_b.run_ok("dotsync");
+    assert!(
+        !machine_b.is_executable(".local/bin/tool"),
+        "this test needs a file that starts out non-executable everywhere"
+    );
+
+    machine_a.make_executable(".local/bin/tool");
+
+    let status = machine_a.run_ok("dotsync status --output json");
+    let payload = parse_stdout_json(&status);
+    let changed: Vec<&str> = payload["changes"]
+        .as_array()
+        .expect("status answers with a changes array")
+        .iter()
+        .filter_map(|change| change["path"].as_str())
+        .collect();
+    assert_eq!(
+        changed,
+        [".local/bin/tool"],
+        "a chmod is a change of this machine's own, and only `status` can say so\n{}",
+        render_output(&status)
+    );
+
+    machine_a.run_ok("dotsync commit all -m 'make tool executable' -- .local/bin/tool");
+    assert_eq!(
+        remote_branch_entry_mode(&machine_a, "all", ".local/bin/tool").as_deref(),
+        Some("100755"),
+        "the scope has to record the mode, or there is nothing for the other machine to read"
+    );
+
+    machine_b.run_ok("dotsync");
+    assert!(
+        machine_b.is_executable(".local/bin/tool"),
+        "and the other machine's copy has to become runnable"
+    );
+    assert_eq!(
+        machine_b.read_file(".local/bin/tool"),
+        "#!/bin/sh\necho tool\n",
+        "with its contents untouched"
+    );
+
+    // Both machines agree again, so neither has anything left to decide.
+    for machine in [&machine_a, &machine_b] {
+        assert_eq!(
+            parse_stdout_json(&machine.run_ok("dotsync status --output json"))["changes"]
+                .as_array()
+                .map(Vec::len),
+            Some(0),
+            "a mode that has been recorded and synced is not still a change"
+        );
+    }
 }
 
 /// A difference in kind is a difference. Both fixtures below hold exactly the

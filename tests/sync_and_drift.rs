@@ -431,6 +431,92 @@ fn a_sync_applies_incoming_changes_while_carrying_an_unrelated_local_edit() {
     }
 }
 
+/// Two edits to one file that do not touch the same lines. One of them is an
+/// uncommitted edit sitting in this machine's home; the other has already been
+/// published from somewhere else. They combine, and a plain `dotsync` is what
+/// combines them — which is exactly what happens today.
+///
+/// What does not happen today is dotsync telling the truth about it beforehand.
+/// Drift classification decides "conflict" by comparing bytes, so home and the
+/// tip differing anywhere at all reads as a three-way conflict: `status` and
+/// `diff` call the file conflicted, and then plain `dotsync` merges it without
+/// complaint. Two answers to one question, from two different merge engines.
+///
+/// So the claim here is that the report and the sync agree: this is a local
+/// edit *plus* an incoming change, it is not a conflict, and the run that
+/// carries it leaves home holding both changes.
+#[test]
+fn an_edit_here_and_a_change_elsewhere_in_the_same_file_combine_instead_of_conflicting() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    let base: String = (1..=90).map(|line| format!("line {line}\n")).collect();
+    machine_a.write_file(".config/app.conf", &base);
+    machine_a.run_ok("dotsync commit all -m 'seed app.conf' -- .config/app.conf");
+    machine_b.run_ok("dotsync");
+    assert_eq!(machine_b.read_file(".config/app.conf"), base);
+
+    // B is mid-edit at the top of the file and has not committed it.
+    let edited_here = base.replace("line 1\n", "line 1 edited on b\n");
+    machine_b.write_file(".config/app.conf", &edited_here);
+
+    // A publishes a change at the bottom of the same file.
+    let edited_elsewhere = base.replace("line 90\n", "line 90 edited on a\n");
+    machine_a.write_file(".config/app.conf", &edited_elsewhere);
+    machine_a.run_ok("dotsync commit all -m 'a edits the bottom' -- .config/app.conf");
+
+    let status = machine_b.run_ok("dotsync status --output json");
+    let payload = parse_stdout_json(&status);
+    let change = payload["changes"]
+        .as_array()
+        .expect("status answers with a changes array")
+        .iter()
+        .find(|change| change["path"] == ".config/app.conf")
+        .unwrap_or_else(|| {
+            panic!(
+                "home holds an edit of this machine's own, so the file is a change\n{}",
+                render_output(&status)
+            )
+        });
+    assert_ne!(
+        change["state"], "conflicted",
+        "nothing here conflicts: the sync below merges these two edges without being asked anything\n{}",
+        render_output(&status)
+    );
+
+    // Recording home's copy on its own would drop the change that arrived, so
+    // the commit is refused — and what it points at is the sync that merges.
+    let refused = machine_b.run_expecting(
+        "dotsync commit all -m 'b edits the top' -- .config/app.conf",
+        1,
+    );
+    let refusal = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(
+        refusal.contains(".config/app.conf")
+            && refusal.contains("run `dotsync` to bring this machine up to date"),
+        "the refusal has to name the file and the command that resolves it\n{refusal}"
+    );
+
+    let both = base
+        .replace("line 1\n", "line 1 edited on b\n")
+        .replace("line 90\n", "line 90 edited on a\n");
+    machine_b.run_ok("dotsync");
+    assert_eq!(
+        machine_b.read_file(".config/app.conf"),
+        both,
+        "the sync combines the two edits rather than choosing between them"
+    );
+
+    // Having merged, this machine holds an ordinary uncommitted local edit,
+    // and committing it publishes both changes.
+    machine_b.run_ok("dotsync commit all -m 'b edits the top' -- .config/app.conf");
+    assert_eq!(
+        remote_branch_file_contents(&machine_b, "all", ".config/app.conf"),
+        both,
+        "and neither machine's change is lost on the way to the remote"
+    );
+}
+
 /// The live fleet migrates by upgrading the binary and running `dotsync`
 /// (PLAN §2.6, "The live fleet"), and every machine in it is carrying a
 /// `sync-state.json` written by the release before. That file holds exactly

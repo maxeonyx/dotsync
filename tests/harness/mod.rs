@@ -441,6 +441,46 @@ impl MachineEnvironment {
             .unwrap_or_else(|err| panic!("read home symlink `{relative}`: {err}"))
     }
 
+    /// `chmod +x`, and nothing else: the bytes are untouched, so a run that
+    /// only compares content cannot see this happened.
+    pub fn make_executable(&self, relative: &str) {
+        let path = self.home_dir.join(relative);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path)
+                .unwrap_or_else(|err| panic!("stat `{relative}`: {err}"))
+                .permissions()
+                .mode();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode | 0o111))
+                .unwrap_or_else(|err| panic!("chmod +x `{relative}`: {err}"));
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            panic!("executable-bit fixtures are unix-only");
+        }
+    }
+
+    pub fn is_executable(&self, relative: &str) -> bool {
+        let path = self.home_dir.join(relative);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::metadata(&path)
+                .unwrap_or_else(|err| panic!("stat `{relative}`: {err}"))
+                .permissions()
+                .mode()
+                & 0o111
+                != 0
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            panic!("executable-bit fixtures are unix-only");
+        }
+    }
+
     /// Removes first, because writing to a path that holds a link writes
     /// through it — which is the bug several of these tests are about, and
     /// would silently corrupt their own fixtures.
