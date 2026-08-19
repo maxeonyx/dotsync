@@ -1,6 +1,7 @@
-// This machine and the remote each holding commits the other does not:
+// Two writers, and what it takes for the machine to agree with itself again:
 // unpushed scopes after an interrupted push, diverged bookmarks, lost push
-// races, and cascades that were only half published.
+// races, cascades that were only half published, and two of this machine's own
+// runs overlapping.
 
 mod harness;
 use harness::*;
@@ -615,4 +616,86 @@ fn a_scope_published_without_its_cascade_still_reaches_the_other_machines() {
         "and publishing that merge finishes what the interrupted run started, for every other machine too\n{}",
         render_output(&sync)
     );
+}
+
+/// PLAN §2.2, reported and not carried elsewhere: "Two `dotsync commit` runs
+/// overlapping on one machine leave it permanently dead", four reproductions
+/// out of four. Re-driven by hand against this build, which is deader than
+/// that record: both runs stop on each other's drift, and afterwards *every*
+/// command — plain `dotsync` and `dotsync status` alike — exits 1 with "scope
+/// `all` is configured, but this machine's repo has no history for it". The
+/// scope is in the repo. Two runs moved its bookmark at once, so its position
+/// is contested, and the type dotsync narrows it into cannot say so (§2.3
+/// step 3: "`None` means both absent and contested"). One of the two commits
+/// is gone from the remote as well.
+///
+/// Nothing about this needs a design decision. Repo-level concurrency is the
+/// op log's job and jj already does it — `spike.ignore/README.md`: "two
+/// processes committing operations concurrently produce two op heads that jj
+/// merges on next load, with genuinely conflicting bookmark moves becoming
+/// *contested* `RefTarget`s rather than corruption" — and the working copy
+/// carries a lock of its own, so the second run blocks or stops cleanly and
+/// the repo cannot be corrupted either way.
+///
+/// So this pins the outcome and nothing about the mechanism: which run wins,
+/// what the overlapping runs exit with, and whether either says anything about
+/// a lock are all the implementer's. What is not: the machine still works
+/// afterwards, and neither edit is silently gone.
+#[test]
+fn overlapping_runs_leave_the_machine_working() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    machine.init_ok();
+    machine.write_file(".arc", "a = 1\n");
+    machine.write_file(".brc", "b = 1\n");
+    machine.run_ok("dotsync commit all -m 'seed config' -- .arc .brc");
+
+    // Two edits, two commits, and nobody told either run about the other.
+    machine.write_file(".arc", "a = 2\n");
+    machine.write_file(".brc", "b = 2\n");
+    let (first, second) = machine.run_both_at_once(
+        "dotsync commit all -m 'change a' -- .arc",
+        "dotsync commit all -m 'change b' -- .brc",
+    );
+    let raced = format!(
+        "--- the run that committed .arc ---\n{}\n--- the run that committed .brc ---\n{}",
+        render_output(&first),
+        render_output(&second)
+    );
+
+    let sync = machine.run("dotsync");
+    assert_eq!(
+        sync.status.code(),
+        Some(0),
+        "running dotsync twice at once is a thing that will happen, and the machine has to survive it\n--- dotsync, afterwards ---\n{}\n{raced}",
+        render_output(&sync)
+    );
+    let status = machine.run("dotsync status --output json");
+    assert_eq!(
+        status.status.code(),
+        Some(0),
+        "and the command an agent reaches for to find out where it stands has to answer\n--- dotsync status, afterwards ---\n{}\n{raced}",
+        render_output(&status)
+    );
+
+    // Whichever run lost, its edit is either recorded or still sitting in home
+    // as a change waiting to be. What it must not be is quietly gone.
+    let changed: Vec<String> = parse_stdout_json(&status)["changes"]
+        .as_array()
+        .expect("status answers with a changes array")
+        .iter()
+        .filter_map(|change| change["path"].as_str().map(str::to_string))
+        .collect();
+    for (path, edited_to) in [(".arc", "a = 2\n"), (".brc", "b = 2\n")] {
+        let recorded = ["all", "linux", "mx-xps-cy"].iter().any(|scope| {
+            bookmark_has_file(&machine, scope, path)
+                && read_bookmark_file_contents(&machine, scope, path) == edited_to
+        });
+        assert!(
+            recorded || changed.iter().any(|reported| reported == path),
+            "`{path}` was edited to {edited_to:?} and is now on no scope and in no report: a race lost it\n--- dotsync status, afterwards ---\n{}\n{raced}",
+            render_output(&status)
+        );
+    }
 }

@@ -647,3 +647,197 @@ fn every_command_that_only_syncs_names_the_machine_scope_once() {
         render_output(&sync_output)
     );
 }
+
+/// Home is the working copy and its parent is the mark, so a sync is
+/// `merge(home, mark, new head)` (PLAN §2.3 step 2; `spike.ignore/README.md`,
+/// "Implications for the real step 2": "if the in-memory merge is resolved,
+/// create the new wc commit ... carrying non-conflicting local edits across
+/// the sync"). An edit to one file and an incoming change to another is that
+/// merge in its easiest form — the two sides do not even touch the same path,
+/// so there is nothing to decide.
+///
+/// Today drift is a gate rather than a merge input: one edited file anywhere
+/// in home stops the whole sync, so this machine receives nothing until it
+/// decides what to do about a file the incoming change has nothing to do with.
+/// The edit itself stays a local change either way — it is not committed here,
+/// and this run must not publish it.
+#[test]
+fn a_sync_applies_incoming_changes_while_carrying_an_unrelated_local_edit() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    // Two managed files on a shared scope, both of them synced to both
+    // machines, so each side below starts from the same bytes.
+    machine_a.write_file(".apprc", "ui_theme = dark\n");
+    machine_a.write_file(".editorrc", "tabs = 4\n");
+    machine_a.run_ok("dotsync commit all -m 'seed config' -- .apprc .editorrc");
+    machine_b.run_ok("dotsync");
+    assert_eq!(machine_b.read_file(".apprc"), "ui_theme = dark\n");
+    assert_eq!(machine_b.read_file(".editorrc"), "tabs = 4\n");
+
+    // B is mid-edit on one file and has not decided what to do with it yet.
+    machine_b.write_file(".editorrc", "tabs = 2\n");
+
+    // A publishes a change to the other one.
+    machine_a.write_file(".apprc", "ui_theme = light\n");
+    machine_a.run_ok("dotsync commit all -m 'light theme' -- .apprc");
+
+    let sync_b = machine_b.run("dotsync");
+    assert_eq!(
+        sync_b.status.code(),
+        Some(0),
+        "an edit to one file and an incoming change to another is a merge with nothing to decide\n{}",
+        render_output(&sync_b)
+    );
+    assert_eq!(
+        machine_b.read_file(".apprc"),
+        "ui_theme = light\n",
+        "the incoming change has to arrive\n{}",
+        render_output(&sync_b)
+    );
+    assert_eq!(
+        machine_b.read_file(".editorrc"),
+        "tabs = 2\n",
+        "and the local edit has to survive the sync that carried it"
+    );
+
+    // The edit is still an edit: uncommitted, still this machine's to decide
+    // about, and no longer confusable with the file that just arrived.
+    let status = machine_b.run("dotsync status --output json");
+    let payload = parse_stdout_json(&status);
+    let changed: Vec<&str> = payload["changes"]
+        .as_array()
+        .expect("status answers with a changes array")
+        .iter()
+        .filter_map(|change| change["path"].as_str())
+        .collect();
+    assert_eq!(
+        changed,
+        [".editorrc"],
+        "the edit is still a local change, and the file this run applied is not one\n{}",
+        render_output(&status)
+    );
+    let incoming: Vec<&str> = payload["incoming"]
+        .as_array()
+        .expect("status answers with an incoming array")
+        .iter()
+        .filter_map(|change| change["path"].as_str())
+        .collect();
+    assert!(
+        !incoming.contains(&".apprc"),
+        "and it is not still incoming, because it already arrived\n{}",
+        render_output(&status)
+    );
+
+    for scope in ["all", "linux", "goof-b"] {
+        assert_ne!(
+            remote_branch_file_contents(&machine_b, scope, ".editorrc"),
+            "tabs = 2\n",
+            "an uncommitted edit is nobody else's business: `{scope}` must not hold it"
+        );
+    }
+}
+
+/// The live fleet migrates by upgrading the binary and running `dotsync`
+/// (PLAN §2.6, "The live fleet"), and every machine in it is carrying a
+/// `sync-state.json` written by the release before. That file holds exactly
+/// `machine_scope` and `last_synced_revision` — a hand-rolled record of what
+/// jj's own view already says — so step 2 dissolves it: `spike.ignore/README.md`,
+/// "Migration for the live fleet: first run of the new binary creates the wc
+/// commit ..., snapshots home ..., deletes `sync-state.json`." PLAN §2.6,
+/// "On-disk, per machine": "Two things: the home files, and the hidden repo.
+/// Nothing else — no sync state file, no pause file, no `config.toml`."
+///
+/// So the upgrade run has to do two things at once: pick up whatever was
+/// waiting for it, and leave the old file behind. Today it does the first and
+/// rewrites the second.
+#[test]
+fn an_upgraded_machine_sheds_sync_state_json_and_keeps_working() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+    let shed = ensure_the_previous_releases_sync_state(&machine_b);
+
+    machine_a.write_file(".apprc", "ui_theme = dark\n");
+    machine_a.run_ok("dotsync commit all -m 'seed apprc' -- .apprc");
+
+    let upgrade_run = machine_b.run("dotsync");
+    assert_eq!(
+        upgrade_run.status.code(),
+        Some(0),
+        "upgrading is running the new binary, and the first thing it runs is an ordinary sync\n{}",
+        render_output(&upgrade_run)
+    );
+    assert_eq!(
+        machine_b.read_file(".apprc"),
+        "ui_theme = dark\n",
+        "the change that was waiting has to arrive\n{}",
+        render_output(&upgrade_run)
+    );
+    assert!(
+        !shed.exists(),
+        "the machine-local sync record is jj's now, and a second copy of it is a second authority: {} outlived the run\n{}",
+        shed.display(),
+        render_output(&upgrade_run)
+    );
+
+    let status = machine_b.run("dotsync status");
+    assert_eq!(
+        status.status.code(),
+        Some(0),
+        "and the machine is an ordinary machine afterwards\n{}",
+        render_output(&status)
+    );
+    assert_eq!(
+        parse_stdout_json(&machine_b.run_ok("dotsync status --output json"))["changes"]
+            .as_array()
+            .map(Vec::len),
+        Some(0),
+        "shedding the record must not make home look changed\n{}",
+        render_output(&status)
+    );
+}
+
+/// The machine-local state file the release being upgraded from keeps, made
+/// sure to exist, and where to look for it afterwards.
+///
+/// Ensured rather than asserted: the machine this fixture describes has one
+/// because the *old* binary wrote it, which is true whether or not the binary
+/// under test still writes one — so a run that has stopped writing it gets the
+/// old release's file fabricated in the old release's format.
+///
+/// The path is read out of `config.toml` when there is one, because that is
+/// where the current release configures it, and falls back to the location it
+/// puts there by default.
+fn ensure_the_previous_releases_sync_state(machine: &MachineEnvironment) -> std::path::PathBuf {
+    machine.run_ok("dotsync");
+
+    let configured = std::fs::read_to_string(machine.home_dir.join(".config/dotsync/config.toml"))
+        .ok()
+        .and_then(|config| {
+            config.lines().find_map(|line| {
+                line.strip_prefix("state_path = \"")
+                    .and_then(|rest| rest.strip_suffix('"'))
+                    .map(str::to_string)
+            })
+        })
+        .unwrap_or_else(|| String::from(".config/dotsync/sync-state.json"));
+    let path = machine.home_dir.join(configured);
+
+    if !path.exists() {
+        let scope = machine_scope_reported_by(machine)
+            .expect("a machine being upgraded knows which scope it is");
+        write_file_at(
+            &path,
+            &format!(
+                "{{\n  \"machine_scope\": \"{scope}\",\n  \"last_synced_revision\": \"{}\"\n}}\n",
+                bookmark_revision(machine, &scope)
+            ),
+        );
+    }
+    assert!(
+        path.exists(),
+        "this fixture is a machine upgrading from a release that kept {}",
+        path.display()
+    );
+    path
+}

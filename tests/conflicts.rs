@@ -1585,3 +1585,173 @@ fn a_pause_on_another_machines_scope_puts_that_conflict_in_front_of_the_agent() 
         ],
     );
 }
+
+/// A conflict does not need a `commit` to produce it. Home is the working copy
+/// and its parent is the mark, so an ordinary sync is `merge(home, mark, new
+/// head)` (PLAN §2.3 step 2), and two edits to the same line of the same file
+/// are the case that merge cannot resolve on its own.
+///
+/// What is decided about it: the sync stops *whole*. Home is derived from one
+/// commit, so a home built partly from the old head and partly from the new
+/// one makes any single parent a lie — `spike.ignore/README.md`: "Partial
+/// materialization is forbidden because the wc commit has one parent, and a
+/// home derived partly from `P` and partly from `H` makes any single parent a
+/// lie ... which is the silent-revert path." So the second, entirely
+/// unconflicted incoming file does not arrive either. And no marker is written
+/// into home: the conflict is presented instead (PLAN §2.3 step 6, settled
+/// 2026-08-19), because a config file full of `<<<<<<<` is broken config for
+/// exactly as long as the conflict takes to fix.
+///
+/// Today the run stops with `drift_detected` before merging anything, so the
+/// agent is shown neither the version it collided with nor the version they
+/// both came from.
+///
+/// The exit code is deliberately not pinned — PLAN has left what a stopping
+/// sync exits with open through batches A, B and C, and this does not close
+/// it. Nor are the payload's key names: the assertion is that the payload
+/// carries the conflicted path at all.
+#[test]
+fn a_local_edit_conflicting_with_an_incoming_change_stops_the_sync_whole() {
+    let harness = TestHarness::new();
+    let (_machine_a, machine_b) = a_sync_conflict_over_one_line(&harness);
+
+    let stop = machine_b.run("dotsync");
+    assert_eq!(
+        machine_b.read_file(".config/app.conf"),
+        "setting = \"b\"\n",
+        "the bytes in home are the only copy of this machine's side, and a stop must not touch them\n{}",
+        render_output(&stop)
+    );
+    assert_eq!(
+        machine_b.read_file(".apprc"),
+        "ui_theme = dark\n",
+        "the stop is whole: home is derived from one commit, so an unconflicted file cannot arrive on its own\n{}",
+        render_output(&stop)
+    );
+
+    assert_the_conflict_is_in_front_of_the_agent(
+        &machine_b,
+        &stop,
+        ".config/app.conf",
+        ["setting = \"base\"", "setting = \"a\"", "setting = \"b\""],
+    );
+
+    let stopped_json = machine_b.run("dotsync --output json");
+    assert!(
+        payload_says(&parse_stdout_json(&stopped_json), ".config/app.conf"),
+        "an agent reading the payload has to be told which path stopped the run\n{}",
+        render_output(&stopped_json)
+    );
+
+    for scope in ["all", "linux", "goof-a", "goof-b"] {
+        assert_ne!(
+            remote_branch_file_contents(&machine_b, scope, ".config/app.conf"),
+            "setting = \"b\"\n",
+            "nothing was resolved, so this machine's side is nobody else's business yet: `{scope}` must not hold it"
+        );
+    }
+}
+
+/// The other half of the same decision: `continue` is how the agent says
+/// "resolved", and what it resolves to is whatever is in home.
+///
+/// Without markers in home, home reads identically before the agent starts and
+/// after it decides to keep its own side, so "I'm done" is the one thing
+/// dotsync cannot find out for itself — which is why `continue` survives the
+/// rewrite (PLAN §2.3 step 6, "The preference carries an implication").
+///
+/// Finishing means finishing the whole sync: the unconflicted file that could
+/// not arrive on its own arrives now, with the resolution. And the resolution
+/// is still just an edit in home — nobody asked for it to be published, so it
+/// reaches no scope until it is committed.
+///
+/// Today `dotsync continue` answers "there is no paused cascade on this
+/// machine": a pause is a thing only `commit` can create.
+#[test]
+fn continue_completes_a_sync_conflict_with_homes_bytes() {
+    let harness = TestHarness::new();
+    let (_machine_a, machine_b) = a_sync_conflict_over_one_line(&harness);
+
+    machine_b.run("dotsync");
+    machine_b.write_file(".config/app.conf", "setting = \"a+b\"\n");
+
+    let continued = machine_b.run("dotsync continue");
+    assert_eq!(
+        continued.status.code(),
+        Some(0),
+        "the agent has done the one thing only it could do, and saying so is the whole of `continue`\n{}",
+        render_output(&continued)
+    );
+    assert_eq!(
+        machine_b.read_file(".config/app.conf"),
+        "setting = \"a+b\"\n",
+        "the resolution is what the agent wrote, and finishing the sync must not rewrite it\n{}",
+        render_output(&continued)
+    );
+    assert_eq!(
+        machine_b.read_file(".apprc"),
+        "ui_theme = light\n",
+        "and the file the stop withheld arrives with it\n{}",
+        render_output(&continued)
+    );
+
+    let status = machine_b.run("dotsync status --output json");
+    let payload = parse_stdout_json(&status);
+    let changed: Vec<&str> = payload["changes"]
+        .as_array()
+        .expect("status answers with a changes array")
+        .iter()
+        .filter_map(|change| change["path"].as_str())
+        .collect();
+    assert_eq!(
+        changed,
+        [".config/app.conf"],
+        "a resolution nobody committed is an ordinary local change, and it is the only one\n{}",
+        render_output(&status)
+    );
+
+    for scope in ["all", "linux", "goof-a", "goof-b"] {
+        assert_ne!(
+            remote_branch_file_contents(&machine_b, scope, ".config/app.conf"),
+            "setting = \"a+b\"\n",
+            "resolving a sync is not publishing: `{scope}` must not hold the resolution until it is committed"
+        );
+    }
+}
+
+/// Two machines, one shared scope, and the collision an ordinary sync has to
+/// meet: this machine has an uncommitted edit to one line of `.config/app.conf`
+/// and the other machine published a different edit to the same line — plus a
+/// change to `.apprc`, which nothing collides with and which is therefore how
+/// each test can tell a stop that is whole from one that applied what it could.
+///
+/// Deliberately not `pause_a_conflict_on`: that fixture's conflict is between
+/// two *commits* and arrives during a cascade. This one is between home and
+/// the head, which is the conflict the mark makes possible and no test in this
+/// file reaches today.
+fn a_sync_conflict_over_one_line(
+    harness: &TestHarness,
+) -> (MachineEnvironment, MachineEnvironment) {
+    let (machine_a, machine_b) = two_synced_machines(harness);
+
+    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
+    machine_a.write_file(".apprc", "ui_theme = dark\n");
+    machine_a.run_ok("dotsync commit all -m 'seed config' -- .config/app.conf .apprc");
+    machine_b.run_ok("dotsync");
+    assert_eq!(
+        machine_b.read_file(".config/app.conf"),
+        "setting = \"base\"\n"
+    );
+    assert_eq!(machine_b.read_file(".apprc"), "ui_theme = dark\n");
+
+    // This machine's side, edited in home and not committed anywhere.
+    machine_b.write_file(".config/app.conf", "setting = \"b\"\n");
+
+    // The other machine's side, published: the same line, and one more file
+    // that has nothing to do with it.
+    machine_a.write_file(".config/app.conf", "setting = \"a\"\n");
+    machine_a.write_file(".apprc", "ui_theme = light\n");
+    machine_a.run_ok("dotsync commit all -m 'update config' -- .config/app.conf .apprc");
+
+    (machine_a, machine_b)
+}

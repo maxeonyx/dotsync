@@ -290,6 +290,71 @@ impl MachineEnvironment {
         output
     }
 
+    /// Runs two dotsync invocations on this machine at once, the way two
+    /// agents — or an agent and the person sitting in front of it — reach for
+    /// it in the same moment.
+    ///
+    /// The overlap is made real rather than hoped for. Both runs are spawned
+    /// before either is waited on, and a `git` shim dawdles over the fetch
+    /// every run starts with, so both are still ahead of their own work when
+    /// the other one starts. Without that, whether they overlap at all is the
+    /// scheduler's decision: driven by hand against this build, two commits
+    /// started together kill the machine every time, and the same two started
+    /// 50ms apart both succeed — so on a loaded machine the scenario would
+    /// quietly stop being the scenario.
+    ///
+    /// The shim goes in front of `git` because that is how dotsync reaches the
+    /// remote — jj-lib's supported mechanism, and already how `fetches_during`
+    /// counts network calls.
+    pub fn run_both_at_once(&self, first: &str, second: &str) -> (Output, Output) {
+        let shim = self.shim_dir.join("git");
+        write_file_at(
+            &shim,
+            &format!(
+                "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = fetch ]; then sleep 1; fi\ndone\nexec {} \"$@\"\n",
+                real_git_path().display()
+            ),
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&shim, fs::Permissions::from_mode(0o755))
+                .expect("make git shim executable");
+        }
+
+        let spawn = |command: &str| {
+            Command::new(env!("CARGO_BIN_EXE_dotsync"))
+                .args(dotsync_args(command))
+                .current_dir(&self.home_dir)
+                .env("HOME", &self.home_dir)
+                .env("DOTSYNC_OS", &self.os)
+                .env("DOTSYNC_HOSTNAME", &self.hostname)
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}",
+                        self.shim_dir.display(),
+                        std::env::var("PATH").unwrap_or_default()
+                    ),
+                )
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn dotsync")
+        };
+
+        let first_child = spawn(first);
+        let second_child = spawn(second);
+        (
+            first_child
+                .wait_with_output()
+                .expect("collect dotsync output"),
+            second_child
+                .wait_with_output()
+                .expect("collect dotsync output"),
+        )
+    }
+
     /// How many times a run asked git to talk to the remote.
     pub fn fetches_during(&self, command: &str) -> (Output, usize) {
         let (output, calls) = self.run_recording_git(command);
