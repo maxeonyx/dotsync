@@ -279,9 +279,9 @@ An earlier design stored pause intent in a machine-local state file (merge paren
 
 **Settled**: when a merge conflicts, the conflict is put in front of the agent that has to resolve it, showing both sides _and_ the base, with the sides labeled by scope name rather than commit id. The base is in because a conflict _is_ a base plus two sides — see "The state space" above — and jj carries all three, so omitting it would mean discarding a part dotsync already holds. Max, on that: _"Yes the base is supposed to be included. I'm sure JJ supports that."_
 
-**Not settled: where.** There are two candidates. One materializes the conflict into the affected home files through ordinary sync, as standard `<<<<<<<` / `|||||||` / `=======` / `>>>>>>>` markers written by jj's own conflict-materialization code — agents have deep priors on exactly that format. The other presents the same three parts without writing anything into home. Max: _"I like the idea of the agent being presented with the conflict but not actually materializing it but it will need to be tested empirically with a real agent before we actually know."_ The cost of materializing is concrete and lands on the person using the machine: while markers sit in the live config, that file is not valid config, so the application it configures reads a broken file for as long as the pause lasts.
+**Where: the preference is to present the conflict without writing anything into home** (Max, 2026-08-19, "the overwhelming preference"). The reason: conflict markers in home are broken config. While `<<<<<<<` / `|||||||` / `=======` / `>>>>>>>` markers sit in a live config file, that file is not valid config, so the application it configures reads a broken file for exactly as long as the pause lasts — the machine is broken precisely while the conflict is being fixed. The alternative — materializing markers into the affected home files through ordinary sync, in the standard format agents have deep priors on — remains the fallback if the preference fails validation.
 
-**It is decided empirically by the agent validation loop** (PLAN item 3) — by watching a real agent resolve a real conflict, not by argument here. Because the conflict is already a real object with all three parts, this is a rendering choice over that object rather than a design still to be invented, and nothing above this paragraph changes whichever way it goes.
+**The preference is validated empirically by the agent validation loop** (PLAN item 3) — by watching a real agent resolve a real conflict, not by argument here. Not because the preference is in doubt, but because conflicts are fundamental to the tool, and "a real agent can reliably resolve one from what it is shown" is the bar the presentation has to clear. Because the conflict is already a real object with all three parts, this is a rendering choice over that object rather than a design still to be invented, and nothing above this paragraph changes whichever way it goes.
 
 The bullets below say which of them assume an answer.
 
@@ -292,7 +292,7 @@ The bullets below say which of them assume an answer.
 
 #### Whether `continue` survives
 
-The same experiment decides it, and the reasoning is worth writing down so the experiment's result can be applied without re-deriving it.
+Under the preferred answer it survives; the reasoning is worth writing down so the experiment's result can be applied without re-deriving it.
 
 If markers are materialized, "the agent is done" is legible from the file itself: the markers are gone. `continue` is then the agent restating a fact dotsync can check for itself, and it deletes.
 
