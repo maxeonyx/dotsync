@@ -167,7 +167,7 @@ fn commit_with_nothing_to_commit_still_publishes_unpushed_scopes() {
 }
 
 #[test]
-fn drift_stop_during_commit_does_not_strand_unpushed_history() {
+fn a_home_conflict_during_commit_does_not_strand_unpushed_history() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
@@ -181,22 +181,32 @@ fn drift_stop_during_commit_does_not_strand_unpushed_history() {
     );
     machine.run_ok("dotsync");
 
-    // Unrelated drift that the commit does not select: the home sync will stop
-    // on it after the cascade transaction has already created history.
+    // An edit to a file the commit does not select, and a different published
+    // edit to the same file: the home sync at the end of the commit cannot
+    // merge them, so it stops — after the cascade transaction has already
+    // created history.
     machine.write_file(".gitconfig", "[user]\nname = \"Drifted\"\n");
     machine.write_file(".config/fish/dev-certs.fish", "set -gx DEV_CERTS 1\n");
+    seed_remote_scope_file(
+        &machine,
+        "mx-xps-cy",
+        ".gitconfig",
+        "[user]\nname = \"Published\"\n",
+    );
 
     let commit_output =
         machine.run("dotsync commit all -m 'add dev-certs helper' -- .config/fish/dev-certs.fish");
     assert_eq!(
         commit_output.status.code(),
         Some(1),
-        "the unrelated drift should still stop the home sync: {}",
+        "the home file that conflicts should still stop the home sync: {}",
         render_output(&commit_output)
     );
     assert!(
-        render_output(&commit_output).contains("drift"),
-        "the stop should be the drift stop, not something else: {}",
+        render_output(&commit_output)
+            .to_lowercase()
+            .contains("conflict"),
+        "the stop should be the conflict, not something else: {}",
         render_output(&commit_output)
     );
 

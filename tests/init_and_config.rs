@@ -109,8 +109,8 @@ fn a_machine_joining_keeps_the_comments_already_in_the_config() {
     machine_a.init_ok();
 
     let described = machine_a.read_file(".config/dotsync/config.toml").replace(
-        "[sync]",
-        "# hand-written: hyprland and fish config live on `linux`.\n[sync]",
+        "\nlinux = ",
+        "\n# hand-written: hyprland and fish config live on `linux`.\nlinux = ",
     );
     machine_a.write_file(".config/dotsync/config.toml", &described);
     machine_a.run_ok("dotsync commit all -m 'describe linux' -- .config/dotsync/config.toml");

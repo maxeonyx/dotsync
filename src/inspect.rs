@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use jj_lib::repo::Repo as _;
 
-use crate::config::{internal_repo_paths, DotsyncPaths};
+use crate::config::DotsyncPaths;
 use crate::drift::{changed_paths, FileState};
 use crate::error::{jj_error, DotsyncError};
 use crate::home::Home;
@@ -157,8 +157,7 @@ fn scope_list(session: &Session) -> Result<Vec<ScopeInfo>, DotsyncError> {
 
 fn scope_files(session: &Session, scope: &str) -> Result<Vec<PathBuf>, DotsyncError> {
     let commit = load_scope_commit(session.repo().as_ref(), scope)?;
-    let entries =
-        collect_managed_tree_entries(&commit.tree(), &internal_repo_paths(session.config()))?;
+    let entries = collect_managed_tree_entries(&commit.tree())?;
     Ok(entries.into_keys().collect())
 }
 

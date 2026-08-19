@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use jj_lib::op_store::RefTarget;
 use jj_lib::ref_name::RefNameBuf;
@@ -10,11 +9,11 @@ use crate::cascade::{
     build_cascade_plan, execute_cascade_steps, CascadeCommand, CascadeOutcome, ScopeHeads,
 };
 use crate::config::{
-    config_with_added_scopes, default_sync_state_relative_path, load_config, load_config_text,
-    new_config, repo_config_path, write_config, DotsyncPaths, NewScope, ScopeKind, ALL_SCOPE,
+    config_with_added_scopes, load_config, load_config_text, new_config, repo_config_path,
+    write_config, DotsyncPaths, NewScope, ScopeKind, ALL_SCOPE,
 };
-use crate::drift::RecordedFromHome;
 use crate::error::{jj_error, DotsyncError};
+use crate::home::Home;
 use crate::machine::{detect_machine, MachineIdentity};
 use crate::repo::{
     add_origin_remote, default_settings, fetch_origin, load_repo_direct, push_scope_updates,
@@ -22,7 +21,7 @@ use crate::repo::{
 };
 use crate::scope_graph::ScopeGraph;
 use crate::session::{Run, Session};
-use crate::sync::{sync_repo_to_home, ForceScope, SyncReport};
+use crate::sync::{finishing, SyncReport};
 
 #[derive(Debug, Clone)]
 pub struct InitReport {
@@ -102,7 +101,7 @@ async fn create_repo_and_join(
     // out of, which is what a session is: everything before it works on the
     // repo handle directly.
     let remote_empty = repo.view().all_remote_bookmarks().next().is_none();
-    let (current_scope, repo) = if remote_empty {
+    let repo = if remote_empty {
         bootstrap_empty_remote(repo, &identity).await?
     } else {
         join_existing_remote(paths, repo, &identity).await?
@@ -110,14 +109,13 @@ async fn create_repo_and_join(
 
     let mut session = Session::from_repo(paths, repo).await?;
     let push = push_scope_updates(&mut session).await?;
-    let sync = sync_repo_to_home(
-        &session,
-        ForceScope::Everything,
-        &RecordedFromHome::default(),
-        Some(&current_scope),
-    )
-    .await?;
-    crate::sync::record_the_home_sync(&mut session, paths).await?;
+    // The scopes exist by now, which is what `Home` needs: it puts the working
+    // copy commit on this machine's scope bookmark. The sync discards home's
+    // side, because `init` is the one command with nothing of yours to carry —
+    // whatever home holds at a managed path predates dotsync managing it.
+    let mut home = Home::acquire(&mut session, paths).await?;
+    let outcome = crate::sync::sync_home_to_machine_scope(&mut session, &mut home, true).await;
+    let sync = finishing(home, &session, outcome).await?;
 
     Ok(InitReport { sync, push })
 }
@@ -159,12 +157,9 @@ fn scopes_to_create(
 pub(crate) async fn bootstrap_empty_remote(
     repo: std::sync::Arc<jj_lib::repo::ReadonlyRepo>,
     identity: &MachineIdentity,
-) -> Result<(String, std::sync::Arc<jj_lib::repo::ReadonlyRepo>), DotsyncError> {
+) -> Result<std::sync::Arc<jj_lib::repo::ReadonlyRepo>, DotsyncError> {
     let root_commit = repo.store().root_commit();
-    let config_text = new_config(
-        &PathBuf::from(default_sync_state_relative_path()),
-        &scopes_to_create(identity, &HashMap::new()),
-    );
+    let config_text = new_config(&scopes_to_create(identity, &HashMap::new()));
 
     let mut tx = repo.start_transaction();
     let config_tree = write_config(tx.repo_mut(), &root_commit.tree(), &config_text).await?;
@@ -201,24 +196,21 @@ pub(crate) async fn bootstrap_empty_remote(
         RefNameBuf::from(identity.machine_scope.as_str()).as_ref(),
         RefTarget::normal(machine_commit.id().clone()),
     );
-    let repo = tx
-        .commit("dotsync: initialize scopes")
+    tx.commit("dotsync: initialize scopes")
         .await
-        .map_err(|err| jj_error(format!("commit init scopes: {err}")))?;
-
-    Ok((identity.machine_scope.clone(), repo))
+        .map_err(|err| jj_error(format!("commit init scopes: {err}")))
 }
 
 pub(crate) async fn join_existing_remote(
     paths: &DotsyncPaths,
     repo: std::sync::Arc<jj_lib::repo::ReadonlyRepo>,
     identity: &MachineIdentity,
-) -> Result<(String, std::sync::Arc<jj_lib::repo::ReadonlyRepo>), DotsyncError> {
+) -> Result<std::sync::Arc<jj_lib::repo::ReadonlyRepo>, DotsyncError> {
     let config = load_config(paths, repo.as_ref()).await?;
     let new_scopes = scopes_to_create(identity, &config.graph.parents);
 
     if new_scopes.is_empty() {
-        return Ok((identity.machine_scope.clone(), repo));
+        return Ok(repo);
     }
 
     // The file this machine adds its scopes to is the file as it is written,
@@ -314,10 +306,7 @@ pub(crate) async fn join_existing_remote(
         scope_heads.update(identity.machine_scope.clone(), commit);
     }
 
-    let repo = tx
-        .commit("dotsync: initialize machine scope")
+    tx.commit("dotsync: initialize machine scope")
         .await
-        .map_err(|err| jj_error(format!("commit join scope changes: {err}")))?;
-
-    Ok((identity.machine_scope.clone(), repo))
+        .map_err(|err| jj_error(format!("commit join scope changes: {err}")))
 }

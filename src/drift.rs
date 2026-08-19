@@ -1,17 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use jj_lib::backend::TreeValue;
 use jj_lib::merged_tree::MergedTree;
 
-use crate::config::{internal_repo_paths, DotsyncPaths};
 use crate::error::DotsyncError;
-use crate::repo::{collect_managed_tree_entries, load_scope_commit, read_tree_entry_bytes};
-use crate::session::Session;
-use crate::sync::SyncState;
+use crate::repo::{collect_managed_tree_entries, read_tree_entry_bytes};
 
 /// Where one managed path stands across the three sides dotsync knows about:
 ///
@@ -232,127 +227,13 @@ pub(crate) fn classify(
     }
 }
 
-/// What a run has just written into the repo out of home, per path: the bytes
-/// it recorded, or `None` for a path it recorded as deleted.
-///
-/// This is a *baseline override*, not the old `expected_repo_changes`
-/// suppression list, and the difference is the whole point. That list said
-/// "do not look at these paths at all", was computed by diffing two repo
-/// commits, and was threaded through five call sites that each meant something
-/// slightly different by it — one of them meaning "paths I am allowed to
-/// clobber". This says only "for these paths, the last-synced side is this
-/// content", and the classification then does its ordinary job on top.
-///
-/// It is true because a commit is a sync in reverse for the paths it records:
-/// it reads those bytes out of home and writes them into the repo, so at that
-/// moment they are exactly what this machine last synchronised — even though
-/// no sync state has been saved yet, and even though the cascade may have
-/// merged them with somebody else's change on the way. A path still holding
-/// what was recorded is therefore behind the new tip (incoming: write the
-/// merge down), and a path that changed again since is an unrecorded edit
-/// (drift: stop). Nothing is muted.
-///
-/// It never leaves the run that produced it: one producer, one consumer, no
-/// state on disk.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct RecordedFromHome(BTreeMap<PathBuf, Option<Vec<u8>>>);
-
-impl RecordedFromHome {
-    pub(crate) fn record(&mut self, relative: &Path, bytes: Option<Vec<u8>>) {
-        self.0.insert(relative.to_path_buf(), bytes);
-    }
-
-    pub(crate) fn paths(&self) -> impl Iterator<Item = &PathBuf> {
-        self.0.keys()
-    }
-
-    fn baseline(&self, relative: &Path) -> Option<&Option<Vec<u8>>> {
-        self.0.get(relative)
-    }
-}
-
 /// One classified path together with the bytes the sides hold, read once so
 /// that the consumers never go back to the repo or to home for them.
 #[derive(Debug, Clone)]
 pub(crate) struct ClassifiedPath {
     pub(crate) state: FileState,
-    pub(crate) last_synced_bytes: Option<Vec<u8>>,
     pub(crate) home_bytes: Option<Vec<u8>>,
     pub(crate) tip_bytes: Option<Vec<u8>>,
-}
-
-/// The paths a classification covers by default: everything dotsync last
-/// synced here, plus everything the tip holds now. Home contributes no paths
-/// of its own — an unmanaged home file is not dotsync's business, and looking
-/// for them would mean walking the whole home directory.
-pub(crate) fn managed_domain(
-    last_synced_entries: Option<&BTreeMap<PathBuf, TreeValue>>,
-    tip_entries: &BTreeMap<PathBuf, TreeValue>,
-) -> BTreeSet<PathBuf> {
-    last_synced_entries
-        .into_iter()
-        .flat_map(|entries| entries.keys())
-        .chain(tip_entries.keys())
-        .cloned()
-        .collect()
-}
-
-/// Classifies every path in `domain`.
-///
-/// `last_synced_entries` is `None` when there is no usable sync state — the
-/// file is missing, or it names a revision this repo does not have, and on a
-/// brand new machine there has never been one. Dotsync then has no record of
-/// putting anything in home, so the last-synced side is empty: it will not
-/// remove a file it cannot show it wrote, and it will not read a file missing
-/// from home as a deletion someone made here. Real home content that
-/// disagrees with the scope is still drift, because that judgement needs no
-/// history — it is visible in the two sides that are there.
-pub(crate) async fn classify_paths(
-    paths: &DotsyncPaths,
-    repo: &dyn jj_lib::repo::Repo,
-    last_synced_entries: Option<&BTreeMap<PathBuf, TreeValue>>,
-    tip_entries: &BTreeMap<PathBuf, TreeValue>,
-    recorded_from_home: &RecordedFromHome,
-    domain: &BTreeSet<PathBuf>,
-) -> Result<BTreeMap<PathBuf, ClassifiedPath>, DotsyncError> {
-    // An empty last-synced side means one of two very different things, and
-    // the difference is invisible to `classify`: either dotsync has genuinely
-    // never synced these paths, or its record of doing so is gone. The
-    // classification is the same — it can only see two sides either way — but
-    // what it should say about it is not.
-    let no_record = BTreeMap::new();
-    let sync_record_lost = last_synced_entries.is_none();
-    let last_synced_entries = last_synced_entries.unwrap_or(&no_record);
-
-    let mut classified = BTreeMap::new();
-    for relative in domain {
-        let last_synced_bytes = match recorded_from_home.baseline(relative) {
-            Some(recorded) => recorded.clone(),
-            None => {
-                read_entry_bytes(repo.store(), relative, last_synced_entries.get(relative)).await?
-            }
-        };
-        let tip_bytes = read_entry_bytes(repo.store(), relative, tip_entries.get(relative)).await?;
-        let home_bytes = read_home_bytes(paths, relative)?;
-        let mut state = classify(
-            last_synced_bytes.as_deref(),
-            home_bytes.as_deref(),
-            tip_bytes.as_deref(),
-        );
-        if sync_record_lost && state == FileState::IncomingNewCollidesWithUntrackedHome {
-            state = FileState::NoSyncRecord;
-        }
-        classified.insert(
-            relative.clone(),
-            ClassifiedPath {
-                state,
-                last_synced_bytes,
-                home_bytes,
-                tip_bytes,
-            },
-        );
-    }
-    Ok(classified)
 }
 
 pub(crate) async fn read_entry_bytes(
@@ -379,14 +260,13 @@ pub(crate) async fn read_entry_bytes(
 /// cover every path the head holds.
 pub(crate) async fn classify_managed_trees(
     store: &Arc<jj_lib::store::Store>,
-    internal_paths: &BTreeSet<PathBuf>,
     mark: &MergedTree,
     snapshot: &MergedTree,
     head: &MergedTree,
 ) -> Result<BTreeMap<PathBuf, ClassifiedPath>, DotsyncError> {
-    let mark = collect_managed_tree_entries(mark, internal_paths)?;
-    let snapshot = collect_managed_tree_entries(snapshot, internal_paths)?;
-    let head = collect_managed_tree_entries(head, internal_paths)?;
+    let mark = collect_managed_tree_entries(mark)?;
+    let snapshot = collect_managed_tree_entries(snapshot)?;
+    let head = collect_managed_tree_entries(head)?;
 
     let domain: BTreeSet<PathBuf> = mark
         .keys()
@@ -408,7 +288,6 @@ pub(crate) async fn classify_managed_trees(
                     home_bytes.as_deref(),
                     tip_bytes.as_deref(),
                 ),
-                last_synced_bytes,
                 home_bytes,
                 tip_bytes,
             },
@@ -430,128 +309,15 @@ pub(crate) fn changed_paths(
         .collect()
 }
 
-/// What home holds at a path, or `None` when it holds nothing there.
-///
-/// Refuses anything that is not a regular file before opening it, because
-/// opening one can never return: `fs::read` on a fifo blocks until something
-/// writes to the other end, and `dotsync commit -- .pipe` hung forever with
-/// nothing printed. The check is here rather than only in commit's path
-/// validation because this function reads every managed path on every run —
-/// a tracked file can be replaced by a fifo at any time, and then the machine
-/// could not even run `status`.
-///
-/// `metadata` follows links deliberately: a link to a regular file reads as
-/// that file, which is what dotsync has always done for a path it already
-/// tracks. Whether such a path should be *committed* is a separate question,
-/// answered by commit's own selection guards.
-pub(crate) fn read_home_bytes(
-    paths: &DotsyncPaths,
+/// Where one path stands, for a caller asking about a path by name. A path
+/// outside the classified set is a path nothing knows about, which is a real
+/// answer rather than a missing one.
+pub(crate) fn state_of(
+    classified: &BTreeMap<PathBuf, ClassifiedPath>,
     relative: &Path,
-) -> Result<Option<Vec<u8>>, DotsyncError> {
-    let home_path = paths.home_dir.join(relative);
-    match fs::metadata(&home_path) {
-        Ok(metadata) if !metadata.is_file() => {
-            return Err(DotsyncError::NotARegularFile { path: home_path })
-        }
-        Ok(_) => {}
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(DotsyncError::Io {
-                path: home_path,
-                source,
-            })
-        }
-    }
-    match fs::read(&home_path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(DotsyncError::Io {
-            path: home_path,
-            source,
-        }),
-    }
-}
-
-/// Everything one command needs to know about how home stands against a scope.
-#[derive(Debug, Clone)]
-pub(crate) struct HomeClassification {
-    /// The scope's current head, which is also what a completed sync records
-    /// as the new last-synced revision.
-    pub(crate) tip: jj_lib::commit::Commit,
-    pub(crate) tip_entries: BTreeMap<PathBuf, TreeValue>,
-    pub(crate) paths: BTreeMap<PathBuf, ClassifiedPath>,
-}
-
-impl HomeClassification {
-    /// A path outside the classified set is a path nothing knows about, which
-    /// is a real answer rather than a missing one.
-    pub(crate) fn state(&self, relative: &Path) -> FileState {
-        self.paths
-            .get(relative)
-            .map(|path| path.state)
-            .unwrap_or(FileState::AbsentEverywhere)
-    }
-}
-
-/// Classifies home against one scope's current head, reading home from disk and
-/// the last-synced side from `sync-state.json`.
-///
-/// This is the commit path's computation: `commit` asks it whether a named path
-/// holds a change of this machine's own, and the home sync at the end of a
-/// commit, a `continue` or an `abort` acts on it. The commands that hold `Home`
-/// read the same three sides out of trees instead — see `classify_managed_trees`.
-///
-/// `extra_paths` widens the classified set beyond the managed domain, for
-/// callers that name paths dotsync has never seen — a commit adding a new file.
-pub(crate) async fn classify_home_against_scope(
-    session: &Session,
-    sync_state: Option<&SyncState>,
-    scope: &str,
-    extra_paths: &BTreeSet<PathBuf>,
-    recorded_from_home: &RecordedFromHome,
-) -> Result<HomeClassification, DotsyncError> {
-    let repo: &dyn jj_lib::repo::Repo = session.repo().as_ref();
-    let internal_paths = internal_repo_paths(session.config());
-    let tip = load_scope_commit(repo, scope)?;
-    let tip_entries = collect_managed_tree_entries(&tip.tree(), &internal_paths)?;
-    let last_synced_entries = last_synced_entries(repo, sync_state, &internal_paths)?;
-
-    let mut domain = managed_domain(last_synced_entries.as_ref(), &tip_entries);
-    domain.extend(extra_paths.iter().cloned());
-    domain.extend(recorded_from_home.paths().cloned());
-    let paths = classify_paths(
-        session.paths(),
-        repo,
-        last_synced_entries.as_ref(),
-        &tip_entries,
-        recorded_from_home,
-        &domain,
-    )
-    .await?;
-
-    Ok(HomeClassification {
-        tip,
-        tip_entries,
-        paths,
-    })
-}
-
-/// The tree this machine last synced, or `None` when there is no usable record
-/// of one — no state file, or a revision this repo does not have (stale state
-/// left by a different repo instance).
-fn last_synced_entries(
-    repo: &dyn jj_lib::repo::Repo,
-    sync_state: Option<&SyncState>,
-    internal_paths: &BTreeSet<PathBuf>,
-) -> Result<Option<BTreeMap<PathBuf, TreeValue>>, DotsyncError> {
-    let Some(state) = sync_state else {
-        return Ok(None);
-    };
-    let Ok(commit) = repo.store().get_commit(&state.last_synced_revision) else {
-        return Ok(None);
-    };
-    Ok(Some(collect_managed_tree_entries(
-        &commit.tree(),
-        internal_paths,
-    )?))
+) -> FileState {
+    classified
+        .get(relative)
+        .map(|path| path.state)
+        .unwrap_or(FileState::AbsentEverywhere)
 }

@@ -368,14 +368,10 @@ pub(crate) fn load_scope_commit(
 
 pub(crate) fn collect_managed_tree_entries(
     tree: &jj_lib::merged_tree::MergedTree,
-    excluded_paths: &std::collections::BTreeSet<PathBuf>,
 ) -> Result<BTreeMap<PathBuf, TreeValue>, DotsyncError> {
     let mut entries = BTreeMap::new();
     for (path, value) in tree.entries() {
         let display_path = PathBuf::from(path.as_internal_file_string());
-        if excluded_paths.contains(&display_path) {
-            continue;
-        }
         let value = value.map_err(|err| {
             jj_error(format!("read tree entry {}: {err}", display_path.display()))
         })?;

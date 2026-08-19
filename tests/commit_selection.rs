@@ -237,21 +237,21 @@ fn commit_path_inside_dotsyncs_own_state_is_an_error() {
 
     machine.init_ok();
 
-    let sync_state = machine.sync_state_relative_path();
-    let sync_state = sync_state.to_str().expect("sync state path is UTF-8");
-    assert!(
-        machine.file_exists(sync_state),
-        "init should have written the sync state file"
-    );
     let revision_before = bookmark_revision(&machine, "all");
+    let repo_relative = machine
+        .repo_dir
+        .strip_prefix(&machine.home_dir)
+        .expect("the hidden repo lives in home")
+        .to_str()
+        .expect("the repo path is UTF-8")
+        .to_string();
 
-    // Both of these are dotsync's own bookkeeping sitting in home: the
-    // machine-local sync state, and the hidden repo itself. Naming either used
-    // to be filtered out of the selection without a word, so the commit
-    // reported success having recorded nothing.
+    // The hidden repo is dotsync's own bookkeeping sitting in home. Naming it,
+    // or anything under it, used to be filtered out of the selection without a
+    // word, so the commit reported success having recorded nothing.
     for command in [
-        format!("dotsync commit all -m state -- {sync_state}"),
-        "dotsync commit all -m repo -- .local/share/dotsync/repo".to_string(),
+        format!("dotsync commit all -m repo -- {repo_relative}"),
+        format!("dotsync commit all -m repo-file -- {repo_relative}/.jj"),
     ] {
         let output = machine.run(&command);
         assert_eq!(
@@ -267,9 +267,9 @@ fn commit_path_inside_dotsyncs_own_state_is_an_error() {
         );
     }
 
-    let state_output = machine.run(&format!("dotsync commit all -m state -- {sync_state}"));
+    let repo_output = machine.run(&format!("dotsync commit all -m repo -- {repo_relative}"));
     assert_stderr_snapshot(
-        &state_output,
+        &repo_output,
         &format!(
             "\
 dotsync: cannot commit that path
@@ -284,7 +284,7 @@ Expected:
 It expects every path you name to be a config file inside your home directory, named relative to it, and to exist either in home or on the target scope already.
 
 Current state found:
-`{sync_state}` is this machine's dotsync sync state; it records which machine scope this home uses, so it has to stay machine-local.
+`{repo_relative}` is dotsync's hidden repo itself, at {}, which is where dotsync stores every scope.
 
 Why dotsync stopped:
 Dotsync stopped before recording anything. A commit records every path you named or none of them, so fixing the paths above and rerunning the same command is safe.
@@ -292,10 +292,11 @@ Dotsync stopped before recording anything. A commit records every path you named
 Correct flow:
 - name paths relative to your home directory: `dotsync commit all -m \"message\" -- .config/fish/config.fish`.
 - do not use `~/`, absolute paths, or `..`; dotsync resolves every path against your home directory already, and records it verbatim.
-- commit the config files you edited instead; dotsync's own state is not config and cannot travel on a scope.
+- commit the config files you edited instead; dotsync's hidden repo is not config and cannot travel on a scope.
 - to change which scopes exist, edit `.config/dotsync/config.toml` in home and commit that path to `all`.
 - run `dotsync status` to see which managed files changed.
-"
+",
+            machine.repo_dir.display()
         ),
     );
 }
@@ -754,19 +755,41 @@ fn commit_force_applies_to_the_named_paths_and_not_to_unrelated_drift() {
         machine.run("dotsync commit mx-xps-cy -m 'update app' --force -- .config/app.conf");
     assert_eq!(
         commit_output.status.code(),
-        Some(1),
-        "`--force` on commit covers the paths it names, so unrelated drift still stops the home sync\n{}",
+        Some(0),
+        "a change the commit did not name is an input to its home sync rather than a wall in front of it\n{}",
         render_output(&commit_output)
     );
+    assert_eq!(
+        read_bookmark_file_contents(&machine, "mx-xps-cy", ".config/app.conf"),
+        "setting = two\n",
+        "the named change is still recorded"
+    );
+
+    // The unnamed change went neither way: not reverted, and not recorded on
+    // the authority of a `--force` that named something else.
     assert_eq!(
         machine.read_file(".gitconfig"),
         "[user]\nname = Drifted\n",
         "`--force` on a commit must not revert a file the commit never named"
     );
     assert_eq!(
-        read_bookmark_file_contents(&machine, "mx-xps-cy", ".config/app.conf"),
-        "setting = two\n",
-        "the named change is still recorded"
+        read_bookmark_file_contents(&machine, "mx-xps-cy", ".gitconfig"),
+        "[user]\nname = Repo\n",
+        "and must not record it either"
+    );
+    let status = machine.run_ok("dotsync status --output json");
+    let payload = parse_stdout_json(&status);
+    let changed: Vec<&str> = payload["changes"]
+        .as_array()
+        .expect("status answers with a changes array")
+        .iter()
+        .filter_map(|change| change["path"].as_str())
+        .collect();
+    assert_eq!(
+        changed,
+        [".gitconfig"],
+        "so it is still this machine's to decide about, and still reported as such\n{}",
+        render_output(&status)
     );
 }
 
@@ -835,20 +858,22 @@ fn a_forced_overwrite_is_reported_even_when_the_run_then_fails() {
     machine_b.run_ok("dotsync");
 
     machine_b.write_file(".apprc", "ui_theme = dark\nfont = mono\nsize = 14\n");
-    machine_b.run_ok("dotsync commit all -m 'add size' -- .apprc");
+    machine_b.write_file(".config/other.conf", "other = from b\n");
+    machine_b.run_ok("dotsync commit all -m 'add size, change other' -- .apprc .config/other.conf");
 
-    // A forces the revert of `.apprc`, and separately has drift on a file the
-    // commit does not name — so the commit's own home sync stops after the
-    // forced history has already been written and pushed.
+    // A forces the revert of `.apprc`, and separately holds its own edit to a
+    // file B changed differently — so the commit's own home sync meets a
+    // conflict it cannot resolve, after the forced history has been written and
+    // pushed.
     machine_a.run_ok("dotsync status");
-    machine_a.write_file(".config/other.conf", "other = drifted\n");
+    machine_a.write_file(".config/other.conf", "other = from a\n");
 
     let commit_a =
         machine_a.run("dotsync --output json commit all -m 'revert apprc' --force -- .apprc");
     assert_eq!(
         commit_a.status.code(),
         Some(1),
-        "unrelated drift still stops the home sync\n{}",
+        "a home file that conflicts with what the scope holds still stops the home sync\n{}",
         render_output(&commit_a)
     );
     assert_eq!(

@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use jj_lib::backend::CommitId;
-use jj_lib::backend::{CopyId, TreeValue};
+use jj_lib::backend::TreeValue;
 use jj_lib::merge::Merge;
 use jj_lib::merged_tree::MergedTree;
 use jj_lib::merged_tree_builder::MergedTreeBuilder;
@@ -20,19 +20,21 @@ use crate::cascade::{
     build_cascade_plan, execute_cascade_steps, CascadeCommand, CascadeOutcome, CascadeStep,
     ScopeHeads,
 };
-use crate::config::{internal_repo_paths, DotsyncPaths, ALL_SCOPE, DOTSYNC_CONFIG_RELATIVE_PATH};
-use crate::drift::{classify_home_against_scope, read_home_bytes, FileState, RecordedFromHome};
+use crate::config::{DotsyncPaths, ALL_SCOPE, DOTSYNC_CONFIG_RELATIVE_PATH};
+use crate::drift::{changed_paths, read_entry_bytes, state_of, FileState};
 use crate::error::{
     CommitPathProblem, DotsyncError, RefusedCommitPath, RejectedCommitPath, SkipReason,
     SkippedCommitPath,
 };
+use crate::home::{Home, Resolved};
 use crate::repo::{
     collect_managed_tree_entries, load_scope_commit, push_scope_updates, read_tree_entry_bytes,
     PushReport,
 };
 use crate::scope_graph::ScopeGraph;
 use crate::session::{in_session, Run, Session};
-use crate::sync::{ForceScope, SyncReport};
+use crate::status::FileChange;
+use crate::sync::{classify_home_against_head, finishing, SyncReport};
 
 #[derive(Debug, Clone)]
 pub struct CommitOptions {
@@ -157,8 +159,23 @@ impl From<DotsyncError> for CommitFailure {
 
 #[derive(Debug, Clone)]
 pub struct ContinueReport {
+    /// Which of the two paused states this run finished. The two syncs are the
+    /// same operation, but a run that says it resumed a cascade when it
+    /// resolved a home conflict is describing something that did not happen.
+    pub resumed: Resumed,
     pub sync: SyncReport,
     pub push: PushReport,
+}
+
+/// What `continue` found paused.
+#[derive(Debug, Clone)]
+pub enum Resumed {
+    /// A cascade, stopped part-way down the graph at this scope.
+    Cascade { scope: String },
+    /// Home against this machine's own scope head. It has no name of its own
+    /// because it is not stored anywhere: it is recomputed from home, the mark
+    /// and the head on every run.
+    SyncConflict,
 }
 
 #[derive(Debug, Clone)]
@@ -175,18 +192,19 @@ pub async fn commit_and_sync(
     options: CommitOptions,
 ) -> Run<Result<CommitReport, CommitFailure>> {
     in_session(paths, async |session, paths| {
-        commit_in_session(session, paths, options).await
+        reject_commit_if_cascade_paused(paths)?;
+        let mut home = Home::acquire(session, paths).await?;
+        let outcome = commit_in_session(session, &mut home, options).await;
+        finishing(home, session, outcome).await
     })
     .await
 }
 
 async fn commit_in_session(
     session: &mut Session,
-    paths: &DotsyncPaths,
+    home: &mut Home,
     options: CommitOptions,
 ) -> Result<CommitReport, CommitFailure> {
-    reject_commit_if_cascade_paused(paths)?;
-
     session.fetch().await?;
     // Publish what earlier runs left behind before looking at this commit at
     // all: this commit may turn out to add nothing, and a machine with an
@@ -202,22 +220,11 @@ async fn commit_in_session(
         .into());
     }
 
-    let internal_paths = internal_repo_paths(session.config());
-    let sync_state = crate::sync::load_sync_state(session.paths(), session.config())?;
-    let machine_scope =
-        crate::sync::resolve_current_scope(session.config(), sync_state.as_ref(), None)?;
-    let target_entries =
-        load_scope_entries(session.repo().as_ref(), &options.scope, &internal_paths)?;
+    let machine_scope = home.machine_scope().to_string();
+    let target_entries = load_scope_entries(session.repo().as_ref(), &options.scope)?;
 
-    let selection = select_changes_to_record(
-        session,
-        sync_state.as_ref(),
-        &machine_scope,
-        &options,
-        &target_entries,
-        &internal_paths,
-    )
-    .await?;
+    let selection =
+        select_changes_to_record(session, home, &machine_scope, &options, &target_entries).await?;
     let Selection {
         paths: selected_paths,
         newly_tracked,
@@ -235,13 +242,9 @@ async fn commit_in_session(
         ));
     }
 
-    let last_synced_commit = sync_state.as_ref().and_then(|state| {
-        session
-            .repo()
-            .store()
-            .get_commit(&state.last_synced_revision)
-            .ok()
-    });
+    // The commit home derives from, which is what makes a home edit an edit
+    // *of something* rather than a bare assertion about bytes.
+    let mark = home.mark().await?;
 
     // Whether this commit's bytes reach this machine at all. When the target
     // scope is an ancestor of the machine scope the cascade carries them down
@@ -264,16 +267,12 @@ async fn commit_in_session(
         cascades_into_home,
         &options.scope,
         &base_commit,
-        last_synced_commit.as_ref(),
+        &mark,
     )
     .await?;
-    let mut recorded_from_home = RecordedFromHome::default();
     let mut builder = MergedTreeBuilder::new(merge_base_tree.clone());
     for relative in &selected_paths {
-        let bytes = apply_home_path_to_tree(tx.repo_mut(), paths, relative, &mut builder).await?;
-        if cascades_into_home {
-            recorded_from_home.record(relative, bytes);
-        }
+        builder.set_or_remove(repo_path_of(relative)?, home_entry(home, relative)?);
     }
     let home_tree = builder.write_tree().await.map_err(|err| DotsyncError::Jj {
         message: format!("write commit tree for {}: {err}", options.scope),
@@ -301,10 +300,7 @@ async fn commit_in_session(
 
     let mut builder = MergedTreeBuilder::new(merged_tree);
     for relative in &forced_paths {
-        let bytes = apply_home_path_to_tree(tx.repo_mut(), paths, relative, &mut builder).await?;
-        if cascades_into_home {
-            recorded_from_home.record(relative, bytes);
-        }
+        builder.set_or_remove(repo_path_of(relative)?, home_entry(home, relative)?);
     }
     let new_tree = builder.write_tree().await.map_err(|err| DotsyncError::Jj {
         message: format!("write forced commit tree for {}: {err}", options.scope),
@@ -316,31 +312,36 @@ async fn commit_in_session(
             .iter()
             .map(PathBuf::from)
             .collect::<Vec<_>>();
+        let remaining_steps = build_cascade_plan(
+            &graph,
+            &scope_heads,
+            &CascadeCommand {
+                root_scope: options.scope.clone(),
+                description: format!("dotsync: cascade from {}", options.scope),
+            },
+        )
+        .iter()
+        .map(|step| PausedCascadeStep {
+            scope: step.scope.clone(),
+            parent_scopes: step.parent_scopes.clone(),
+        })
+        .collect();
         // Nothing was written, so there is no transaction to keep: the pause
-        // resolves against the scope head that is already there.
+        // resolves against the scope head that is already there. Dropped
+        // before reading home, because reading home can amend the working copy
+        // commit and two open transactions on one repo is not a state to be in.
+        drop(tx);
+        let paused_home_contents = home_contents(session, home, &conflicted_paths).await?;
         save_paused_cascade_state(
-            paths,
+            session.paths(),
             &PausedCascadeState {
                 machine_scope: machine_scope.clone(),
                 paused_scope: options.scope.clone(),
                 parent_commit_ids: vec![base_commit.id().hex()],
-                remaining_steps: build_cascade_plan(
-                    &graph,
-                    &scope_heads,
-                    &CascadeCommand {
-                        root_scope: options.scope.clone(),
-                        description: format!("dotsync: cascade from {}", options.scope),
-                    },
-                )
-                .iter()
-                .map(|step| PausedCascadeStep {
-                    scope: step.scope.clone(),
-                    parent_scopes: step.parent_scopes.clone(),
-                })
-                .collect(),
+                remaining_steps,
                 description: options.message.clone(),
                 original_scope_commit_ids: original_scope_commit_ids.clone(),
-                paused_home_contents: read_home_contents(paths, &conflicted_paths)?,
+                paused_home_contents,
             },
         )?;
         return Err(DotsyncError::CascadePaused {
@@ -393,25 +394,31 @@ async fn commit_in_session(
                 })?;
             let parent_commit_ids = parent_commit_ids_for_step(&scope_heads, paused_step)?;
             let remaining_steps = remaining_steps_after_pause(&plan, &scope);
-            tx.commit("dotsync: pause cascade")
-                .await
-                .map_err(|err| DotsyncError::Jj {
-                    message: format!("commit paused cascade state for {}: {err}", options.scope),
-                })?;
+            session
+                .advance_to(tx.commit("dotsync: pause cascade").await.map_err(|err| {
+                    DotsyncError::Jj {
+                        message: format!(
+                            "commit paused cascade state for {}: {err}",
+                            options.scope
+                        ),
+                    }
+                })?)
+                .await?;
             let conflicted_paths = conflicted_files
                 .iter()
                 .map(PathBuf::from)
                 .collect::<Vec<_>>();
+            let paused_home_contents = home_contents(session, home, &conflicted_paths).await?;
             save_paused_cascade_state(
-                paths,
+                session.paths(),
                 &PausedCascadeState {
-                    machine_scope,
+                    machine_scope: machine_scope.clone(),
                     paused_scope: scope.clone(),
                     parent_commit_ids,
                     remaining_steps,
                     description: cascade_command.description,
                     original_scope_commit_ids,
-                    paused_home_contents: read_home_contents(paths, &conflicted_paths)?,
+                    paused_home_contents,
                 },
             )?;
             return Err(DotsyncError::CascadePaused {
@@ -442,18 +449,12 @@ async fn commit_in_session(
         error,
     };
     let push = push.map_err(stopped)?;
-    // The commit just read these paths out of home and wrote them into the
-    // repo, so for this sync those bytes are the last-synced side: home is
-    // behind whatever the cascade merged them into, not drifted from it.
-    let sync = crate::sync::sync_repo_to_home(
-        session,
-        ForceScope::from_paths(&forced_paths),
-        &recorded_from_home,
-        Some(&machine_scope),
-    )
-    .await
-    .map_err(stopped)?;
-    crate::sync::record_the_home_sync(session, paths)
+    // The same home sync every other command ends with. It needs nothing said
+    // about the paths this commit just recorded: they reached the scope from
+    // home, so the merge that moves home onto the new head finds home's side
+    // and the head's side agreeing, and a local change the commit did not name
+    // is carried across rather than stopped on.
+    let sync = crate::sync::sync_home_to_machine_scope(session, home, false)
         .await
         .map_err(stopped)?;
 
@@ -500,12 +501,11 @@ struct Selection {
 /// what changed. Which tree the bytes are then written into is a separate
 /// question, answered by the caller.
 async fn select_changes_to_record(
-    session: &Session,
-    sync_state: Option<&crate::sync::SyncState>,
+    session: &mut Session,
+    home: &mut Home,
     machine_scope: &str,
     options: &CommitOptions,
     target_entries: &BTreeMap<PathBuf, TreeValue>,
-    internal_paths: &BTreeSet<PathBuf>,
 ) -> Result<Selection, DotsyncError> {
     let selection = if options.paths.is_empty() {
         None
@@ -515,20 +515,21 @@ async fn select_changes_to_record(
             &options.scope,
             &options.paths,
             target_entries,
-            internal_paths,
         )?)
     };
-    let classification = classify_home_against_scope(
-        session,
-        sync_state,
-        machine_scope,
-        &selection
-            .as_ref()
-            .map(SelectedPaths::everything)
-            .unwrap_or_default(),
-        &RecordedFromHome::default(),
-    )
-    .await?;
+    // A named path may be one nothing knows about yet — a new config file — so
+    // home is read at it before anything asks what it holds. A bare commit
+    // names nothing and adds nothing, so it widens nothing.
+    if let Some(selection) = &selection {
+        let named = selection
+            .everything()
+            .iter()
+            .map(|relative| repo_path_of(relative))
+            .collect::<Result<Vec<_>, DotsyncError>>()?;
+        home.observe_paths(session, named).await?;
+    }
+    let machine_head = load_scope_commit(session.repo().as_ref(), machine_scope)?;
+    let classified = classify_home_against_head(session, home, &machine_head).await?;
 
     // Naming a directory says "commit what changed under here". A bare commit
     // says the same thing about every file already on the scope, so both step
@@ -543,8 +544,7 @@ async fn select_changes_to_record(
         .map(|selection| selection.skipped.clone())
         .unwrap_or_default();
     let selected_paths: Vec<PathBuf> = match &selection {
-        None => classification
-            .paths
+        None => classified
             .iter()
             .filter(|(_, path)| path.state.is_drift())
             .map(|(relative, _)| relative.clone())
@@ -552,7 +552,7 @@ async fn select_changes_to_record(
         Some(selection) => {
             let mut selected = selection.named.clone();
             for relative in &selection.under_directory {
-                let state = classification.state(relative);
+                let state = state_of(&classified, relative);
                 // `--force` is the explicit claim that home wins for what this
                 // command named, so it reaches under a named directory too.
                 if !options.force && !selection.named.contains(relative) && state.blocks_commit() {
@@ -567,8 +567,14 @@ async fn select_changes_to_record(
             selected.into_iter().collect()
         }
     };
-    reject_scope_graph_outside_all(session, &options.scope, target_entries, &selected_paths)
-        .await?;
+    reject_scope_graph_outside_all(
+        session,
+        home,
+        &options.scope,
+        target_entries,
+        &selected_paths,
+    )
+    .await?;
 
     let newly_tracked = selected_paths
         .iter()
@@ -580,7 +586,7 @@ async fn select_changes_to_record(
         let refused = selected_paths
             .iter()
             .filter_map(|relative| {
-                let state = classification.state(relative);
+                let state = state_of(&classified, relative);
                 state.blocks_commit().then(|| RefusedCommitPath {
                     path: relative.clone(),
                     state,
@@ -605,7 +611,7 @@ async fn select_changes_to_record(
     let forced_overwrites = selected_paths
         .iter()
         .filter(|relative| {
-            let state = classification.state(relative);
+            let state = state_of(&classified, relative);
             state.blocks_commit() || state == FileState::DivergedEdit
         })
         .cloned()
@@ -642,18 +648,15 @@ async fn commit_merge_base_tree(
     cascades_into_home: bool,
     target_scope: &str,
     target_head: &jj_lib::commit::Commit,
-    last_synced: Option<&jj_lib::commit::Commit>,
+    mark: &jj_lib::commit::Commit,
 ) -> Result<jj_lib::merged_tree::MergedTree, DotsyncError> {
-    let Some(last_synced) = last_synced else {
-        return Ok(target_head.tree());
-    };
     if !cascades_into_home {
         return Ok(target_head.tree());
     }
 
     let base_ids = mut_repo
         .index()
-        .common_ancestors(&[target_head.id().clone()], &[last_synced.id().clone()])
+        .common_ancestors(&[target_head.id().clone()], &[mark.id().clone()])
         .map_err(|err| DotsyncError::Jj {
             message: format!("find the base of the home edit for {target_scope}: {err}"),
         })?;
@@ -713,10 +716,9 @@ fn conflicted_files_from_tree(
 fn load_scope_entries(
     repo: &dyn jj_lib::repo::Repo,
     scope: &str,
-    internal_paths: &std::collections::BTreeSet<PathBuf>,
 ) -> Result<BTreeMap<PathBuf, TreeValue>, DotsyncError> {
     let commit = load_scope_commit(repo, scope)?;
-    collect_managed_tree_entries(&commit.tree(), internal_paths)
+    collect_managed_tree_entries(&commit.tree())
 }
 
 /// Refuses a commit that would record a change to the scope graph on a scope
@@ -729,6 +731,7 @@ fn load_scope_entries(
 /// graph too.
 async fn reject_scope_graph_outside_all(
     session: &Session,
+    home: &Home,
     scope: &str,
     target_entries: &BTreeMap<PathBuf, TreeValue>,
     selected_paths: &[PathBuf],
@@ -746,7 +749,13 @@ async fn reject_scope_graph_outside_all(
         }
         None => None,
     };
-    if read_home_bytes(session.paths(), &config_path)? == repo_bytes {
+    let home_value = home_entry(home, &config_path)?
+        .as_resolved()
+        .cloned()
+        .flatten();
+    if read_entry_bytes(session.repo().store(), &config_path, home_value.as_ref()).await?
+        == repo_bytes
+    {
         return Ok(());
     }
     Err(DotsyncError::UnusableCommitPaths {
@@ -763,7 +772,6 @@ fn expand_selection_paths(
     scope: &str,
     selection_paths: &[PathBuf],
     target_entries: &BTreeMap<PathBuf, TreeValue>,
-    internal_paths: &BTreeSet<PathBuf>,
 ) -> Result<SelectedPaths, DotsyncError> {
     let mut selected = SelectedPaths::default();
     // Relative path of the repo root within home — reject anything under it
@@ -791,13 +799,8 @@ fn expand_selection_paths(
             .components()
             .filter(|component| !matches!(component, Component::CurDir))
             .collect::<PathBuf>();
-        if let Some(problem) = unusable_commit_path(
-            paths,
-            &home,
-            selection_path,
-            internal_paths,
-            repo_relative.as_deref(),
-        ) {
+        if let Some(problem) = unusable_commit_path(paths, selection_path, repo_relative.as_deref())
+        {
             rejected.push(RejectedCommitPath {
                 path: named.clone(),
                 problem,
@@ -806,7 +809,12 @@ fn expand_selection_paths(
         }
 
         let home_path = paths.home_dir.join(selection_path);
-        let is_directory_selection = home_path.is_dir()
+        // `symlink_metadata`, not `is_dir`: a link to a directory is one entry
+        // whose content is its target, and walking it would record the linked
+        // directory's files under this machine's names. That is how `selflink
+        // -> $HOME` swept all of home onto a scope.
+        let is_directory_selection = std::fs::symlink_metadata(&home_path)
+            .is_ok_and(|metadata| metadata.is_dir())
             || target_entries.keys().any(|candidate| {
                 candidate != selection_path && path_has_prefix(candidate, selection_path)
             });
@@ -816,7 +824,6 @@ fn expand_selection_paths(
                 let mut walk = DirectoryWalk {
                     home_root: &home,
                     repo_root: &repo_root,
-                    internal_paths,
                     matched: BTreeSet::new(),
                     skipped: Vec::new(),
                 };
@@ -830,7 +837,9 @@ fn expand_selection_paths(
                     .filter(|candidate| path_has_prefix(candidate, selection_path))
                     .cloned(),
             );
-        } else if home_path.exists() || target_entries.contains_key(selection_path) {
+        } else if std::fs::symlink_metadata(&home_path).is_ok()
+            || target_entries.contains_key(selection_path)
+        {
             // A tracked path whose home file is gone is a deletion, so the
             // tracked side counts as a match too.
             matched.insert(selection_path.clone());
@@ -897,9 +906,7 @@ impl SelectedPaths {
 /// for what they do or do not resolve to.
 fn unusable_commit_path(
     paths: &DotsyncPaths,
-    home: &Canonical,
     selection_path: &Path,
-    internal_paths: &BTreeSet<PathBuf>,
     repo_relative: Option<&Path>,
 ) -> Option<CommitPathProblem> {
     // Everything dotsync manages lives in home, so naming home itself names
@@ -927,10 +934,6 @@ fn unusable_commit_path(
     {
         return Some(CommitPathProblem::EscapesHome);
     }
-    // Dotsync's own state lives in home too, and none of it is config.
-    if internal_paths.contains(selection_path) {
-        return Some(CommitPathProblem::SyncState);
-    }
     if let Some(repo_relative) = repo_relative {
         if selection_path == repo_relative {
             return Some(CommitPathProblem::DotsyncRepoRoot {
@@ -942,13 +945,6 @@ fn unusable_commit_path(
                 repo_root: paths.repo_root.clone(),
             });
         }
-    }
-    // Last, because it is the only one that touches the filesystem. A path
-    // that does not resolve to itself under home went through a link on the
-    // way — as the last component or as any component above it — so what
-    // dotsync would read is not what was named.
-    if let Some(resolves_to) = home.resolves_elsewhere(selection_path) {
-        return Some(CommitPathProblem::Symlink { resolves_to });
     }
     None
 }
@@ -973,24 +969,15 @@ impl Canonical {
         path.canonicalize()
             .is_ok_and(|resolved| resolved.starts_with(&self.0))
     }
-
-    /// Where `relative` really leads, if that is not where it says.
-    ///
-    /// A path that does not exist yet resolves to nothing and is not a link;
-    /// whether it names anything at all is a question the caller asks next.
-    fn resolves_elsewhere(&self, relative: &Path) -> Option<PathBuf> {
-        let resolved = self.0.join(relative).canonicalize().ok()?;
-        (resolved != self.0.join(relative)).then_some(resolved)
-    }
 }
 
-/// Walks a named directory: every real file under it, and why it left the rest.
+/// Walks a named directory: every file and link under it, and why it left the
+/// rest.
 ///
-/// Symlinks are not followed — `DirEntry::file_type` does not follow them, so a
-/// linked directory is neither recursed into nor recorded — and they are not
-/// silent either. A commit that quietly dropped a link from a directory it was
-/// told to record would report `newly_tracked` for everything beside it, and an
-/// agent reading that has been told the directory reached the scope.
+/// Symlinks are entries, never paths to follow: `DirEntry::file_type` does not
+/// follow them, so a linked directory is recorded as the one link it is rather
+/// than recursed into — which is what keeps `selflink -> $HOME` from sweeping
+/// home onto a scope, structurally rather than by a guard.
 ///
 /// The repo-root and internal-path guards compare resolved paths, so that no
 /// route into this walk — however the caller's path was spelled — can reach
@@ -999,7 +986,6 @@ impl Canonical {
 struct DirectoryWalk<'a> {
     home_root: &'a Canonical,
     repo_root: &'a Canonical,
-    internal_paths: &'a BTreeSet<PathBuf>,
     matched: BTreeSet<PathBuf>,
     skipped: Vec<SkippedCommitPath>,
 }
@@ -1048,20 +1034,11 @@ impl DirectoryWalk<'_> {
             else {
                 continue;
             };
-            if self.internal_paths.contains(&relative) || self.repo_root.contains(&path) {
+            if self.repo_root.contains(&path) {
                 continue;
             }
 
-            if file_type.is_symlink() {
-                self.skipped.push(SkippedCommitPath {
-                    path: relative,
-                    reason: SkipReason::Symlink {
-                        resolves_to: fs::read_link(&path).ok(),
-                    },
-                });
-                continue;
-            }
-            if !file_type.is_file() {
+            if !file_type.is_file() && !file_type.is_symlink() {
                 self.skipped.push(SkippedCommitPath {
                     path: relative,
                     reason: SkipReason::NotARegularFile,
@@ -1079,58 +1056,52 @@ fn path_has_prefix(path: &Path, prefix: &Path) -> bool {
     path == prefix || path.starts_with(prefix)
 }
 
-/// Writes home's current content for `relative` into `builder`, and returns
-/// exactly the bytes it recorded — `None` when home has no such file, which is
-/// how a deletion is recorded. The caller keeps those bytes as the baseline
-/// for its own home sync; see `RecordedFromHome`.
-async fn apply_home_path_to_tree(
-    mut_repo: &mut jj_lib::repo::MutableRepo,
-    paths: &DotsyncPaths,
-    relative: &Path,
-    builder: &mut MergedTreeBuilder,
-) -> Result<Option<Vec<u8>>, DotsyncError> {
+/// What home holds at `relative` right now, as a tree entry: the working
+/// copy's snapshot, which is where home's bytes and their *kind* both come
+/// from. A commit records this verbatim, so an executable script stays
+/// executable and a symlink stays a symlink.
+fn home_entry(home: &Home, relative: &Path) -> Result<Merge<Option<TreeValue>>, DotsyncError> {
+    let repo_path = repo_path_of(relative)?;
+    home.snapshot_tree()
+        .path_value(repo_path.as_ref())
+        .map_err(|err| DotsyncError::Jj {
+            message: format!("read home's {}: {err}", relative.display()),
+        })
+}
+
+fn repo_path_of(relative: &Path) -> Result<RepoPathBuf, DotsyncError> {
     let relative_str = relative.to_str().ok_or_else(|| DotsyncError::NonUtf8Path {
         path: relative.to_path_buf(),
     })?;
-    let repo_path =
-        RepoPathBuf::from_internal_string(relative_str).map_err(|err| DotsyncError::Jj {
-            message: format!("invalid repo path {}: {err}", relative.display()),
-        })?;
-
-    let Some(bytes) = read_home_bytes(paths, relative)? else {
-        builder.set_or_remove(repo_path, Merge::absent());
-        return Ok(None);
-    };
-
-    let mut reader = bytes.as_slice();
-    let file_id = mut_repo
-        .store()
-        .write_file(repo_path.as_ref(), &mut reader)
-        .await
-        .map_err(|err| DotsyncError::Jj {
-            message: format!("write repo file {}: {err}", relative.display()),
-        })?;
-    builder.set_or_remove(
-        repo_path,
-        Merge::normal(TreeValue::File {
-            id: file_id,
-            executable: false,
-            copy_id: CopyId::placeholder(),
-        }),
-    );
-    Ok(Some(bytes))
+    RepoPathBuf::from_internal_string(relative_str).map_err(|err| DotsyncError::Jj {
+        message: format!("invalid repo path {}: {err}", relative.display()),
+    })
 }
 
 /// Home contents of the conflicted files, recorded when a cascade pauses so
 /// `continue` can tell a resolution from an untouched file.
-fn read_home_contents(
-    paths: &DotsyncPaths,
+///
+/// A conflict can be about a file this machine has never held, so home is
+/// widened to cover these paths before they are read.
+async fn home_contents(
+    session: &mut Session,
+    home: &mut Home,
     relatives: &[PathBuf],
 ) -> Result<BTreeMap<PathBuf, Option<Vec<u8>>>, DotsyncError> {
-    relatives
+    let repo_paths = relatives
         .iter()
-        .map(|relative| Ok((relative.clone(), read_home_bytes(paths, relative)?)))
-        .collect()
+        .map(|relative| repo_path_of(relative))
+        .collect::<Result<Vec<_>, DotsyncError>>()?;
+    home.observe_paths(session, repo_paths).await?;
+    let mut contents = BTreeMap::new();
+    for relative in relatives {
+        let value = home_entry(home, relative)?.as_resolved().cloned().flatten();
+        contents.insert(
+            relative.clone(),
+            read_entry_bytes(session.repo().store(), relative, value.as_ref()).await?,
+        );
+    }
+    Ok(contents)
 }
 
 /// Conflicted files that hold exactly what they held when the cascade paused.
@@ -1141,35 +1112,48 @@ fn read_home_contents(
 /// losing side and reporting success. Until conflicts become commits and the
 /// two sides really are written into home (PLAN item 3), an unchanged file is
 /// proof that no resolution was made. Deleted with the pause file.
-fn unresolved_conflicted_files(
-    paths: &DotsyncPaths,
+async fn unresolved_conflicted_files(
+    session: &mut Session,
+    home: &mut Home,
     state: &PausedCascadeState,
 ) -> Result<Vec<PathBuf>, DotsyncError> {
-    let mut unresolved = Vec::new();
-    for (relative, paused_contents) in &state.paused_home_contents {
-        if read_home_bytes(paths, relative)? == *paused_contents {
-            unresolved.push(relative.clone());
-        }
-    }
-    Ok(unresolved)
+    let paused: Vec<PathBuf> = state.paused_home_contents.keys().cloned().collect();
+    let now = home_contents(session, home, &paused).await?;
+    Ok(paused
+        .into_iter()
+        .filter(|relative| now.get(relative) == state.paused_home_contents.get(relative))
+        .collect())
 }
 
 pub async fn continue_after_conflict(
     paths: &DotsyncPaths,
-    force: ForceScope,
+    discard_local: bool,
 ) -> Run<Result<ContinueReport, DotsyncError>> {
     in_session(paths, async |session, paths| {
-        continue_in_session(session, paths, force).await
+        let mut home = Home::acquire(session, paths).await?;
+        let outcome = continue_in_session(session, &mut home, discard_local).await;
+        finishing(home, session, outcome).await
     })
     .await
 }
 
+/// `continue` is the agent saying "the resolution is written". There are two
+/// states that sentence can end, and which one this machine is in is a fact
+/// about the machine rather than something the command has to be told: a
+/// cascade pause is recorded in a file, and a home-against-head conflict is
+/// recomputed from home, the mark and the head every run. So a pause file
+/// decides which of the two this is, and there being neither is what "nothing
+/// is paused" means.
 async fn continue_in_session(
     session: &mut Session,
-    paths: &DotsyncPaths,
-    force: ForceScope,
+    home: &mut Home,
+    discard_local: bool,
 ) -> Result<ContinueReport, DotsyncError> {
-    let state = load_paused_cascade_state(paths)?;
+    let state = match load_paused_cascade_state(session.paths()) {
+        Ok(state) => state,
+        Err(DotsyncError::NoPausedCascade) => return complete_a_sync_conflict(session, home).await,
+        Err(error) => return Err(error),
+    };
     // A cascade pauses because at least one file conflicted, so an empty
     // record means the pause was written before this check existed rather than
     // that nothing conflicted. Skipping the check there would reopen the
@@ -1180,7 +1164,7 @@ async fn continue_in_session(
             scope: state.paused_scope,
         });
     }
-    let unresolved = unresolved_conflicted_files(paths, &state)?;
+    let unresolved = unresolved_conflicted_files(session, home, &state).await?;
     if !unresolved.is_empty() {
         return Err(DotsyncError::UnresolvedConflict {
             scope: state.paused_scope,
@@ -1209,15 +1193,9 @@ async fn continue_in_session(
                 state.paused_scope
             ),
         })?;
-    let cascades_into_home =
-        scope_is_ancestor_or_self(&graph, &state.paused_scope, &state.machine_scope);
-    let mut recorded_from_home = RecordedFromHome::default();
     let mut builder = MergedTreeBuilder::new(merged_tree);
     for relative in state.paused_home_contents.keys() {
-        let bytes = apply_home_path_to_tree(tx.repo_mut(), paths, relative, &mut builder).await?;
-        if cascades_into_home {
-            recorded_from_home.record(relative, bytes);
-        }
+        builder.set_or_remove(repo_path_of(relative)?, home_entry(home, relative)?);
     }
     let resolved_tree = builder.write_tree().await.map_err(|err| DotsyncError::Jj {
         message: format!("write resolved tree for {}: {err}", state.paused_scope),
@@ -1272,17 +1250,22 @@ async fn continue_in_session(
                 })?;
             let parent_commit_ids = parent_commit_ids_for_step(&scope_heads, paused_step)?;
             let remaining_steps = remaining_steps_after_pause(&remaining_plan, &scope);
-            tx.commit("dotsync: pause cascade again")
-                .await
-                .map_err(|err| DotsyncError::Jj {
-                    message: format!("commit repeated paused cascade state: {err}"),
-                })?;
+            session
+                .advance_to(
+                    tx.commit("dotsync: pause cascade again")
+                        .await
+                        .map_err(|err| DotsyncError::Jj {
+                            message: format!("commit repeated paused cascade state: {err}"),
+                        })?,
+                )
+                .await?;
             let conflicted_paths = conflicted_files
                 .iter()
                 .map(PathBuf::from)
                 .collect::<Vec<_>>();
+            let paused_home_contents = home_contents(session, home, &conflicted_paths).await?;
             save_paused_cascade_state(
-                paths,
+                session.paths(),
                 &PausedCascadeState {
                     machine_scope: state.machine_scope,
                     paused_scope: scope.clone(),
@@ -1290,7 +1273,7 @@ async fn continue_in_session(
                     remaining_steps,
                     description: state.description,
                     original_scope_commit_ids: state.original_scope_commit_ids,
-                    paused_home_contents: read_home_contents(paths, &conflicted_paths)?,
+                    paused_home_contents,
                 },
             )?;
             return Err(DotsyncError::CascadePaused {
@@ -1309,31 +1292,78 @@ async fn continue_in_session(
                 })?,
         )
         .await?;
-    remove_paused_cascade_state(paths)?;
+    remove_paused_cascade_state(session.paths())?;
     let push = push_scope_updates(session).await?;
-    let sync = crate::sync::sync_repo_to_home(
-        session,
-        force,
-        &recorded_from_home,
-        Some(&state.machine_scope),
-    )
-    .await?;
-    crate::sync::record_the_home_sync(session, paths).await?;
-    Ok(ContinueReport { sync, push })
+    let sync = crate::sync::sync_home_to_machine_scope(session, home, discard_local).await?;
+    Ok(ContinueReport {
+        resumed: Resumed::Cascade {
+            scope: state.paused_scope,
+        },
+        sync,
+        push,
+    })
+}
+
+/// `continue` with no cascade paused: the conflict is between home and this
+/// machine's own scope head, and the agent has resolved it in home.
+///
+/// Nothing was stored when that conflict was presented, so nothing is loaded
+/// here — the merge is recomputed from the same three trees and home's side of
+/// every conflicted path is taken as the answer. The resolution reaches no
+/// scope: it stays an ordinary uncommitted change in home, for the agent to
+/// commit to whichever scope should own it.
+async fn complete_a_sync_conflict(
+    session: &mut Session,
+    home: &mut Home,
+) -> Result<ContinueReport, DotsyncError> {
+    let machine_scope = home.machine_scope().to_string();
+    let head = load_scope_commit(session.repo().as_ref(), &machine_scope)?;
+    match home
+        .resolve_with_home_bytes(session, &head, &machine_scope)
+        .await?
+    {
+        // Home and the head merge cleanly, so there is nothing here that only
+        // the agent could have decided.
+        Resolved::NothingToResolve => return Err(DotsyncError::NoPausedCascade),
+        Resolved::Applied => {}
+    }
+
+    let push = push_scope_updates(session).await?;
+    let classified = classify_home_against_head(session, home, &head).await?;
+    Ok(ContinueReport {
+        resumed: Resumed::SyncConflict,
+        sync: SyncReport {
+            current_scope: machine_scope,
+            synced_paths: collect_managed_tree_entries(&head.tree())?
+                .into_keys()
+                .collect(),
+            drifts: Vec::new(),
+            carried_changes: changed_paths(&classified, FileState::is_drift)
+                .into_iter()
+                .map(|(path, classified)| FileChange {
+                    path,
+                    state: classified.state,
+                })
+                .collect(),
+        },
+        push,
+    })
 }
 
 pub async fn abort_paused_cascade(paths: &DotsyncPaths) -> Run<Result<AbortReport, DotsyncError>> {
     in_session(paths, async |session, paths| {
-        abort_in_session(session, paths).await
+        let mut home = Home::acquire(session, paths).await?;
+        let outcome = abort_in_session(session, &mut home).await;
+        finishing(home, session, outcome).await
     })
     .await
 }
 
 async fn abort_in_session(
     session: &mut Session,
-    paths: &DotsyncPaths,
+    home: &mut Home,
 ) -> Result<AbortReport, DotsyncError> {
-    let state = load_paused_cascade_state(paths)?;
+    let state = load_paused_cascade_state(session.paths())?;
     if state.original_scope_commit_ids.is_empty() {
         return Err(DotsyncError::Jj {
             message: "paused cascade state does not include an abort checkpoint; resolve the conflict and run `dotsync continue` instead".to_string(),
@@ -1358,22 +1388,17 @@ async fn abort_in_session(
                 })?,
         )
         .await?;
-    remove_paused_cascade_state(paths)?;
+    remove_paused_cascade_state(session.paths())?;
 
     // Abort is a full sync of home back to the machine scope's pre-pause tip,
     // not a selective restore: the home edit that started the cascade is
     // exactly what abort exists to discard, so it cannot also be a reason to
     // refuse. Drift outside the paused selection goes the same way, which is
     // what DESIGN.md's "reverts all the config files" says and what the old
-    // selective restore quietly did not do.
-    let sync = crate::sync::sync_repo_to_home(
-        session,
-        ForceScope::Everything,
-        &RecordedFromHome::default(),
-        Some(&state.machine_scope),
-    )
-    .await?;
-    crate::sync::record_the_home_sync(session, paths).await?;
+    // selective restore quietly did not do. That is the same discarding sync
+    // `dotsync --force` runs, which is why `abort` refuses the flag: it has
+    // already made that choice.
+    let sync = crate::sync::sync_home_to_machine_scope(session, home, true).await?;
 
     Ok(AbortReport {
         paused_scope: state.paused_scope,

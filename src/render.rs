@@ -316,18 +316,6 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
                 "Dotsync cannot merge diverged scopes yet — that is https://github.com/maxeonyx/dotsync/issues/17. Report this state rather than repairing the repo by hand.",
             ],
         ),
-        DotsyncError::DriftDetected { .. } => render_structured_error(
-            "drift detected",
-            "Dotsync keeps its hidden repo as the source of truth for your home-directory config: the repo is the source of truth, and dotsync syncs committed repo state into the live system.",
-            "This sync flow compares managed files in your home directory against the repo version for this machine scope before copying anything.",
-            "This flow expects managed files in your home directory to already match the repo, unless you intentionally choose to overwrite drift.",
-            "The files that differ are listed under `Changed files:` below, each with what it would be replaced by.",
-            "Dotsync stopped before overwriting local drift so you can inspect what would be replaced.",
-            &[
-                "If the repo is correct, rerun with `dotsync --force` to overwrite the drift after reviewing the diffs.",
-                "If the live file is the change you wanted, run `dotsync status`, then commit the intended path with `dotsync commit <scope> -m \"message\" -- <path>`.",
-            ],
-        ),
         DotsyncError::SyncConflict { scope, files } => render_structured_error(
             if files.len() == 1 {
                 "home and this machine's scope both changed the same file"
@@ -416,16 +404,6 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
             steps.push(
                 "do not use `~/`, absolute paths, or `..`; dotsync resolves every path against your home directory already, and records it verbatim.".to_string(),
             );
-            if rejected.iter().any(|rejected| rejected.is_symlink()) {
-                steps.push(
-                    "name the real file instead of the link, if it lives in your home directory."
-                        .to_string(),
-                );
-                steps.push(
-                    "config kept outside home and linked into place cannot be committed yet; dotsync has no answer for what a scope should hold for such a path, so it refuses rather than guessing."
-                        .to_string(),
-                );
-            }
             if rejected.iter().any(|rejected| rejected.is_home_root()) {
                 steps.push(
                     "name the directories or files you actually mean: `dotsync commit <scope> -m \"message\" -- .config/fish/ .bashrc`. Dotsync will not sweep a whole home directory onto a scope."
@@ -440,7 +418,7 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
             }
             if rejected.iter().any(|rejected| rejected.is_dotsync_state()) {
                 steps.push(
-                    "commit the config files you edited instead; dotsync's own state is not config and cannot travel on a scope."
+                    "commit the config files you edited instead; dotsync's hidden repo is not config and cannot travel on a scope."
                         .to_string(),
                 );
                 steps.push(
@@ -521,18 +499,6 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
             &[
                 "run `dotsync view --file <path>` to see which scopes hold it.",
                 "run `dotsync view --scope <scope>` to see what that scope does hold.",
-            ],
-        ),
-        DotsyncError::SyncState { .. } => render_structured_error(
-            "invalid sync state",
-            "Dotsync keeps the repo as the source of truth and uses a local sync-state file to remember which machine scope was last synced here and which revision that sync used.",
-            "This sync flow reads that local state to know which prior managed files may need removal and which machine scope should be treated as authoritative for this home.",
-            "It expects that state file, if present, to be valid and readable; it expects that state file, if present, to be valid.",
-            &error_report.message,
-            "Dotsync stopped because it cannot safely decide what prior sync state to trust.",
-            &[
-                "fix or delete the bad sync-state file and rerun the command.",
-                "After that, let dotsync recreate valid sync state from a successful sync.",
             ],
         ),
         // Every other command carries on against the last state it fetched
@@ -728,24 +694,12 @@ pub(crate) fn skipped_path_notes(skipped: &[SkippedCommitPath]) -> Vec<String> {
     notes.extend(listed(skipped.iter().map(|skipped| {
         format!("{} ({})", skipped.path.display(), skipped.reason.explain())
     })));
-    // One line of advice per kind of skip that has any, because the remedies
-    // are not the same: a file another machine changed is a sync away, and a
-    // link is not.
     if skipped
         .iter()
         .any(|skipped| matches!(skipped.reason, SkipReason::NotChangedHere(_)))
     {
         notes.push(
             "dotsync: run `dotsync` to bring those up to date, or name one exactly to be told what happened to it."
-                .to_string(),
-        );
-    }
-    if skipped
-        .iter()
-        .any(|skipped| matches!(skipped.reason, SkipReason::Symlink { .. }))
-    {
-        notes.push(
-            "dotsync: a link cannot be recorded on a scope; move the file it points at into home if you want it managed."
                 .to_string(),
         );
     }

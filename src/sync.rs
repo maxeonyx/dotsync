@@ -1,66 +1,21 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::io;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use jj_lib::backend::CommitId;
-use jj_lib::object_id::ObjectId;
 use jj_lib::repo::Repo as _;
-use serde::{Deserialize, Serialize};
 
-use crate::config::{internal_repo_paths, DotsyncConfig, DotsyncPaths};
+use crate::config::DotsyncPaths;
 use crate::drift::{
-    changed_paths, classify_home_against_scope, classify_managed_trees, read_entry_bytes,
-    ClassifiedPath, FileState, RecordedFromHome,
+    changed_paths, classify_managed_trees, read_entry_bytes, ClassifiedPath, FileState,
 };
 use crate::error::{jj_error, ConflictRole, ConflictedFile, ConflictedVersion, DotsyncError};
 use crate::home::{Home, Materialized};
-use crate::machine::detect_machine;
 use crate::repo::{
     collect_managed_tree_entries, load_scope_commit, pending_push_scopes, push_scope_updates,
     PushReport,
 };
 use crate::session::{in_session, Run, Session};
 use crate::status::FileChange;
-
-/// Which drifted home files a run may overwrite.
-///
-/// `--force` answers one question — "overwrite the drift?" — but the commands
-/// that ask it do not all have the same thing to scope the answer to. Plain
-/// `dotsync` and `continue` name no paths, so their `--force` is necessarily
-/// blanket. `commit` names paths, so its `--force` rides that same list and
-/// reaches nothing else. `init` and `abort` never really ask: `init` has
-/// nothing of yours to overwrite and `abort` exists to discard home edits, so
-/// both always overwrite and both refuse the flag.
-#[derive(Debug, Clone, Default)]
-pub enum ForceScope {
-    /// Any drift stops the run.
-    #[default]
-    Nothing,
-    /// Every drifted file.
-    Everything,
-    /// Only these paths; drift anywhere else still stops the run.
-    Paths(BTreeSet<PathBuf>),
-}
-
-impl ForceScope {
-    pub fn from_paths(paths: &[PathBuf]) -> Self {
-        if paths.is_empty() {
-            Self::Nothing
-        } else {
-            Self::Paths(paths.iter().cloned().collect())
-        }
-    }
-
-    fn allows(&self, relative: &Path) -> bool {
-        match self {
-            Self::Nothing => false,
-            Self::Everything => true,
-            Self::Paths(paths) => paths.contains(relative),
-        }
-    }
-}
 
 /// One managed path whose home content is not what the repo says it should be.
 ///
@@ -111,18 +66,6 @@ pub struct SyncCommandReport {
     pub push: PushReport,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct SyncStatePayload {
-    machine_scope: String,
-    last_synced_revision: String,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct SyncState {
-    pub(crate) machine_scope: String,
-    pub(crate) last_synced_revision: CommitId,
-}
-
 /// Plain `dotsync`: bring home to this machine's scope.
 ///
 /// `discard_local` is `--force`: home loses instead of being merged. Without
@@ -149,11 +92,11 @@ pub async fn sync(
 /// through this rather than being returned around it. The run's own failure
 /// wins over a failure to persist, because the run's is what the reader has to
 /// act on.
-pub(crate) async fn finishing<T>(
+pub(crate) async fn finishing<T, E: From<DotsyncError>>(
     home: Home,
     session: &Session,
-    outcome: Result<T, DotsyncError>,
-) -> Result<T, DotsyncError> {
+    outcome: Result<T, E>,
+) -> Result<T, E> {
     let persisted = home.finish(session).await;
     let value = outcome?;
     persisted?;
@@ -177,16 +120,22 @@ async fn sync_home(
         },
         None => push_scope_updates(session).await?,
     };
-    let sync = materialize_machine_scope(session, home, discard_local).await?;
+    let sync = sync_home_to_machine_scope(session, home, discard_local).await?;
     Ok(SyncCommandReport { sync, push })
 }
 
-/// The sync itself: `merge(home, mark, head)` and what it came to.
+/// The home sync itself: `merge(home, mark, head)` and what it came to.
+///
+/// Every command that writes home ends here — plain `dotsync`, `commit`,
+/// `continue`, `abort` and `init` — because moving home is one operation
+/// whatever moved the head first. What differs between them is only
+/// `discard_local`: `init` and `abort` exist to take the head's side, and the
+/// rest carry a local change across.
 ///
 /// The classification is read before the merge moves anything, because two of
 /// its three sides are the working copy's own and the merge replaces them —
 /// and it is what says which home files a forced sync discarded.
-async fn materialize_machine_scope(
+pub(crate) async fn sync_home_to_machine_scope(
     session: &mut Session,
     home: &mut Home,
     discard_local: bool,
@@ -197,8 +146,7 @@ async fn materialize_machine_scope(
 
     let classified = classify_home_against_head(session, home, &head).await?;
     let local_changes = changed_paths(&classified, FileState::is_drift);
-    let head_paths =
-        collect_managed_tree_entries(&head.tree(), &internal_repo_paths(session.config()))?;
+    let head_paths = collect_managed_tree_entries(&head.tree())?;
 
     let materialized = if discard_local {
         home.materialize_discarding_local(session, &head).await?
@@ -208,11 +156,6 @@ async fn materialize_machine_scope(
     if let Materialized::Conflicted { merged } = materialized {
         return Err(sync_conflict(session, &machine_scope, &classified, &merged).await?);
     }
-
-    // The commit path still reads this file to know what this machine last
-    // synced; keeping it in step with the mark is what lets the two paths
-    // coexist. It goes when the commit path moves onto `Home`.
-    save_sync_state(session.paths(), session.config(), &machine_scope, head.id())?;
 
     // Every local change went one way or the other: a forced sync discarded all
     // of them, a merged one carried all of them.
@@ -245,37 +188,6 @@ async fn materialize_machine_scope(
     })
 }
 
-/// Walks the working copy forward over a home sync another code path just did.
-///
-/// The commands that still sync home themselves — `init`, `commit`, `continue`,
-/// `abort` — move a scope head and rewrite home without telling the working
-/// copy. The mark would then stay wherever the last plain `dotsync` left it, and
-/// the very files the run wrote would read afterwards as edits made on this
-/// machine: `status` reporting a change nobody made, and the next sync merging
-/// against a version of home that is two commits old. This says what those runs
-/// made true instead — home derives from the scope's new head — and writes
-/// nothing into home.
-///
-/// It goes when those commands sync through `Home` themselves, which is the
-/// commit path's own chunk of the rewrite.
-pub(crate) async fn record_the_home_sync(
-    session: &mut Session,
-    paths: &DotsyncPaths,
-) -> Result<(), DotsyncError> {
-    let mut home = Home::acquire(session, paths).await?;
-    let outcome = advance_the_mark(session, &mut home).await;
-    finishing(home, session, outcome).await
-}
-
-async fn advance_the_mark(session: &mut Session, home: &mut Home) -> Result<(), DotsyncError> {
-    let machine_scope = home.machine_scope().to_string();
-    let head = load_scope_commit(session.repo().as_ref(), &machine_scope)?;
-    // The paths only the new head holds are the ones the sync just added to
-    // home, so they have to be read before the mark says home derives from it.
-    home.observe(session, &head).await?;
-    home.record_mark(session, &head).await
-}
-
 /// Home against a head, across the three trees `Home` holds.
 pub(crate) async fn classify_home_against_head(
     session: &Session,
@@ -285,7 +197,6 @@ pub(crate) async fn classify_home_against_head(
     let mark = home.mark().await?;
     classify_managed_trees(
         session.repo().store(),
-        &internal_repo_paths(session.config()),
         &mark.tree(),
         &home.snapshot_tree(),
         &head.tree(),
@@ -364,124 +275,6 @@ async fn conflicted_version(
     })
 }
 
-pub(crate) fn resolve_current_scope(
-    config: &DotsyncConfig,
-    sync_state: Option<&SyncState>,
-    machine_scope_hint: Option<&str>,
-) -> Result<String, DotsyncError> {
-    let graph = &config.graph;
-    let valid_sync_state =
-        sync_state.filter(|state| graph.parents.contains_key(&state.machine_scope));
-    match (machine_scope_hint, valid_sync_state) {
-        (Some(scope), _) => Ok(scope.to_string()),
-        (None, Some(state)) => Ok(state.machine_scope.clone()),
-        (None, None) => {
-            let detected = detect_machine()?;
-            if graph.parents.contains_key(&detected.machine_scope) {
-                Ok(detected.machine_scope)
-            } else {
-                Err(DotsyncError::NoCurrentScope)
-            }
-        }
-    }
-}
-
-fn write_home_file(
-    paths: &DotsyncPaths,
-    relative: &Path,
-    contents: &[u8],
-) -> Result<(), DotsyncError> {
-    let system_path = paths.home_dir.join(relative);
-    if let Some(parent) = system_path.parent() {
-        fs::create_dir_all(parent).map_err(|source| DotsyncError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
-    fs::write(&system_path, contents).map_err(|source| DotsyncError::Io {
-        path: system_path,
-        source,
-    })
-}
-
-/// Writes the machine scope's tip into home, stopping first on anything home
-/// holds that dotsync neither put there nor has a record of.
-///
-/// `recorded_from_home` is empty for every caller but the two that have just
-/// written home content into the repo — see `RecordedFromHome`.
-pub(crate) async fn sync_repo_to_home(
-    session: &Session,
-    force: ForceScope,
-    recorded_from_home: &RecordedFromHome,
-    machine_scope_hint: Option<&str>,
-) -> Result<SyncReport, DotsyncError> {
-    let paths = session.paths();
-    let config = session.config();
-
-    let sync_state = load_sync_state(paths, config)?;
-    let valid_sync_state = sync_state
-        .as_ref()
-        .filter(|state| config.graph.parents.contains_key(&state.machine_scope));
-    let current_scope = resolve_current_scope(config, sync_state.as_ref(), machine_scope_hint)?;
-    let classification = classify_home_against_scope(
-        session,
-        valid_sync_state,
-        &current_scope,
-        &BTreeSet::new(),
-        recorded_from_home,
-    )
-    .await?;
-
-    let drifts = classification
-        .paths
-        .iter()
-        .filter(|(_, path)| path.state.is_drift())
-        .map(|(relative, path)| file_drift(paths, relative, path))
-        .collect::<Vec<_>>();
-    let (overwritten, blocking): (Vec<FileDrift>, Vec<FileDrift>) = drifts
-        .into_iter()
-        .partition(|drift| force.allows(&drift.repo_path));
-    if !blocking.is_empty() {
-        return Err(DotsyncError::DriftDetected {
-            count: blocking.len(),
-            drifts: blocking,
-        });
-    }
-    let drifts = overwritten;
-
-    // The tip is the source of truth for every managed path: if it holds the
-    // file, home gets those bytes; if it once held the file and no longer does,
-    // home loses it. The classification above already decided whether dotsync
-    // is allowed to get this far, so this loop needs no cases of its own.
-    let mut synced_paths = Vec::with_capacity(classification.tip_entries.len());
-    for (relative, path) in &classification.paths {
-        match &path.tip_bytes {
-            Some(tip_bytes) => {
-                if path.home_bytes.as_deref() != Some(tip_bytes.as_slice()) {
-                    write_home_file(paths, relative, tip_bytes)?;
-                }
-                synced_paths.push(relative.clone());
-            }
-            // Only a path dotsync knows it wrote may be taken away again. That
-            // is what the last-synced side is for, and why a machine with no
-            // usable sync state deletes nothing.
-            None if path.last_synced_bytes.is_some() => remove_home_path(paths, relative)?,
-            None => {}
-        }
-    }
-
-    save_sync_state(paths, config, &current_scope, classification.tip.id())?;
-
-    Ok(SyncReport {
-        current_scope,
-        synced_paths,
-        drifts,
-        // This path stops on a local change rather than merging around one, so
-        // it never carries any.
-        carried_changes: Vec::new(),
-    })
-}
-
 fn file_drift(paths: &DotsyncPaths, relative: &Path, path: &ClassifiedPath) -> FileDrift {
     FileDrift {
         repo_path: relative.to_path_buf(),
@@ -490,102 +283,4 @@ fn file_drift(paths: &DotsyncPaths, relative: &Path, path: &ClassifiedPath) -> F
         repo_bytes: path.tip_bytes.clone(),
         home_bytes: path.home_bytes.clone(),
     }
-}
-
-pub(crate) fn load_sync_state(
-    paths: &DotsyncPaths,
-    config: &DotsyncConfig,
-) -> Result<Option<SyncState>, DotsyncError> {
-    let path = sync_state_path(paths, config);
-    let contents = match fs::read_to_string(&path) {
-        Ok(contents) => contents,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => return Err(DotsyncError::Io { path, source }),
-    };
-    let payload: SyncStatePayload =
-        serde_json::from_str(&contents).map_err(|err| DotsyncError::SyncState {
-            path: path.clone(),
-            message: format!("failed to parse sync state: {err}"),
-        })?;
-    if payload.machine_scope.trim().is_empty() {
-        return Err(DotsyncError::SyncState {
-            path,
-            message: "machine_scope is empty".to_string(),
-        });
-    }
-    let last_synced_revision =
-        CommitId::try_from_hex(&payload.last_synced_revision).ok_or_else(|| {
-            DotsyncError::SyncState {
-                path: path.clone(),
-                message: format!(
-                    "last_synced_revision `{}` is not valid hex",
-                    payload.last_synced_revision
-                ),
-            }
-        })?;
-    Ok(Some(SyncState {
-        machine_scope: payload.machine_scope,
-        last_synced_revision,
-    }))
-}
-
-pub(crate) fn save_sync_state(
-    paths: &DotsyncPaths,
-    config: &DotsyncConfig,
-    machine_scope: &str,
-    last_synced_revision: &CommitId,
-) -> Result<(), DotsyncError> {
-    let path = sync_state_path(paths, config);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| DotsyncError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
-    let payload = SyncStatePayload {
-        machine_scope: machine_scope.to_string(),
-        last_synced_revision: last_synced_revision.hex(),
-    };
-    let contents = serde_json::to_vec_pretty(&payload).map_err(|err| DotsyncError::SyncState {
-        path: path.clone(),
-        message: format!("failed to serialize sync state: {err}"),
-    })?;
-    fs::write(&path, contents).map_err(|source| DotsyncError::Io { path, source })
-}
-
-pub(crate) fn sync_state_path(paths: &DotsyncPaths, config: &DotsyncConfig) -> PathBuf {
-    paths.home_dir.join(&config.sync_state_relative_path)
-}
-
-pub(crate) fn remove_home_path(paths: &DotsyncPaths, relative: &Path) -> Result<(), DotsyncError> {
-    let path = paths.home_dir.join(relative);
-    match fs::remove_file(&path) {
-        Ok(()) => remove_empty_parent_dirs(paths, &path),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(DotsyncError::Io { path, source }),
-    }
-}
-
-pub(crate) fn remove_empty_parent_dirs(
-    paths: &DotsyncPaths,
-    path: &Path,
-) -> Result<(), DotsyncError> {
-    let mut current = path.parent();
-    while let Some(dir) = current {
-        if dir == paths.home_dir {
-            break;
-        }
-        match fs::remove_dir(dir) {
-            Ok(()) => current = dir.parent(),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => break,
-            Err(err) if err.kind() == io::ErrorKind::DirectoryNotEmpty => break,
-            Err(source) => {
-                return Err(DotsyncError::Io {
-                    path: dir.to_path_buf(),
-                    source,
-                })
-            }
-        }
-    }
-    Ok(())
 }

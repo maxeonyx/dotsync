@@ -71,9 +71,6 @@ windows = { parents = ["all"] }
 hyprland = { parents = ["linux"] }
 # Max's XPS laptop
 mx-xps-cy = { parents = ["hyprland"] }
-
-[sync]
-state_path = ".local/state/dotsync/sync-state.json"
 EOF
 
 # Add a universal gitconfig

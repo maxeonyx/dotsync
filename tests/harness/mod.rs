@@ -456,26 +456,6 @@ impl MachineEnvironment {
         symlink_at(target, &path);
     }
 
-    pub fn sync_state_relative_path(&self) -> PathBuf {
-        PathBuf::from(
-            read_bookmark_file_contents(self, "all", ".config/dotsync/config.toml")
-                .lines()
-                .find_map(|line| {
-                    line.strip_prefix("state_path = \"")
-                        .and_then(|rest| rest.strip_suffix('"'))
-                })
-                .expect("sync.state_path should be configured"),
-        )
-    }
-
-    pub fn sync_state_path(&self) -> PathBuf {
-        self.home_dir.join(self.sync_state_relative_path())
-    }
-
-    pub fn write_sync_state_raw(&self, contents: &str) {
-        write_file_at(&self.sync_state_path(), contents);
-    }
-
     pub fn modified_time(&self, relative: &str) -> std::time::SystemTime {
         fs::metadata(self.home_dir.join(relative))
             .expect("stat home file")

@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
     abort_paused_cascade, commit_and_sync, continue_after_conflict, diff_home, init, status, sync,
-    view, CommitFailure, CommitOptions, DiffReport, DotsyncError, DotsyncPaths, ForceScope, Run,
+    view, CommitFailure, CommitOptions, DiffReport, DotsyncError, DotsyncPaths, Resumed, Run,
     UnreachableRemote, ViewAnswer,
 };
 mod render;
@@ -597,19 +597,19 @@ async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     // `continue` names no paths, so its `--force` is necessarily blanket: it
     // overwrites every locally changed file or none of them.
-    let force = if force {
-        ForceScope::Everything
-    } else {
-        ForceScope::Nothing
-    };
     let run = continue_after_conflict(&paths, force).await;
     Ok(output_of("dotsync continue", run, |report| {
+        let synced = report.sync.synced_paths.len();
         render::synced_output(
             "continue",
-            format!(
-                "dotsync: resumed cascade and synced {} file(s)",
-                report.sync.synced_paths.len()
-            ),
+            match &report.resumed {
+                Resumed::Cascade { scope } => format!(
+                    "dotsync: resumed the cascade paused at {scope} and synced {synced} file(s)"
+                ),
+                Resumed::SyncConflict => format!(
+                    "dotsync: took your version of the conflicted file(s) and synced {synced} file(s)"
+                ),
+            },
             &report.sync,
             Some(&report.push),
         )

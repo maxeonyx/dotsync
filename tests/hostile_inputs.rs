@@ -162,12 +162,12 @@ fn declare_a_scope(machine: &MachineEnvironment, name: &str, parent: &str) {
     let path = ".config/dotsync/config.toml";
     let config = machine.read_file(path);
     let declared = config.replace(
-        "\n[sync]",
-        &format!("\n# `{name}` — every machine running {name}.\n{name} = {{ parents = [\"{parent}\"] }}\n\n[sync]"),
+        "\n[scopes]\n",
+        &format!("\n[scopes]\n\n# `{name}` — every machine running {name}.\n{name} = {{ parents = [\"{parent}\"] }}\n"),
     );
     assert_ne!(
         config, declared,
-        "the fixture found no `[sync]` to insert before"
+        "the fixture found no `[scopes]` table to add to"
     );
     machine.write_file(path, &declared);
 }

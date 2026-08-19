@@ -60,13 +60,15 @@ fn commit_modifies_existing_file_on_scope() {
     machine.init_ok();
 
     seed_remote_scope_file(&machine, "linux", ".bashrc", "export PATH=\"$PATH\"\n");
+    // Cascaded down to this machine, so home really holds the scope's version
+    // and the edit below is an edit *of it*. Without that the file would be one
+    // home has never synced and `linux` would hold a different one, which is a
+    // conflict rather than a modification.
+    merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
     machine.run_ok("dotsync");
+    assert_eq!(machine.read_file(".bashrc"), "export PATH=\"$PATH\"\n");
 
     machine.write_file(".bashrc", "export PATH=\"$HOME/bin:$PATH\"\n");
-    machine.write_sync_state_raw(&format!(
-        "{{\"machine_scope\":\"all\",\"last_synced_revision\":\"{}\"}}",
-        bookmark_revision(&machine, "all")
-    ));
 
     machine.run_ok("dotsync commit linux -m 'update bashrc' -- .bashrc");
 

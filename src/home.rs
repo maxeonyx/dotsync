@@ -37,20 +37,21 @@
 //! repairs exactly that, and the repair is the subtlest code in this module —
 //! its comments carry the reasoning.
 
-use jj_lib::backend::{CommitId, Signature, Timestamp};
+use jj_lib::backend::CommitId;
 use jj_lib::commit::Commit;
 use jj_lib::gitignore::GitIgnoreFile;
 use jj_lib::matchers::EverythingMatcher;
 use jj_lib::merge::Merge;
 use jj_lib::merged_tree::MergedTree;
+use jj_lib::merged_tree_builder::MergedTreeBuilder;
 use jj_lib::op_store::OperationId;
 use jj_lib::ref_name::WorkspaceNameBuf;
 use jj_lib::repo::Repo as _;
 use jj_lib::working_copy::{LockedWorkingCopy as _, SnapshotOptions, WorkingCopyFreshness};
 
-use crate::config::DotsyncPaths;
+use crate::config::{DotsyncPaths, SHED_SYNC_STATE_RELATIVE_PATH};
 use crate::error::{jj_error, DotsyncError};
-use crate::machine::detect_machine;
+use crate::machine::{detect_machine, machine_signature};
 use crate::repo::load_scope_commit;
 use crate::session::Session;
 use crate::working_copy::{HomeLockedWorkingCopy, HomeWorkingCopy};
@@ -62,6 +63,15 @@ pub(crate) struct Home {
     locked: HomeLockedWorkingCopy,
     wc_commit: Commit,
     machine_scope: String,
+}
+
+/// What completing a sync conflict came to.
+pub(crate) enum Resolved {
+    /// There was nothing to complete: home and the head merge cleanly, or home
+    /// already derives from the head.
+    NothingToResolve,
+    /// Home's bytes were the resolution, and home now derives from the head.
+    Applied,
 }
 
 /// What materializing a head did. There is no partial case to represent.
@@ -134,6 +144,7 @@ impl Home {
         session.advance_to(reloaded).await?;
 
         let wc_commit = ensure_wc_commit(session, &machine_scope, &workspace).await?;
+        shed_the_previous_releases_state(paths);
 
         let freshness = WorkingCopyFreshness::check_stale(&locked, &wc_commit, session.repo())
             .map_err(|err| jj_error(format!("check working copy freshness: {err}")))?;
@@ -209,11 +220,28 @@ impl Home {
         session: &mut Session,
         head: &Commit,
     ) -> Result<(), DotsyncError> {
-        if !self.locked.probe_also(tree_paths(&head.tree())?) {
-            // `acquire` already read every path this head holds, which is the
-            // ordinary case — a head that has not added a file holds no path
-            // the mark does not. Home's side of the merge is already complete,
-            // so there is nothing to re-read.
+        self.observe_paths(session, tree_paths(&head.tree())?).await
+    }
+
+    /// Widens home's snapshot to cover paths the run named itself, and re-reads
+    /// them.
+    ///
+    /// `observe` covers every path some commit holds, which is every path
+    /// dotsync already knows about. A commit can also name a path nothing
+    /// knows about yet — a new config file — and home's side of that path has
+    /// to be read before the commit can record it. Without this the path is
+    /// outside the probe set, so the snapshot says home holds nothing there
+    /// and the commit records a deletion of a file that does not exist.
+    pub(crate) async fn observe_paths(
+        &mut self,
+        session: &mut Session,
+        paths: impl IntoIterator<Item = jj_lib::repo_path::RepoPathBuf>,
+    ) -> Result<(), DotsyncError> {
+        if !self.locked.probe_also(paths) {
+            // Every path was already read, which is the ordinary case — a head
+            // that has not added a file holds no path the mark does not, and a
+            // commit usually names a file dotsync already tracks. Home's side
+            // of the merge is already complete, so there is nothing to re-read.
             return Ok(());
         }
         let snapshot = self.snapshot_home().await?;
@@ -251,30 +279,71 @@ impl Home {
         Ok(Materialized::Applied)
     }
 
-    /// Records that home derives from `head` now, without touching home.
+    /// Moves home to `head` taking home's own bytes as the resolution of every
+    /// path the merge could not resolve.
     ///
-    /// The mark moves to `head` and the wc commit keeps home's own bytes, so
-    /// anything home holds that `head` does not stays an ordinary local change
-    /// against it. This is what a home sync performed by some other code path
-    /// amounts to at this boundary: the writing already happened, and what is
-    /// left is to say which commit it came from. Without it the mark stays
-    /// wherever the last materialization left it, and every file that other
-    /// path wrote reads afterwards as an edit made here.
+    /// This is `continue` at the home boundary. "I have written the
+    /// resolution" is a fact only the agent can state, so nothing about the
+    /// conflict is stored between the run that presented it and the run that
+    /// finishes it: the merge is recomputed from the same three trees, and
+    /// home's side of the conflicted paths is taken as final. Every other path
+    /// merges as it would have anyway, so the incoming changes the stop
+    /// withheld arrive together with the resolution.
     ///
-    /// Not a merge, so it cannot conflict and cannot fail on a state another
-    /// code path produced.
-    pub(crate) async fn record_mark(
+    /// The resolution stays an ordinary uncommitted local change: the mark
+    /// moves to `head`, and home holding something `head` does not is exactly
+    /// what a local change is.
+    pub(crate) async fn resolve_with_home_bytes(
         &mut self,
         session: &mut Session,
         head: &Commit,
-    ) -> Result<(), DotsyncError> {
+        head_label: &str,
+    ) -> Result<Resolved, DotsyncError> {
         self.observe(session, head).await?;
         let mark = self.mark().await?;
-        if mark.id() == head.id() {
-            return Ok(());
+        if head.id() == mark.id() {
+            return Ok(Resolved::NothingToResolve);
         }
         let snapshot = self.snapshot_tree();
-        self.switch_to(session, head.id().clone(), snapshot).await
+        let merged = merge_trees(
+            (snapshot.clone(), "local changes in home"),
+            (mark.tree(), "what this machine last synced"),
+            (head.tree(), head_label),
+        )
+        .await?;
+        if !merged.has_conflict() {
+            return Ok(Resolved::NothingToResolve);
+        }
+
+        let conflicted = merged
+            .conflicts()
+            .map(|(path, value)| {
+                value.map_err(|err| jj_error(format!("read conflicted {path:?}: {err}")))?;
+                Ok(path)
+            })
+            .collect::<Result<Vec<_>, DotsyncError>>()?;
+        let mut builder = MergedTreeBuilder::new(merged);
+        for path in conflicted {
+            let value = snapshot
+                .path_value(path.as_ref())
+                .map_err(|err| jj_error(format!("read home's {path:?}: {err}")))?;
+            builder.set_or_remove(path, value);
+        }
+        let resolved = builder
+            .write_tree()
+            .await
+            .map_err(|err| jj_error(format!("write the resolved tree: {err}")))?;
+
+        self.switch_to(session, head.id().clone(), resolved).await?;
+        // Refuses a tree that is still conflicted, which is what keeps the
+        // no-markers rule true here: home's side of every conflicted path was
+        // just written over the merge, so a conflict left in it would be a bug
+        // in this method rather than a state to materialize.
+        self.locked
+            .check_out(&self.wc_commit)
+            .await
+            .map_err(|err| jj_error(format!("materialize into home: {err}")))?;
+        Ok(Resolved::Applied)
     }
 
     /// Moves home to `head` with home's side of the merge dropped: the head's
@@ -523,17 +592,6 @@ impl Home {
 
 const WC_COMMIT_DESCRIPTION: &str = "dotsync: working copy";
 
-/// Commits made by a machine carry the machine's name, so history can say
-/// which machine made a change — the `author: ""` oversight PLAN §2.3 step 2
-/// retires.
-pub(crate) fn machine_signature(machine_scope: &str) -> Signature {
-    Signature {
-        name: machine_scope.to_string(),
-        email: format!("{machine_scope}@dotsync"),
-        timestamp: Timestamp::now(),
-    }
-}
-
 /// The wc commit for this machine's workspace, creating it if this repo has
 /// never had one — which is both `init`'s first run and the migration of a
 /// machine upgrading from the sync-state.json era. The new wc commit is an
@@ -572,6 +630,19 @@ async fn ensure_wc_commit(
         .map_err(|err| jj_error(format!("commit working copy creation: {err}")))?;
     session.advance_to(repo).await?;
     Ok(wc_commit)
+}
+
+/// Deletes the machine-local state file the release before this one kept.
+///
+/// Which commit this machine last materialized is a `wc_commit_ids` entry in
+/// jj's own view, and it moves in the same operation as the bookmark it belongs
+/// to. A file beside the repo saying the same thing is a second authority that
+/// can disagree with the first, so an upgrading machine leaves it behind.
+///
+/// Failure is not worth reporting: the file is read by nothing, so the only
+/// consequence of it surviving is that it is still there.
+fn shed_the_previous_releases_state(paths: &DotsyncPaths) {
+    let _ = std::fs::remove_file(paths.home_dir.join(SHED_SYNC_STATE_RELATIVE_PATH));
 }
 
 /// Three labeled trees into jj's merge: one base (the mark), two sides (home

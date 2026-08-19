@@ -17,7 +17,7 @@ mod working_copy;
 pub use crate::bootstrap::{init, InitReport};
 pub use crate::commit::{
     abort_paused_cascade, commit_and_sync, continue_after_conflict, AbortReport, CommitFailure,
-    CommitOptions, CommitReport, ContinueReport, RecordedCommit,
+    CommitOptions, CommitReport, ContinueReport, RecordedCommit, Resumed,
 };
 pub use crate::config::DotsyncPaths;
 pub use crate::drift::FileState;
@@ -29,4 +29,4 @@ pub use crate::inspect::{diff_home, view, DiffReport, ScopeInfo, ViewAnswer, Vie
 pub use crate::repo::PushReport;
 pub use crate::session::{Run, UnreachableRemote};
 pub use crate::status::{status, FileChange, StatusReport};
-pub use crate::sync::{sync, FileDrift, ForceScope, SyncCommandReport, SyncReport};
+pub use crate::sync::{sync, FileDrift, SyncCommandReport, SyncReport};

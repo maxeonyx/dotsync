@@ -69,54 +69,6 @@ fn the_conflict_stop_lists_files_the_way_status_does_and_apart_from_its_instruct
     );
 }
 
-/// The sync-state file is machine-local and no longer read by a sync — the
-/// working copy's own record is what says where home stands. `commit` still
-/// reads it, so a corrupt one is still a stop, and it is the command that meets
-/// it now.
-#[test]
-fn invalid_state_file_returns_clear_error() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    machine.write_file(".bashrc", "export DOTSYNC=1\n");
-    machine.write_sync_state_raw("not valid json\n");
-
-    let sync_output = machine.run("dotsync commit all -m 'add bashrc' -- .bashrc");
-    assert!(
-        !sync_output.status.success(),
-        "a commit should fail when the sync state file is corrupt\n{}",
-        render_output(&sync_output)
-    );
-    let expected = format!(
-        "\
-dotsync: invalid sync state
-
-What dotsync does:
-Dotsync keeps the repo as the source of truth and uses a local sync-state file to remember which machine scope was last synced here and which revision that sync used.
-
-This flow:
-This sync flow reads that local state to know which prior managed files may need removal and which machine scope should be treated as authoritative for this home.
-
-Expected:
-It expects that state file, if present, to be valid and readable; it expects that state file, if present, to be valid.
-
-Current state found:
-sync state error at {}: failed to parse sync state: expected ident at line 1 column 2
-
-Why dotsync stopped:
-Dotsync stopped because it cannot safely decide what prior sync state to trust.
-
-Correct flow:
-- fix or delete the bad sync-state file and rerun the command.
-- After that, let dotsync recreate valid sync state from a successful sync.
-",
-        machine.sync_state_path().display()
-    );
-    assert_stderr_snapshot(&sync_output, &expected);
-}
-
 #[test]
 fn sync_does_not_rewrite_files_that_already_match() {
     let harness = TestHarness::new();
@@ -546,23 +498,11 @@ fn an_upgraded_machine_sheds_sync_state_json_and_keeps_working() {
 /// under test still writes one — so a run that has stopped writing it gets the
 /// old release's file fabricated in the old release's format.
 ///
-/// The path is read out of `config.toml` when there is one, because that is
-/// where the current release configures it, and falls back to the location it
-/// puts there by default.
+/// The path is the one the previous release wrote it to.
 fn ensure_the_previous_releases_sync_state(machine: &MachineEnvironment) -> std::path::PathBuf {
     machine.run_ok("dotsync");
 
-    let configured = std::fs::read_to_string(machine.home_dir.join(".config/dotsync/config.toml"))
-        .ok()
-        .and_then(|config| {
-            config.lines().find_map(|line| {
-                line.strip_prefix("state_path = \"")
-                    .and_then(|rest| rest.strip_suffix('"'))
-                    .map(str::to_string)
-            })
-        })
-        .unwrap_or_else(|| String::from(".config/dotsync/sync-state.json"));
-    let path = machine.home_dir.join(configured);
+    let path = machine.home_dir.join(".config/dotsync/sync-state.json");
 
     if !path.exists() {
         let scope = machine_scope_reported_by(machine)
