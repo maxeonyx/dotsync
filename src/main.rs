@@ -546,15 +546,6 @@ fn reject_force_before(force: bool, command: &str) -> Result<(), UsageError> {
     )))
 }
 
-/// `--force` on the commands that name no paths for it to scope to.
-fn blanket_force(force: bool) -> ForceScope {
-    if force {
-        ForceScope::Everything
-    } else {
-        ForceScope::Nothing
-    }
-}
-
 fn usage_error(message: &str) -> UsageError {
     UsageError {
         message: message.to_string(),
@@ -604,7 +595,14 @@ fn prompt_init_remote_url() -> Result<String, UsageError> {
 
 async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let run = continue_after_conflict(&paths, blanket_force(force)).await;
+    // `continue` names no paths, so its `--force` is necessarily blanket: it
+    // overwrites every locally changed file or none of them.
+    let force = if force {
+        ForceScope::Everything
+    } else {
+        ForceScope::Nothing
+    };
+    let run = continue_after_conflict(&paths, force).await;
     Ok(output_of("dotsync continue", run, |report| {
         render::synced_output(
             "continue",

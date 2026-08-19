@@ -14,6 +14,13 @@
 //!   drift classifier and no `sync-state.json`.
 //! - **a head** — whatever commit a sync wants home to reach.
 //!
+//! The head arrives after `acquire`, because a run has to fetch and converge
+//! before it knows which commit it is heading for — so `observe` is how the run
+//! names it, and it widens the snapshot to cover the paths only that head
+//! holds. Home's side of the merge has to be real at every path the merge could
+//! write, or an arriving file silently overwrites home content dotsync has
+//! never read.
+//!
 //! The materialization rule (spike.ignore/README.md, settled 2026-08-19) is
 //! rule 3: `merge(snapshot, mark, head)` in memory; if it resolves, home
 //! moves whole and non-conflicting local edits are carried across; if it
