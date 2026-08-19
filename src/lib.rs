@@ -4,6 +4,7 @@ mod commit;
 mod config;
 mod drift;
 mod error;
+mod home;
 mod inspect;
 mod machine;
 mod repo;

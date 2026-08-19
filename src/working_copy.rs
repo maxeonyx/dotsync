@@ -393,6 +393,11 @@ impl LockedWorkingCopy for HomeLockedWorkingCopy {
 
     /// Disk -> tree, over exactly the probe set. File contents stream into
     /// the store; nothing is copied anywhere else.
+    ///
+    /// The internal tree becomes the snapshot: it records what is on disk —
+    /// which a snapshot just made true — not what any transaction later does
+    /// with the result. `finish` persists it and `check_out` diffs against
+    /// it, and both of those want disk truth.
     async fn snapshot(
         &mut self,
         _options: &SnapshotOptions,
@@ -405,6 +410,7 @@ impl LockedWorkingCopy for HomeLockedWorkingCopy {
             builder.set_or_remove(path.clone(), value);
         }
         let tree = builder.write_tree().await?;
+        self.tree = tree.clone();
         Ok((tree, SnapshotStats::default()))
     }
 
