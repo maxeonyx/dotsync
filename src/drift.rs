@@ -15,13 +15,14 @@ use crate::sync::SyncState;
 
 /// Where one managed path stands across the three sides dotsync knows about:
 ///
-/// - `L` — the tree this machine last synced, from the sync-state file
+/// - `L` — the tree this machine last synced
 /// - `H` — what is in home right now
 /// - `T` — what this machine's scope tip holds right now
 ///
-/// This is dotsync's whole drift vocabulary. The sync gate, `status`, `diff`
-/// and `commit`'s selection are filters and renderings over a map of these;
-/// none of them compares two sides on its own. That matters because the
+/// This is dotsync's whole vocabulary for a managed file. `status`, `diff`,
+/// `commit`'s selection and the home sync a commit ends with are filters and
+/// renderings over a map of these; none of them compares two sides on its own.
+/// That matters because the
 /// interesting cases are exactly the ones a two-sided comparison cannot name:
 /// a home file that equals `L` while `T` has moved on is *not* a local edit,
 /// but every two-sided check that looks only at home against the tip calls it
@@ -106,9 +107,10 @@ pub enum FileState {
 }
 
 impl FileState {
-    /// Home holds something dotsync neither put there nor has a record of.
-    /// These block a sync unless it is forced, and they are what `status` and
-    /// `diff` report as changes.
+    /// Home holds a change of this machine's own: something dotsync neither put
+    /// there nor has a record of. These are what `status` and `diff` report as
+    /// changes, what a plain sync carries across and a forced one discards, and
+    /// what the home sync at the end of a commit stops on.
     pub fn is_drift(self) -> bool {
         matches!(
             self,
@@ -491,9 +493,13 @@ impl HomeClassification {
     }
 }
 
-/// Classifies home against one scope's current head. This is the single drift
-/// computation: the sync gate acts on it, `status` and `diff` report it, and
-/// `commit` asks it whether a named path holds a change of this machine's own.
+/// Classifies home against one scope's current head, reading home from disk and
+/// the last-synced side from `sync-state.json`.
+///
+/// This is the commit path's computation: `commit` asks it whether a named path
+/// holds a change of this machine's own, and the home sync at the end of a
+/// commit, a `continue` or an `abort` acts on it. The commands that hold `Home`
+/// read the same three sides out of trees instead — see `classify_managed_trees`.
 ///
 /// `extra_paths` widens the classified set beyond the managed domain, for
 /// callers that name paths dotsync has never seen — a commit adding a new file.

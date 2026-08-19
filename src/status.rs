@@ -5,7 +5,7 @@ use crate::drift::{changed_paths, FileState};
 use crate::error::DotsyncError;
 use crate::home::Home;
 use crate::repo::load_scope_commit;
-use crate::session::{in_session, Run};
+use crate::session::{in_session, Run, Session};
 use crate::sync::{classify_home_against_head, finishing};
 
 /// What `status` found, split by whether anyone has to decide anything.
@@ -53,7 +53,7 @@ pub async fn status(paths: &DotsyncPaths) -> Run<Result<StatusReport, DotsyncErr
 }
 
 async fn status_report(
-    session: &mut crate::session::Session,
+    session: &mut Session,
     home: &mut Home,
 ) -> Result<StatusReport, DotsyncError> {
     session.fetch().await?;
