@@ -186,13 +186,13 @@ An open question: some config files may end up with sections that shouldn't be c
 
 ### Local changes and the mark
 
-Home is jj's working copy, through dotsync's own `WorkingCopy` implementation over the managed paths. Each run snapshots home into a working-copy commit whose parent is the mark, so the two per-machine facts live in jj's own view: which scope is this machine's (the workspace name) and which commit home last materialized (the working-copy commit's parent). There is no dotsync-owned state file, and the two facts move atomically with the history they describe. This enables two things:
+Home is jj's working copy, through dotsync's own `WorkingCopy` implementation over the managed paths. Each run snapshots home into a working-copy commit whose parent is the mark, so the two per-machine facts live in jj's own view — which scope is this machine's (the workspace name) and which commit home last materialized (the parent) — and move atomically with the history they describe. This enables two things:
 
-1. **Deletion semantics** — when a file is removed from the repo, dotsync can see it was previously materialized into home (it is in the mark's tree) and should be removed. Without the mark, dotsync couldn't distinguish "this file was never managed" from "this file was managed and was removed."
+1. **Deletion semantics** — a file in the mark's tree but gone from the repo was materialized here and should be removed; a file never in the mark's tree was never managed.
 
-2. **Attribution** — comparing home against the mark rather than against the repo's tip distinguishes "repo advanced elsewhere" from "home changed locally." A plain sync then accepts legitimate remote updates without treating them as local changes, and carries local changes forward without publishing them.
+2. **Attribution** — comparing home against the mark rather than the tip distinguishes "repo advanced elsewhere" from "home changed locally," so a sync accepts remote updates without calling them local changes, and carries local changes without publishing them.
 
-A sync is one three-way merge — `merge(home, mark, tip)` — computed in memory and materialized only if it resolves, and only whole. The classification `status`, `diff`, `commit` and the sync all read is the per-path view of that same merge (last-synced tree `L`, home `H`, new tip `T`); equality compares kind as well as content — the executable bit and symlink-versus-file are differences, per "A managed path has a kind" above. Presence and equality across the three sides is the whole domain, so every situation lands in exactly one class:
+A sync is one three-way merge — `merge(home, mark, tip)` — computed in memory and materialized only if it resolves, and only whole. The classification `status`, `diff`, `commit` and the sync all read is the per-path view of that same merge (last-synced tree `L`, home `H`, new tip `T`), so nothing can call a path conflicted that the sync then merges. Equality compares kind as well as content, per "A managed path has a kind" above. Presence and equality across the three sides is the whole domain, so every situation lands in exactly one class:
 
 | Class | `L` / `H` / `T` | Behavior |
 | --- | --- | --- |
@@ -210,8 +210,6 @@ A sync is one three-way merge — `merge(home, mark, tip)` — computed in memor
 | untracked collision | absent / present / present, differing and conflicting | sync stops whole — home holds content dotsync has never seen |
 | untracked | absent / present / absent | not managed; only `commit` cares |
 | converged deletion | present / absent / absent | nothing to do |
-
-Whether a diverged edit combines or collides is jj's merge's answer — the same merge the sync materializes — never a second computation's. One engine answers "is this a conflict?" for the classification, the presentation and the write, so `status` cannot call a file conflicted that a plain sync then merges without complaint.
 
 The row that carries the most weight is **incoming update**: home holds exactly what was last synced, and the tip has moved on. A two-sided comparison of home against the tip cannot tell it apart from a local edit, so `status` reports it as a change and a `commit` naming that path re-records the older bytes and cascades them — silently reverting whoever published the change. Naming the class is what makes that unrepresentable: `status` files it under incoming rather than changed, and `commit` refuses it, pointing at plain `dotsync`.
 
@@ -341,7 +339,7 @@ The steady-state command is `dotsync`, and it is the one an agent runs by reflex
 
 3 is a property of the state, not of the command that met it: the run that creates a pause, a `commit` that runs into one, and a `continue` that finds nothing resolved all exit 3, because they all have the same remedy. Only `diff` ever exits non-zero without having stopped, and it does so because a script needs to tell clean from dirty without parsing.
 
-Syncing carries local changes across and stops only when one collides with an incoming change; the stop presents the base and both sides. `--force` takes the repo's side instead, and reports every local change it discarded — so you always see what was overwritten, even having chosen not to stop for it. On `commit`, `--force` covers only the paths that commit named; see "Local changes and the mark" above.
+`--force` takes the repo's side instead of stopping, and reports every local change it discarded — so you always see what was overwritten, even having chosen not to stop for it. On `commit`, `--force` covers only the paths that commit named; see "Local changes and the mark" above.
 
 ### Why one command?
 
