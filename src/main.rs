@@ -327,7 +327,7 @@ impl From<CommitFailure> for ErrorOutput {
     /// overwrote on the way past.
     fn from(failure: CommitFailure) -> Self {
         Self {
-            error: failure.error,
+            error: *failure.error,
             forced_overwrites: failure.forced_overwrites,
         }
     }

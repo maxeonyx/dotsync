@@ -116,7 +116,10 @@ impl CommitReport {
 #[derive(Debug)]
 pub struct CommitFailure {
     pub forced_overwrites: Vec<PathBuf>,
-    pub error: DotsyncError,
+    /// Boxed because this struct rides in `Result::Err` through the whole
+    /// commit path, and `DotsyncError` is a large enum — an unboxed copy of it
+    /// here makes every `Result` on that path carry the worst-case variant.
+    pub error: Box<DotsyncError>,
 }
 
 impl From<DotsyncError> for CommitFailure {
@@ -124,7 +127,7 @@ impl From<DotsyncError> for CommitFailure {
     fn from(error: DotsyncError) -> Self {
         Self {
             forced_overwrites: Vec::new(),
-            error,
+            error: Box::new(error),
         }
     }
 }
@@ -391,7 +394,7 @@ async fn commit_in_session(
     // to carry what it overwrote.
     let stopped = |error: DotsyncError| CommitFailure {
         forced_overwrites: forced_overwrites.clone(),
-        error,
+        error: Box::new(error),
     };
     let push = push.map_err(stopped)?;
     // The same home sync every other command ends with. It needs nothing said
