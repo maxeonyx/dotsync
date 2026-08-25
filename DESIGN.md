@@ -44,7 +44,7 @@ These scopes form a directed acyclic graph (DAG):
 
 Each scope is a branch. A scope branch merges from its parent(s). So `linux` merges from `all`, `hyprland` merges from `linux`, and `mx-xps-cy` (a machine) merges from `hyprland`.
 
-A machine is just a leaf scope — there's nothing structurally special about it. The only difference is that a machine scope is the one whose files get synced to the live system. dotsync knows which scope is current from machine-local sync state and the configured scope graph, not from a user-visible checkout.
+A machine is just a leaf scope — there's nothing structurally special about it. The only difference is that a machine scope is the one whose files get synced to the live system. dotsync knows which scope is this machine's from the hostname, not from a user-visible checkout.
 
 ### Why not a single branch with directory-based scoping?
 
@@ -116,7 +116,7 @@ Written abstractly, on purpose. What the code calls each of these is a separate,
 
 The mark is the one people leave out, so here is why it is not optional. Take `.config/app.conf`, where home holds `setting = "b"` and the machine scope holds `setting = "a"`. Those two facts alone do not tell you what to do next. If the mark says this machine last wrote `"a"` into home, then somebody edited the file afterwards, and syncing over it throws that edit away. If the mark says this machine last wrote `"b"`, then the repo moved on somewhere else and syncing over it is the entire job. Identical observations of home and the repo, opposite correct actions. The mark is the only thing that separates them.
 
-That is also why the drift classification in the next section is a three-way comparison rather than a comparison of home against the repo. The "last-synced tree `L`" in that table is the tree of the commit the mark names.
+That is also why the classification of local changes in the next section is a three-way comparison rather than a comparison of home against the repo. The "last-synced tree `L`" in that table is the tree of the commit the mark names.
 
 `config.toml` is not a fourth thing. It is a managed file, living in home and on the `all` scope, which is exactly why editing it and committing it propagates like any other config. Its one genuinely special property is a self-reference: the scope graph is needed in order to compute the layering, and it is stored inside the layered thing. That works only because it lives on `all`, the root, which can be read without knowing the graph first.
 
@@ -149,17 +149,17 @@ So a difference of kind is a difference: `status` and `diff` report it, and sync
 
 A conflict is a first-class object with three parts: the base — the content both sides started from — and the two sides themselves. It is not one side with the other discarded, and it is not a file with `<<<<<<<` in it.
 
-The markers are a _rendering_ of the object, not the object. That matters twice over. It is why the base can be shown at all, since a rendering can include a part that a two-sided model would have had nowhere to put. And it is why the question of where and whether to render markers is a presentation choice made over a real object that already exists — see "The resolution surface" below, where that choice is still open.
+The markers are a _rendering_ of the object, not the object. That matters twice over. It is why the base can be shown at all, since a rendering can include a part that a two-sided model would have had nowhere to put. And it is why dotsync can put the conflict in front of the resolver in its own output — base and both sides, labeled — without ever writing markers into a live config file; see "The resolution surface" below.
 
 ### A non-authoritative map to the code
 
-The names below are where these states lived in the code as of v0.3.26. This table is a reading aid, not a specification. Refactoring is free to move any of it without an edit to this document, and where it disagrees with the abstract states above, the abstract states are right and this table is stale.
+The names below are where these states lived in the code as of v0.4.0. This table is a reading aid, not a specification. Refactoring is free to move any of it without an edit to this document, and where it disagrees with the abstract states above, the abstract states are right and this table is stale.
 
 | State | Where it lives today |
 | --- | --- |
-| Home | the filesystem, at the managed paths |
+| Home | the filesystem, at the managed paths — which jj reads and writes as its working copy, through dotsync's `WorkingCopy` implementation |
 | The repo | the hidden jj repo at `~/.local/share/dotsync/repo/` |
-| The mark | `last_synced_revision` in the machine-local sync state file, beside `machine_scope` |
+| The mark | the parent of this machine's working-copy commit, in jj's own view (`wc_commit_ids`, keyed by the machine scope's name) |
 | A scope head, three states | jj's `RefTarget`, which is a merge of optional commit ids — absent, single, or contested |
 | The kind of a managed path | jj's `TreeValue`, whose `File` variant carries the executable bit and whose `Symlink` variant carries a target |
 | A conflict | jj's own conflict representation, which is natively a base plus both sides |
@@ -172,55 +172,54 @@ Plain sync is always repo -> system. The repo is the durable source of truth, an
 
 Commits are home -> repo for selected paths only. Users and agents edit files at their real home locations, inspect `dotsync status`, then run `dotsync commit <scope> -m "message" -- <paths...>` to record the selected home files to the appropriate scope. After committing, dotsync cascades that scope through descendants, syncs the current machine home, and pushes.
 
-If a managed home file differs from the repo outside a commit flow, that's drift. dotsync warns and shows a diff. The user (or agent) decides whether to overwrite the system file or investigate.
+If a managed home file differs from what this machine last synced, that's a local change. `status` and `diff` report it, a plain sync carries it forward untouched (it stays reported afterwards), and `commit` is how it stops being local. A sync stops only when a local change and an incoming change collide in the same file — see "Local changes and the mark" below.
 
 ### Why not fully bidirectional?
 
 Bidirectional sync requires conflict resolution between the repo and the system, which is a fundamentally different (and harder) problem than git merge conflicts. It also makes the mental model ambiguous: "which is the source of truth?" With unidirectional sync, the answer is always "the repo."
 
-dotsync still _reads_ system files — it diffs them against the repo, reports status, and imports selected files during an explicit scoped commit. But it never treats arbitrary home drift as something to sync automatically. A repo update and a local home edit are different events, and the command shape makes the user choose which home paths belong in which scope.
+dotsync still _reads_ system files — it diffs them against the repo, reports status, and imports selected files during an explicit scoped commit. But it never treats an arbitrary home change as something to publish automatically. A repo update and a local home edit are different events, and the command shape makes the user choose which home paths belong in which scope.
 
 The cost: to contribute a home change, you must name the scope and paths explicitly. That explicitness is the safety boundary that replaces a visible checkout or a broad "sync everything from home" mode.
 
 An open question: some config files may end up with sections that shouldn't be checked in (e.g. secrets injected by an application). We don't have a strategy for this yet. Hopefully it doesn't come up, but if it does we'll need something — possibly `.gitignore` patterns for sections, or splitting the file.
 
-### Drift detection and sync state
+### Local changes and the mark
 
-dotsync tracks a minimal machine-local sync state file recording which machine scope was last synced and at which commit. This enables two things:
+Home is jj's working copy, through dotsync's own `WorkingCopy` implementation over the managed paths. Each run snapshots home into a working-copy commit whose parent is the mark, so the two per-machine facts live in jj's own view: which scope is this machine's (the workspace name) and which commit home last materialized (the working-copy commit's parent). There is no dotsync-owned state file, and the two facts move atomically with the history they describe. This enables two things:
 
-1. **Deletion semantics** — when a file is removed from the repo, dotsync can detect that it was previously synced to home and should be removed. Without state, dotsync couldn't distinguish "this file was never managed" from "this file was managed and was removed."
+1. **Deletion semantics** — when a file is removed from the repo, dotsync can see it was previously materialized into home (it is in the mark's tree) and should be removed. Without the mark, dotsync couldn't distinguish "this file was never managed" from "this file was managed and was removed."
 
-2. **Drift attribution** — comparing home state against the last-synced revision rather than repo HEAD distinguishes "repo advanced elsewhere" from "home drifted locally." A plain sync can then accept legitimate remote updates without treating them as local drift, while still stopping before overwriting files that changed in home since the last sync.
+2. **Attribution** — comparing home against the mark rather than against the repo's tip distinguishes "repo advanced elsewhere" from "home changed locally." A plain sync then accepts legitimate remote updates without treating them as local changes, and carries local changes forward without publishing them.
 
-The three-way comparison (last-synced tree `L`, home `H`, new tip `T`) classifies every file situation without special cases. Presence and equality across the three sides is the whole domain, so every situation lands in exactly one class:
+A sync is one three-way merge — `merge(home, mark, tip)` — computed in memory and materialized only if it resolves, and only whole. The classification `status`, `diff`, `commit` and the sync all read is the per-path view of that same merge (last-synced tree `L`, home `H`, new tip `T`); equality compares kind as well as content — the executable bit and symlink-versus-file are differences, per "A managed path has a kind" above. Presence and equality across the three sides is the whole domain, so every situation lands in exactly one class:
 
 | Class | `L` / `H` / `T` | Behavior |
 | --- | --- | --- |
 | in sync | all three identical | nothing to do |
-| incoming add | absent / absent / present | not drift — sync writes it |
-| incoming update ("stale, not yours") | present / equal to `L` / changed | not drift — sync writes it; **`commit` refuses it** |
-| incoming delete | present / equal to `L` / absent | not drift — sync removes it from home |
-| edit drift | present / changed / equal to `L` | blocks; commit records it |
-| edit drift, removed from the repo | present / changed / absent | blocks; commit records it |
-| deletion drift | present / absent / equal to `L` | blocks; commit records the deletion |
-| deletion drift, tip also changed | present / absent / changed | blocks; commit records the deletion |
-| diverged edit | present / changed / changed differently | blocks sync; commit merges the two, pausing on conflict |
-| already applied | present / changed / changed to the same bytes | not drift — this run's own commit, or a crashed run's writes |
-| untracked collision | absent / present / present, differing | blocks — home holds content dotsync has never seen |
+| incoming add | absent / absent / present | not a local change — sync writes it |
+| incoming update ("stale, not yours") | present / equal to `L` / changed | not a local change — sync writes it; **`commit` refuses it** |
+| incoming delete | present / equal to `L` / absent | not a local change — sync removes it from home |
+| edit | present / changed / equal to `L` | a local change: reported, carried by sync, recorded by commit |
+| edit, removed from the repo | present / changed / absent | same |
+| deletion | present / absent / equal to `L` | a local change; sync does not put the file back; commit records the deletion |
+| deletion, tip also changed | present / absent / changed | a delete/modify conflict — sync stops whole and presents it |
+| diverged edit, combining | present / changed / changed differently, merging cleanly | both true at once: an incoming change sync merges in, and a local change that stays reported |
+| diverged edit, colliding | present / changed / changed differently, conflicting | sync stops whole and presents base and both sides |
+| already applied | present / changed / changed to the same bytes | nothing to do — this run's own commit, or a crashed run's writes |
+| untracked collision | absent / present / present, differing and conflicting | sync stops whole — home holds content dotsync has never seen |
 | untracked | absent / present / absent | not managed; only `commit` cares |
 | converged deletion | present / absent / absent | nothing to do |
 
+Whether a diverged edit combines or collides is jj's merge's answer — the same merge the sync materializes — never a second computation's. One engine answers "is this a conflict?" for the classification, the presentation and the write, so `status` cannot call a file conflicted that a plain sync then merges without complaint.
+
 The row that carries the most weight is **incoming update**: home holds exactly what was last synced, and the tip has moved on. A two-sided comparison of home against the tip cannot tell it apart from a local edit, so `status` reports it as a change and a `commit` naming that path re-records the older bytes and cascades them — silently reverting whoever published the change. Naming the class is what makes that unrepresentable: `status` files it under incoming rather than changed, and `commit` refuses it, pointing at plain `dotsync`.
 
-Deleting a managed file from home is drift like any other: it shows in `status` and `diff`, blocks sync, and is recorded to a scope with `dotsync commit <scope> -- <path>`. Files added on other machines flow in frictionlessly because they were never in this machine's last-synced tree.
+When a sync stops on a conflict it touches nothing: home is one coherent derivation of the mark, and a home written partly from the mark and partly from the tip would make any single answer to "what did this machine last sync?" a lie. The stop presents the base and both sides in dotsync's own output (never as markers in the live file), and the way out is to write the resolved content into the file at its real path and run `dotsync continue` — or `dotsync --force` to take the repo's side. Nothing about the stop is stored; a rerun recomputes the same merge from the same three trees.
 
-When there is no usable sync state — a fresh machine, a deleted state file, or one naming a revision this repo does not have — the last-synced side is empty rather than assumed. Dotsync then removes nothing from home and reads no missing file as a deletion, because it has no record of putting anything there; what it can still judge from home and the tip alone, it still judges.
+On a machine with no working-copy record yet — a fresh `init`, or the first run after upgrading from a release that kept a state file — the working-copy commit is created as an empty-diff child of the machine scope's bookmark, and whatever home actually holds surfaces as ordinary local changes on the first snapshot. Nothing is removed from home and no missing file is read as a deletion, because there is no record of having put anything there.
 
-**`--force` has two shapes, because the commands asking it do not all have something to scope the answer to.** Plain `dotsync` and `continue` name no paths, so their `--force` is blanket: overwrite every drifted file. `commit` names paths, and its `--force` rides that same list — it overrides the refusal for exactly those paths, takes home's side for them, and leaves every other drifted file alone. `dotsync commit linux -m msg --force -- .bashrc` overwrites `.bashrc` and nothing else; `dotsync --force` overwrites everything. Paths recorded on that authority are reported as `forced_overwrites`. `init` and `abort` refuse the flag: neither ever makes the choice, because `init` has nothing of yours to overwrite and `abort` exists to discard home edits.
-
-The sync state file path is configured in `config.toml` under `[sync] state_path` and lives in the home directory (not the repo). It is never synced as a managed dotfile.
-
-An earlier design rejected state tracking as unnecessary complexity. That was wrong — deletion semantics require it. The cost is one small JSON file per machine; the benefit is correct file removal and a path toward smarter drift handling.
+**`--force` has two shapes, because the commands asking it do not all have something to scope the answer to.** Plain `dotsync` and `continue` name no paths, so their `--force` is blanket: materialize the repo's side whole, dropping every local change. `commit` names paths, and its `--force` rides that same list — it overrides the refusal for exactly those paths, takes home's side for them, and leaves every other local change alone. `dotsync commit linux -m msg --force -- .bashrc` overwrites `.bashrc` and nothing else; `dotsync --force` overwrites everything. Paths recorded on that authority are reported as `forced_overwrites`. `init` and `abort` refuse the flag: neither ever makes the choice, because `init` has nothing of yours to overwrite and `abort` exists to discard home edits.
 
 ## The jj decision
 
@@ -257,7 +256,7 @@ Every state a machine can be in — mid-crash, post-failed-push, freshly offline
 
 **Pull first, always.** Every mutating command opens with fetch + convergence, so remote changes are integrated _before_ new work builds on top of them — never discovered mid-flow after edits and merges are already in progress. Commit is then: converge, add the new commit, converge again (to cascade it), push.
 
-**Push is a loop, not a step.** A rejected push isn't an error; it means another machine pushed first. Fetch, converge, push again. Push happens immediately after history is created — before the home sync — so a sync-side stop (like drift) never strands committed history unpushed.
+**Push is a loop, not a step.** A rejected push isn't an error; it means another machine pushed first. Fetch, converge, push again. Push happens immediately after history is created — before the home sync — so a sync-side stop (a conflict with home) never strands committed history unpushed.
 
 **Read-only commands never mutate.** `status`, `diff`, and `view` don't move bookmarks, create commits, or touch home. They fetch (when online) and _report_ what convergence would do — including "pulling would conflict on these files in scope X" — computed as in-memory merges via jj-lib. Only `dotsync` (sync), `commit`, and `continue` actually converge.
 
@@ -273,7 +272,7 @@ jj's defining feature is that conflicts are first-class objects inside commits: 
 
 An earlier design stored pause intent in a machine-local state file (merge parent ids, remaining cascade steps, pre-pause heads) and refused to create conflicted history. That was a holdover from the working-copy era and created a class of dead ends: the file was written outside the repo transaction (crash = half-cascaded bookmarks with no record), it was invisible (no command displayed it), and it was the only copy of the intent. With conflicts in history, every piece of that state is derivable: the conflicted scope and files from the head trees, the merge parents and description from the conflicted commit itself, and nothing else is needed because there are no "remaining steps" — the cascade already completed around the conflict.
 
-**Principle: keep exactly the minimum required state.** The only machine-local state is the sync state file — machine scope and last-synced revision — because those are per-machine facts that shared history cannot contain. Anything derivable from the repo must be derived, never cached in a side file. Derived state is automatically correct after a crash; stored state is a fresh opportunity to be wrong.
+**Principle: keep exactly the minimum required state.** The only machine-local state is jj's own working-copy record — the view's working-copy commit entry (the machine scope and the mark, per-machine facts that shared history cannot contain) and the working copy's freshness record beside the repo. Anything derivable from the repo must be derived, never cached in a side file. Derived state is automatically correct after a crash; stored state is a fresh opportunity to be wrong.
 
 ### The resolution surface
 
@@ -315,13 +314,13 @@ The steady-state command is `dotsync`, and it is the one an agent runs by reflex
 
 **`dotsync`** (no arguments): Pull and converge scope branches (merging remote changes and cascading, pausing on conflicts), sync repo -> system, push. It does not import home edits; use `dotsync status` and `dotsync commit <scope> -m "message" -- <paths...>` when home changes should be recorded.
 
-**`dotsync commit <scope> -m "message" <path>...`**: Commit the selected home-relative file/directory paths to the named scope branch, merge cascade through all descendant scopes, sync repo -> system, push to remote. It refuses a named path whose home content is not a change made on this machine — see the drift classification above. **The scope must be one this machine belongs to** — its own machine scope or an ancestor of it. Committing to a scope this machine does not descend from is refused (Max, 2026-08-13): home only ever moves forward, and the config it holds is supposed to stay valid, so there is no version of another machine's branch that this machine can claim to have started from. To contribute to a machine family you are not on, put the shared material and the pattern for it on the common ancestor, and leave it to an agent running on that family to add its own drop-ins on its own scope. Note this is only about _choosing_ a commit target: a cascade from a shared ancestor still merges into descendant scopes this machine is not on, so conflicts outside this machine's ancestry remain a normal event — see "Conflict resolution in home".
+**`dotsync commit <scope> -m "message" <path>...`**: Commit the selected home-relative file/directory paths to the named scope branch, merge cascade through all descendant scopes, sync repo -> system, push to remote. It refuses a named path whose home content is not a change made on this machine — see the classification above. **The scope must be one this machine belongs to** — its own machine scope or an ancestor of it. Committing to a scope this machine does not descend from is refused (Max, 2026-08-13): home only ever moves forward, and the config it holds is supposed to stay valid, so there is no version of another machine's branch that this machine can claim to have started from. To contribute to a machine family you are not on, put the shared material and the pattern for it on the common ancestor, and leave it to an agent running on that family to add its own drop-ins on its own scope. Note this is only about _choosing_ a commit target: a cascade from a shared ancestor still merges into descendant scopes this machine is not on, so conflicts outside this machine's ancestry remain a normal event — see "Conflict resolution in home".
 
 **`dotsync commit <scope> -m "message"`** (no paths): Commit every managed file this machine has changed, which is exactly the set `dotsync status` lists as changes. It does not scan all of home for unrelated new files; new paths are intentionally opted into with explicit path arguments.
 
 **`dotsync status`**: List managed files this machine has changed, and separately the files another machine changed that home has not caught up to. Says so when a cascade is paused, because that machine can commit nothing until it is resolved. Read-only, and exits 0 either way.
 
-**`dotsync diff`**: Show line-oriented diffs for managed home files that have drifted. Read-only, and exits 1 when drift is present so scripts and agents can distinguish clean from dirty state. A file the repo has moved on from while home stayed put is not drift, so a machine that is merely behind exits 0 — the same answer `status` and plain `dotsync` give.
+**`dotsync diff`**: Show line-oriented diffs for managed home files with local changes. Read-only, and exits 1 when local changes are present so scripts and agents can distinguish clean from dirty state. A file the repo has moved on from while home stayed put is not a local change, so a machine that is merely behind exits 0 — the same answer `status` and plain `dotsync` give.
 
 **`dotsync view`**: Show a read-only overview of checked-in scope and file state. With `--scope <scope>`, show the managed file tree visible on that scope. With `--file <path>`, show the scopes where that file exists. With both `--scope <scope>` and `--file <path>`, print that file as it exists on that scope.
 
@@ -342,7 +341,7 @@ The steady-state command is `dotsync`, and it is the one an agent runs by reflex
 
 3 is a property of the state, not of the command that met it: the run that creates a pause, a `commit` that runs into one, and a `continue` that finds nothing resolved all exit 3, because they all have the same remedy. Only `diff` ever exits non-zero without having stopped, and it does so because a script needs to tell clean from dirty without parsing.
 
-Syncing and commit forms diff system files against the repo before syncing. If any system file has drifted from what the repo expects, dotsync stops, shows the diff, and warns. `--force` still shows the diffs but proceeds anyway — so you always see what's being overwritten, even if you've chosen not to stop for it. On `commit`, `--force` covers only the paths that commit named; see the drift section above.
+Syncing carries local changes across and stops only when one collides with an incoming change; the stop presents the base and both sides. `--force` takes the repo's side instead, and reports every local change it discarded — so you always see what was overwritten, even having chosen not to stop for it. On `commit`, `--force` covers only the paths that commit named; see "Local changes and the mark" above.
 
 ### Why one command?
 
