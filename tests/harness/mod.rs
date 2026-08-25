@@ -1194,6 +1194,28 @@ pub fn seed_shared_apprc(machine_a: &MachineEnvironment, machine_b: &MachineEnvi
     );
 }
 
+/// Rewinds a machine's repo to what the sync-state.json-era releases left
+/// behind: no working-copy commit in the view and no working-copy state on
+/// disk. Bookmarks, history and home all stay — which is exactly the state an
+/// upgrading machine is in when the new binary runs for the first time.
+pub fn strip_new_model_working_copy(machine: &MachineEnvironment, machine_scope: &str) {
+    let repo = load_repo_direct(&machine.repo_dir);
+    block_on(async {
+        let mut tx = repo.start_transaction();
+        tx.repo_mut()
+            .remove_wc_commit(jj_lib::ref_name::WorkspaceNameBuf::from(machine_scope).as_ref())
+            .await
+            .expect("remove the working-copy commit");
+        tx.commit("test: rewind to the previous release's repo state")
+            .await
+            .expect("commit the rewind");
+    });
+    let state = machine.repo_dir.join(".jj/working_copy/dotsync-home.json");
+    if state.exists() {
+        std::fs::remove_file(&state).expect("delete the working-copy state");
+    }
+}
+
 /// The dotsync invocations a message quotes in backticks, skipping the ones
 /// holding a `<placeholder>` for the reader to fill in.
 pub fn quoted_dotsync_invocations(text: &str) -> Vec<String> {

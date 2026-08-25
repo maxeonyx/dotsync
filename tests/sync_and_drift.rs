@@ -584,6 +584,73 @@ fn an_upgraded_machine_sheds_sync_state_json_and_keeps_working() {
     );
 }
 
+/// An upgrading machine is not freshly synced: real machines carry local
+/// edits, and the first run of the new binary meets them before any
+/// working-copy record exists. Found the hard way — the first machine in the
+/// live fleet to upgrade had eight local changes and every command exited 1
+/// with "the working copy's operation has no working copy".
+#[test]
+fn an_upgraded_machine_with_local_changes_keeps_them_and_keeps_working() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+    seed_shared_apprc(&machine_a, &machine_b);
+    let shed = ensure_the_previous_releases_sync_state(&machine_b);
+
+    // The local edit the old release never recorded, and an incoming change
+    // waiting on the remote.
+    machine_b.write_file(".apprc", "ui_theme = darker\nfont = mono\n");
+    machine_a.write_file(".newrc", "fresh = true\n");
+    machine_a.run_ok("dotsync commit all -m 'seed newrc' -- .newrc");
+
+    // Rewind the repo to what the old release left: no working-copy commit,
+    // no working-copy state. This is the state the whole fleet upgrades from.
+    strip_new_model_working_copy(&machine_b, "goof-b");
+
+    let status = machine_b.run("dotsync status");
+    assert_eq!(
+        status.status.code(),
+        Some(0),
+        "the first thing anyone runs on an upgraded machine is status\n{}",
+        render_output(&status)
+    );
+
+    let upgrade_run = machine_b.run("dotsync");
+    assert_eq!(
+        upgrade_run.status.code(),
+        Some(0),
+        "an ordinary sync, carrying the local edit\n{}",
+        render_output(&upgrade_run)
+    );
+    assert_eq!(
+        machine_b.read_file(".apprc"),
+        "ui_theme = darker\nfont = mono\n",
+        "the local edit survives the upgrade\n{}",
+        render_output(&upgrade_run)
+    );
+    assert_eq!(
+        machine_b.read_file(".newrc"),
+        "fresh = true\n",
+        "the change that was waiting has to arrive\n{}",
+        render_output(&upgrade_run)
+    );
+    assert!(
+        !shed.exists(),
+        "the old release's record is shed on upgrade regardless of local changes\n{}",
+        render_output(&upgrade_run)
+    );
+
+    let changes = parse_stdout_json(&machine_b.run_ok("dotsync status --output json"))["changes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        changes.len(),
+        1,
+        "the edit is still the machine's one local change: {changes:?}"
+    );
+    assert_eq!(changes[0]["path"], ".apprc", "{changes:?}");
+}
+
 /// The machine-local state file the release being upgraded from keeps, made
 /// sure to exist, and where to look for it afterwards.
 ///

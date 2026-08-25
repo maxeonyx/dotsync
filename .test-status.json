@@ -148,6 +148,7 @@
     "dotsync::sync_and_drift$an_edit_here_and_a_change_elsewhere_in_the_same_file_combine_instead_of_conflicting": "passing",
     "dotsync::sync_and_drift$an_untracked_home_file_is_not_overwritten_by_an_incoming_add": "passing",
     "dotsync::sync_and_drift$an_upgraded_machine_sheds_sync_state_json_and_keeps_working": "passing",
+    "dotsync::sync_and_drift$an_upgraded_machine_with_local_changes_keeps_them_and_keeps_working": "pending",
     "dotsync::sync_and_drift$deleting_a_managed_file_is_a_change_the_sync_carries_and_commit_records": "passing",
     "dotsync::sync_and_drift$every_command_that_only_syncs_names_the_machine_scope_once": "passing",
     "dotsync::sync_and_drift$sync_does_not_rewrite_files_that_already_match": "passing",
