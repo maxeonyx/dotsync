@@ -21,6 +21,62 @@ pub struct ErrorReport {
     /// Empty for every error raised before a run can overwrite anything, which
     /// is all of them except a commit that failed after writing its history.
     pub forced_overwrites: Vec<PathBuf>,
+    /// The files a stop could not merge, each with every version of it.
+    pub conflicts: Vec<ConflictedFile>,
+}
+
+/// One file a merge could not resolve, with every version of it.
+///
+/// Carried structured and whole because resolving a conflict needs all of it:
+/// the two sides *and* the version they both changed. An agent shown two sides
+/// cannot tell an addition from a deletion, or which side changed which line —
+/// Max, 2026-08-19: "Yes the base is supposed to be included."
+///
+/// The versions are not materialized into home. A config file full of
+/// `<<<<<<<` is broken config for exactly as long as the conflict takes to
+/// fix, so the application it configures breaks precisely while somebody is
+/// fixing it (PLAN §2.3 step 6, settled 2026-08-19). This is the object that
+/// carries them instead.
+#[derive(Debug, Clone)]
+pub struct ConflictedFile {
+    pub path: PathBuf,
+    /// Where the file stands across the three sides, so a conflicted file is
+    /// rendered with the same marker and the same reason `status` gives it.
+    pub state: FileState,
+    /// Base first, then the sides, in the order the merge holds them.
+    pub versions: Vec<ConflictedVersion>,
+}
+
+/// One version of a conflicted file: which part of the merge it is, what to
+/// call it, and what it holds.
+#[derive(Debug, Clone)]
+pub struct ConflictedVersion {
+    pub role: ConflictRole,
+    /// What this version is, in words — for a side of a sync conflict, the
+    /// scope it came from or the fact that it is home's own bytes. jj carries
+    /// these on the merge itself, so they are the labels the merge was built
+    /// with rather than a second naming of the same thing.
+    pub label: String,
+    /// `None` when this version does not hold the file at all, which is a
+    /// version of it: one side added the file, or one side deleted it.
+    pub contents: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictRole {
+    /// The version both sides changed.
+    Base,
+    /// A version that changed it.
+    Side,
+}
+
+impl ConflictRole {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Base => "base",
+            Self::Side => "side",
+        }
+    }
 }
 
 /// One path a commit named that dotsync will not record, and why. Kept
@@ -64,12 +120,6 @@ pub enum SkipReason {
     /// Home holds no change of this machine's own at the path; the state says
     /// which of the ways that happened.
     NotChangedHere(FileState),
-    /// The path is a symlink, or a link to a directory. Dotsync records the
-    /// content it finds at the path you name and every machine on the scope
-    /// writes that content back to that same path, and it has no answer yet
-    /// for what a link should mean under that rule — see the open question in
-    /// PLAN.md. Refused when named exactly, reported when merely matched.
-    Symlink { resolves_to: Option<PathBuf> },
     /// A socket, a device, a fifo: something with no file content to record.
     NotARegularFile,
 }
@@ -81,7 +131,6 @@ impl SkipReason {
     pub fn code(&self) -> &'static str {
         match self {
             Self::NotChangedHere(state) => state.code(),
-            Self::Symlink { .. } => "symlink",
             Self::NotARegularFile => "not_a_regular_file",
         }
     }
@@ -90,16 +139,6 @@ impl SkipReason {
     pub fn explain(&self) -> String {
         match self {
             Self::NotChangedHere(state) => state.reason().to_string(),
-            Self::Symlink {
-                resolves_to: Some(target),
-            } => format!(
-                "a symlink to {}, and dotsync records the content it finds at the path you name",
-                target.display()
-            ),
-            Self::Symlink { resolves_to: None } => {
-                "a symlink, and dotsync records the content it finds at the path you name"
-                    .to_string()
-            }
             Self::NotARegularFile => {
                 "not a regular file, so there is no content to record".to_string()
             }
@@ -123,9 +162,6 @@ impl RefusedCommitPath {
             FileState::IncomingNewCollidesWithUntrackedHome => format!(
                 "`{path}` has never been synced here, and the repo has just added a different file at the same path. Committing home's copy would discard the one that arrived."
             ),
-            FileState::NoSyncRecord => format!(
-                "`{path}` differs from the scope, and this machine has no sync record — so dotsync cannot tell whether you edited it here or another machine changed it. Committing home's copy would discard the other possibility."
-            ),
             other => format!("`{path}` is {}.", other.reason()),
         }
     }
@@ -135,17 +171,12 @@ impl RefusedCommitPath {
 pub enum CommitPathProblem {
     /// Your whole home directory, however it was named.
     HomeRoot,
-    /// The path is a symlink, or reaches its file through one.
-    Symlink {
-        resolves_to: PathBuf,
-    },
     Absolute,
     EscapesHome,
     /// Matched neither a file in home nor a file already on the target scope.
     Unmatched {
         home_path: PathBuf,
     },
-    SyncState,
     /// The scope graph, named for a scope other than `all`.
     ScopeGraphOutsideAllScope,
     DotsyncRepoRoot {
@@ -163,10 +194,6 @@ impl RejectedCommitPath {
             CommitPathProblem::HomeRoot => format!(
                 "`{path}` is your whole home directory. Dotsync would walk all of it and put every file it found on scope `{scope}` — ssh keys, credentials, browser profiles — and every machine sharing that scope would then have them written into its own home."
             ),
-            CommitPathProblem::Symlink { resolves_to } => format!(
-                "`{path}` is a symlink, or reaches its file through one: it resolves to {}. Dotsync records the content it finds at the path you name, and every machine on scope `{scope}` writes that content back to that same path — so a link is either somebody else's file being published under your path, or a later sync writing through the link to somewhere dotsync does not manage.",
-                resolves_to.display()
-            ),
             CommitPathProblem::Absolute => format!(
                 "`{path}` is an absolute path, and dotsync resolves every commit path against your home directory."
             ),
@@ -176,9 +203,6 @@ impl RejectedCommitPath {
             CommitPathProblem::Unmatched { home_path } => format!(
                 "`{path}` matched nothing: no file exists at or under {}, and scope `{scope}` tracks no file at or under `{path}`.",
                 home_path.display()
-            ),
-            CommitPathProblem::SyncState => format!(
-                "`{path}` is this machine's dotsync sync state; it records which machine scope this home uses, so it has to stay machine-local."
             ),
             CommitPathProblem::ScopeGraphOutsideAllScope => format!(
                 "`{path}` is the scope graph, and dotsync only reads it from `all`; a copy recorded on `{scope}` would configure nothing, and would still overwrite the real one in home on every machine using that scope."
@@ -198,9 +222,7 @@ impl RejectedCommitPath {
     pub fn is_dotsync_state(&self) -> bool {
         matches!(
             self.problem,
-            CommitPathProblem::SyncState
-                | CommitPathProblem::DotsyncRepoRoot { .. }
-                | CommitPathProblem::InsideDotsyncRepo { .. }
+            CommitPathProblem::DotsyncRepoRoot { .. } | CommitPathProblem::InsideDotsyncRepo { .. }
         )
     }
 
@@ -213,11 +235,6 @@ impl RejectedCommitPath {
     /// Read by the binary's renderer to say what to name instead of home.
     pub fn is_home_root(&self) -> bool {
         matches!(self.problem, CommitPathProblem::HomeRoot)
-    }
-
-    /// Read by the binary's renderer to explain what dotsync does with links.
-    pub fn is_symlink(&self) -> bool {
-        matches!(self.problem, CommitPathProblem::Symlink { .. })
     }
 }
 
@@ -298,12 +315,16 @@ pub enum DotsyncError {
     /// "bookmark" is a concept dotsync exists to keep out of the user's way.
     #[error("scope `{scope}` is configured, but this machine's repo has no history for it")]
     ScopeNotInRepo { scope: String },
-    #[error("sync state error at {path}: {message}")]
-    SyncState { path: PathBuf, message: String },
-    #[error("detected drift in {count} file(s)")]
-    DriftDetected {
-        count: usize,
-        drifts: Vec<FileDrift>,
+    /// Home and the scope changed the same file differently, so the merge a
+    /// sync is could not resolve. The sync stops whole and home is not
+    /// touched: home is derived from one commit, so a home built partly from
+    /// the old head and partly from the new one makes that single parent a
+    /// lie, and an unapplied incoming change then reads as a local edit
+    /// undoing it (`spike.ignore/README.md`, rule 3).
+    #[error("{} home file(s) conflict with what scope `{scope}` holds", files.len())]
+    SyncConflict {
+        scope: String,
+        files: Vec<ConflictedFile>,
     },
     #[error("cascade paused at scope `{scope}` with conflicts in {conflicted_files}")]
     CascadePaused {
@@ -380,8 +401,7 @@ impl DotsyncError {
             | DotsyncError::ScopeDiverged { .. }
             | DotsyncError::ScopeNotInRepo { .. }
             | DotsyncError::FileNotOnScope { .. }
-            | DotsyncError::SyncState { .. }
-            | DotsyncError::DriftDetected { .. }
+            | DotsyncError::SyncConflict { .. }
             | DotsyncError::NoPausedCascade
             | DotsyncError::RepoAlreadyExists { .. }
             | DotsyncError::NotInitialized { .. }
@@ -397,15 +417,13 @@ impl DotsyncError {
 
     pub fn to_error_report(&self) -> ErrorReport {
         match self {
-            DotsyncError::DriftDetected { drifts, .. } => ErrorReport {
-                code: "drift_detected",
+            DotsyncError::SyncConflict { files, .. } => ErrorReport {
+                code: "sync_conflict",
                 message: self.to_string(),
-                drifts: drifts.clone(),
-                current_state: vec![
-                    "managed files in home differ from the repo version for this machine scope"
-                        .to_string(),
-                ],
+                drifts: Vec::new(),
+                current_state: error_current_state(self),
                 forced_overwrites: Vec::new(),
+                conflicts: files.clone(),
             },
             DotsyncError::InvalidScope { .. } => basic_error_report("invalid_scope", self),
             DotsyncError::ScopeDiverged { .. } => basic_error_report("scope_diverged", self),
@@ -416,7 +434,6 @@ impl DotsyncError {
             DotsyncError::ScopeCycle { .. } => basic_error_report("scope_cycle", self),
             DotsyncError::ConfigParse { .. } => basic_error_report("config_parse", self),
             DotsyncError::ConfigEdit { .. } => basic_error_report("config_edit", self),
-            DotsyncError::SyncState { .. } => basic_error_report("sync_state", self),
             DotsyncError::CascadePaused { .. } => basic_error_report("cascade_paused", self),
             DotsyncError::PausedCascadeInProgress { .. } => {
                 basic_error_report("paused_cascade_in_progress", self)
@@ -434,6 +451,7 @@ impl DotsyncError {
                 drifts: Vec::new(),
                 current_state: error_current_state(self),
                 forced_overwrites: Vec::new(),
+                conflicts: Vec::new(),
             },
             DotsyncError::MissingHostname => basic_error_report("missing_hostname", self),
             DotsyncError::RemoteUnreachable { .. } => {
@@ -476,6 +494,7 @@ pub(crate) fn basic_error_report(code: &'static str, error: &DotsyncError) -> Er
         drifts: Vec::new(),
         current_state: error_current_state(error),
         forced_overwrites: Vec::new(),
+        conflicts: Vec::new(),
     }
 }
 
@@ -492,9 +511,6 @@ fn one_or_many(count: usize, one: &str, many: &str) -> String {
 pub(crate) fn error_current_state(error: &DotsyncError) -> Vec<String> {
     match error {
         DotsyncError::InvalidScope { scope } => vec![format!("requested scope: {scope}")],
-        DotsyncError::SyncState { path, .. } => {
-            vec![format!("sync state path: {}", path.display())]
-        }
         DotsyncError::ScopeDiverged {
             scope,
             local_target,
@@ -522,6 +538,18 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Vec<String> {
                 .join(", ")
         )],
         DotsyncError::PausedCascadeInProgress { scope } => vec![format!("paused scope: {scope}")],
+        // One entry per file, because one file is one thing to resolve. Every
+        // version of it is printed in full below the teaching block and
+        // carried in the payload; this is the list of decisions to make.
+        DotsyncError::SyncConflict { scope, files } => files
+            .iter()
+            .map(|file| {
+                format!(
+                    "`{}` was changed in home and on `{scope}` since this machine last synced it",
+                    file.path.display()
+                )
+            })
+            .collect(),
         DotsyncError::NotInitialized { path } => vec![format!(
             "expected repo path: {}; standard location: ~/.local/share/dotsync/repo",
             path.display()
@@ -539,7 +567,6 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Vec<String> {
         | DotsyncError::NoCurrentScope
         | DotsyncError::ScopeNotInRepo { .. }
         | DotsyncError::FileNotOnScope { .. }
-        | DotsyncError::DriftDetected { .. }
         | DotsyncError::RepoAlreadyExists { .. }
         | DotsyncError::MissingHostname
         | DotsyncError::RemoteUnreachable { .. }

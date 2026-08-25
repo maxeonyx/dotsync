@@ -1,5 +1,6 @@
-// Paths that are not ordinary regular files: symlinks on a scope, in home and
-// in a selection, and the kinds nothing may read through.
+// What a managed path *is* rather than what it holds: symlinks on a scope, in
+// home and in a selection, the kinds nothing may read through, and the
+// executable bit.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -58,46 +59,14 @@ fn a_named_path_that_is_not_a_regular_file_is_refused_rather_than_read() {
     );
 }
 
-/// The home-root refusal is a check on the path you typed, and a symlink is a
-/// way of typing a different path. `selflink -> $HOME` walks all of home under
-/// an aliased prefix, which also slips past the repo-root and sync-state
-/// guards, because those are prefix tests on the path as written.
+/// Dotsync records what it finds at the path you name, so a link is an entry
+/// whose content is its target — but a path that reaches its file *through* a
+/// link is a different claim: what dotsync would read is not what was named,
+/// and every machine on the scope would write those bytes at a path where it
+/// has no such link. Refused in one place, `working_copy::home_disk_path`, so
+/// no route into home can forget it.
 #[test]
-fn a_symlink_pointing_at_home_cannot_be_used_to_sweep_it() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    machine.write_file(".ssh/id_ed25519", "PRIVATE KEY\n");
-    machine.write_file(".netrc", "machine example.com login me password hunter2\n");
-    symlink_at(&machine.home_dir, &machine.home_dir.join("selflink"));
-
-    let output = machine.run("dotsync commit all -m 'sweep' -- selflink/");
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "a symlink to home must not be a way to commit all of home\n{}",
-        render_output(&output)
-    );
-
-    let tracked = machine.run_ok("dotsync view --scope all");
-    let tracked = String::from_utf8_lossy(&tracked.stdout).into_owned();
-    for forbidden in ["selflink", "id_ed25519", ".netrc", ".jj", "sync-state"] {
-        assert!(
-            !tracked.contains(forbidden),
-            "`{forbidden}` must never reach a scope\n{tracked}"
-        );
-    }
-}
-
-/// Dotsync records the content at the path you name, and every machine on the
-/// scope writes that content back to the same path. A symlink names something
-/// else — which may live outside home entirely — so until dotsync has an
-/// answer for what that should mean, naming one is refused rather than
-/// guessed at. See PLAN.md §1.5.
-#[test]
-fn a_symlinked_selection_path_is_refused_whether_it_is_a_file_or_a_directory() {
+fn a_path_that_reaches_its_file_through_a_symlink_is_refused() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
@@ -110,103 +79,38 @@ fn a_symlinked_selection_path_is_refused_whether_it_is_a_file_or_a_directory() {
         .expect("home has a parent")
         .join("elsewhere");
     write_file_at(&outside.join("nvim/init.lua"), "vim.opt.number = true\n");
-    write_file_at(&outside.join("vimrc"), "set number\n");
     symlink_at(
         &outside.join("nvim"),
         &machine.home_dir.join(".config/nvim"),
     );
-    symlink_at(&outside.join("vimrc"), &machine.home_dir.join(".vimrc"));
 
-    for selection in [".config/nvim/", ".vimrc"] {
-        let output = machine.run(&format!("dotsync commit all -m 'link' -- {selection}"));
-        assert_eq!(
-            output.status.code(),
-            Some(1),
-            "`{selection}` is a symlink and must be refused\n{}",
-            render_output(&output)
-        );
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        assert!(
-            stderr.contains("symlink"),
-            "the refusal must say what it found\n{stderr}"
-        );
-    }
-
-    // A path that reaches a real file through a symlinked parent is the same
-    // claim wearing a different hat.
     let through = machine.run("dotsync commit all -m 'link' -- .config/nvim/init.lua");
     assert_eq!(
         through.status.code(),
         Some(1),
-        "a path that resolves through a symlink must be refused too\n{}",
+        "a path that resolves through a symlink must be refused\n{}",
         render_output(&through)
     );
+    assert!(
+        String::from_utf8_lossy(&through.stderr).contains("symlink"),
+        "and the refusal has to say what it found\n{}",
+        render_output(&through)
+    );
+    assert!(
+        !bookmark_has_file(&machine, "all", ".config/nvim/init.lua"),
+        "so nothing reached the scope through the link"
+    );
 
-    // Real files next to them are unaffected.
+    // The link itself is a file dotsync can record, and so is a real file
+    // beside it.
+    machine.run_ok("dotsync commit all -m 'the link itself' -- .config/nvim");
+    assert_eq!(
+        remote_branch_entry_mode(&machine, "all", ".config/nvim").as_deref(),
+        Some("120000"),
+        "naming the link records the link"
+    );
     machine.write_file(".bashrc", "export DOTSYNC=1\n");
     machine.run_ok("dotsync commit all -m 'real file' -- .bashrc");
-}
-
-/// A named directory that holds a symlink used to record everything else and
-/// say nothing about the link, so an agent reading `newly_tracked` would
-/// believe the whole directory reached the scope.
-#[test]
-fn a_symlink_under_a_named_directory_is_reported_rather_than_silently_skipped() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    let outside = harness.root_dir.join("outside/nvim-init.lua");
-    write_file_at(&outside, "vim.o.number = true\n");
-    machine.write_file(".config/app/settings.conf", "theme = dark\n");
-    symlink_at(&outside, &machine.home_dir.join(".config/app/linked.lua"));
-
-    let commit = machine.run_expecting(
-        "dotsync --output json commit all -m 'app config' -- .config/app/",
-        0,
-    );
-
-    let json = parse_stdout_json(&commit);
-    let skipped = json["skipped_paths"].as_array().unwrap_or_else(|| {
-        panic!(
-            "skipped_paths should be an array\n{}",
-            render_output(&commit)
-        )
-    });
-    let linked = skipped
-        .iter()
-        .find(|entry| entry["path"] == ".config/app/linked.lua")
-        .unwrap_or_else(|| {
-            panic!(
-                "a symlink the directory matched must be reported, not dropped\n{}",
-                render_output(&commit)
-            )
-        });
-    assert_eq!(linked["state"], "symlink");
-    assert!(
-        linked["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("symlink")),
-        "the reason has to say what dotsync would have had to do with it\n{}",
-        render_output(&commit)
-    );
-
-    let stderr = String::from_utf8_lossy(&commit.stderr).into_owned();
-    assert!(
-        stderr.contains(".config/app/linked.lua"),
-        "and a human reader has to be told too\n{stderr}"
-    );
-
-    assert_eq!(
-        remote_branch_file_contents(&machine, "all", ".config/app/settings.conf"),
-        "theme = dark\n",
-        "the real file under the directory is still recorded"
-    );
-    assert!(
-        !bookmark_has_file(&machine, "all", ".config/app/linked.lua"),
-        "and the link itself is not"
-    );
 }
 
 /// Naming a symlink records it as a symlink, storing the target. Today it is
@@ -411,6 +315,74 @@ fn a_symlink_to_a_sibling_script_survives_the_round_trip_to_another_machine() {
         PathBuf::from("tool-1.2.0"),
         "pointing at its sibling, not carrying a second copy of it"
     );
+}
+
+/// `chmod +x` is the whole change: the bytes before and after are identical,
+/// and the only thing that moved is the mode. A scope records the mode
+/// (`100644` against `100755`), home carries it, and a script that arrives
+/// without it does not run — so this has to round-trip like any other edit.
+///
+/// It is invisible today because drift is decided by comparing the content of
+/// the three sides, and the content is the same on all three. The tree entries
+/// are not: `TreeValue::File` carries the bit.
+#[test]
+fn making_a_managed_file_executable_is_a_change_that_reaches_another_machine() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    machine_a.write_file(".local/bin/tool", "#!/bin/sh\necho tool\n");
+    machine_a.run_ok("dotsync commit all -m 'add tool' -- .local/bin/tool");
+    machine_b.run_ok("dotsync");
+    assert!(
+        !machine_b.is_executable(".local/bin/tool"),
+        "this test needs a file that starts out non-executable everywhere"
+    );
+
+    machine_a.make_executable(".local/bin/tool");
+
+    let status = machine_a.run_ok("dotsync status --output json");
+    let payload = parse_stdout_json(&status);
+    let changed: Vec<&str> = payload["changes"]
+        .as_array()
+        .expect("status answers with a changes array")
+        .iter()
+        .filter_map(|change| change["path"].as_str())
+        .collect();
+    assert_eq!(
+        changed,
+        [".local/bin/tool"],
+        "a chmod is a change of this machine's own, and only `status` can say so\n{}",
+        render_output(&status)
+    );
+
+    machine_a.run_ok("dotsync commit all -m 'make tool executable' -- .local/bin/tool");
+    assert_eq!(
+        remote_branch_entry_mode(&machine_a, "all", ".local/bin/tool").as_deref(),
+        Some("100755"),
+        "the scope has to record the mode, or there is nothing for the other machine to read"
+    );
+
+    machine_b.run_ok("dotsync");
+    assert!(
+        machine_b.is_executable(".local/bin/tool"),
+        "and the other machine's copy has to become runnable"
+    );
+    assert_eq!(
+        machine_b.read_file(".local/bin/tool"),
+        "#!/bin/sh\necho tool\n",
+        "with its contents untouched"
+    );
+
+    // Both machines agree again, so neither has anything left to decide.
+    for machine in [&machine_a, &machine_b] {
+        assert_eq!(
+            parse_stdout_json(&machine.run_ok("dotsync status --output json"))["changes"]
+                .as_array()
+                .map(Vec::len),
+            Some(0),
+            "a mode that has been recorded and synced is not still a change"
+        );
+    }
 }
 
 /// A difference in kind is a difference. Both fixtures below hold exactly the

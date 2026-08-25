@@ -1,6 +1,6 @@
-// Plain `dotsync`: the drift model that decides whether a home file may be
-// overwritten, the sync-state record that model reads from, and what a run
-// says about the files it wrote, skipped or stopped on.
+// Plain `dotsync`: the merge that brings home to this machine's scope, what it
+// carries across and what it discards, and what a run says about the files it
+// wrote, kept or stopped on.
 
 mod harness;
 use harness::*;
@@ -23,101 +23,16 @@ fn v03_plain_sync_ignores_unrelated_home_changes() {
     assert_eq!(machine.read_file("untracked-notes.txt"), "leave me alone\n");
 }
 
+/// A stop lists the files it stopped on, and used to list them as `- ` bullets
+/// printed straight after the `Correct flow:` bullets — so the files read as
+/// more instructions. They are also the same files `status` and `diff` report,
+/// and were rendered in a third shape.
+///
+/// The stop a sync can reach is the conflict: an edit dotsync can merge around
+/// is carried rather than stopped on, so the run that stops is the one where
+/// home and the scope changed the same file.
 #[test]
-fn drift_detected_human_error_stands_alone() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    seed_remote_scope_file(
-        &machine,
-        "mx-xps-cy",
-        ".gitconfig",
-        "[user]\nname = \"Repo\"\n",
-    );
-    machine.run_ok("dotsync");
-
-    machine.write_file(".gitconfig", "[user]\nname = \"Drifted\"\n");
-
-    let sync_output = machine.run_expecting("dotsync", 1);
-
-    assert_stderr_snapshot(
-        &sync_output,
-        r#"dotsync: drift detected
-
-What dotsync does:
-Dotsync keeps its hidden repo as the source of truth for your home-directory config: the repo is the source of truth, and dotsync syncs committed repo state into the live system.
-
-This flow:
-This sync flow compares managed files in your home directory against the repo version for this machine scope before copying anything.
-
-Expected:
-This flow expects managed files in your home directory to already match the repo, unless you intentionally choose to overwrite drift.
-
-Current state found:
-The files that differ are listed under `Changed files:` below, each with what it would be replaced by.
-
-Why dotsync stopped:
-Dotsync stopped before overwriting local drift so you can inspect what would be replaced.
-
-Correct flow:
-- If the repo is correct, rerun with `dotsync --force` to overwrite the drift after reviewing the diffs.
-- If the live file is the change you wanted, run `dotsync status`, then commit the intended path with `dotsync commit <scope> -m "message" -- <path>`.
-
-Changed files:
-  M .gitconfig (edited here since the last sync)
---- repo
-+++ system
-@@ -1,2 +1,2 @@
- [user]
--name = "Repo"
-+name = "Drifted"
-"#,
-    );
-}
-
-#[test]
-fn drift_detected_json_contract_stays_compatible() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    seed_remote_scope_file(
-        &machine,
-        "mx-xps-cy",
-        ".gitconfig",
-        "[user]\nname = \"Repo\"\n",
-    );
-    machine.run_ok("dotsync");
-
-    machine.write_file(".gitconfig", "[user]\nname = \"Drifted\"\n");
-
-    let sync_output = machine.run_expecting("dotsync --output json", 1);
-
-    let json = parse_stdout_json(&sync_output);
-    assert_eq!(json["status"], "error");
-    assert_eq!(json["error"], "drift_detected");
-    assert!(json["message"].as_str().is_some());
-    assert!(json["current_state"].is_array());
-
-    let drifts = json["drifts"]
-        .as_array()
-        .expect("drifts should be an array");
-    assert_eq!(drifts.len(), 1);
-    assert_eq!(drifts[0]["path"], ".gitconfig");
-    assert!(drifts[0]["state"].as_str().is_some());
-    assert!(drifts[0]["reason"].as_str().is_some());
-    assert!(drifts[0]["diff"].as_str().is_some());
-}
-
-/// The drift stop lists the files it stopped on, and used to list them as `- `
-/// bullets printed straight after the `Correct flow:` bullets — so the files
-/// read as more instructions. They are also the same files `status` and `diff`
-/// report, and were rendered in a third shape.
-#[test]
-fn the_drift_stop_lists_files_the_way_status_does_and_apart_from_its_instructions() {
+fn the_conflict_stop_lists_files_the_way_status_does_and_apart_from_its_instructions() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
@@ -125,6 +40,7 @@ fn the_drift_stop_lists_files_the_way_status_does_and_apart_from_its_instruction
     seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
     machine.run_ok("dotsync");
     machine.write_file(".bashrc", "export DOTSYNC=mine\n");
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=theirs\n");
 
     let stopped = machine.run_expecting("dotsync", 1);
     let stderr = String::from_utf8_lossy(&stopped.stderr).into_owned();
@@ -148,250 +64,9 @@ fn the_drift_stop_lists_files_the_way_status_does_and_apart_from_its_instruction
         "the file list must not be rendered as instruction bullets\n{stderr}"
     );
     assert!(
-        files.contains("Changed files:"),
+        files.contains("Conflicted files:"),
         "the file list needs a heading of its own so it is not read as more instructions\n{stderr}"
     );
-}
-
-#[test]
-fn missing_state_file_disables_deletion() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    seed_remote_scope_file(
-        &machine,
-        "mx-xps-cy",
-        ".gitconfig",
-        "[user]\nname = \"Max\"\n",
-    );
-    machine.run_ok("dotsync");
-    assert!(machine.file_exists(".gitconfig"));
-
-    machine.delete_sync_state();
-    remove_remote_scope_file(&machine, "mx-xps-cy", ".gitconfig");
-
-    machine.run_ok("dotsync");
-    assert!(
-        machine.file_exists(".gitconfig"),
-        "without sync state, dotsync should fail safe and leave the previously managed file in home"
-    );
-}
-
-#[test]
-fn invalid_state_file_returns_clear_error() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    machine.write_sync_state_raw("not valid json\n");
-
-    let sync_output = machine.run("dotsync");
-    assert!(
-        !sync_output.status.success(),
-        "sync should fail when the sync state file is corrupt\n{}",
-        render_output(&sync_output)
-    );
-    let expected = format!(
-        "\
-dotsync: invalid sync state
-
-What dotsync does:
-Dotsync keeps the repo as the source of truth and uses a local sync-state file to remember which machine scope was last synced here and which revision that sync used.
-
-This flow:
-This sync flow reads that local state to know which prior managed files may need removal and which machine scope should be treated as authoritative for this home.
-
-Expected:
-It expects that state file, if present, to be valid and readable; it expects that state file, if present, to be valid.
-
-Current state found:
-sync state error at {}: failed to parse sync state: expected ident at line 1 column 2
-
-Why dotsync stopped:
-Dotsync stopped because it cannot safely decide what prior sync state to trust.
-
-Correct flow:
-- fix or delete the bad sync-state file and rerun the command.
-- After that, let dotsync recreate valid sync state from a successful sync.
-",
-        machine.sync_state_path().display()
-    );
-    assert_stderr_snapshot(&sync_output, &expected);
-}
-
-#[test]
-fn invalid_sync_state_human_error_stands_alone() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    machine.write_sync_state_raw("not valid json\n");
-
-    let sync_output = machine.run_expecting("dotsync", 1);
-
-    let expected = format!(
-        "\
-dotsync: invalid sync state
-
-What dotsync does:
-Dotsync keeps the repo as the source of truth and uses a local sync-state file to remember which machine scope was last synced here and which revision that sync used.
-
-This flow:
-This sync flow reads that local state to know which prior managed files may need removal and which machine scope should be treated as authoritative for this home.
-
-Expected:
-It expects that state file, if present, to be valid and readable; it expects that state file, if present, to be valid.
-
-Current state found:
-sync state error at {}: failed to parse sync state: expected ident at line 1 column 2
-
-Why dotsync stopped:
-Dotsync stopped because it cannot safely decide what prior sync state to trust.
-
-Correct flow:
-- fix or delete the bad sync-state file and rerun the command.
-- After that, let dotsync recreate valid sync state from a successful sync.
-",
-        machine.sync_state_path().display()
-    );
-    assert_stderr_snapshot(&sync_output, &expected);
-}
-
-#[test]
-fn sync_uses_state_machine_scope_even_if_checkout_changes() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    seed_remote_scope_file(
-        &machine,
-        "mx-xps-cy",
-        ".config/machine-only.txt",
-        "machine config\n",
-    );
-    machine.run_ok("dotsync");
-    assert_eq!(
-        machine.read_file(".config/machine-only.txt"),
-        "machine config\n"
-    );
-
-    // Deleting a managed file from home is deletion drift, so this restore has
-    // to say it means to discard it. What the test is pinning is which machine
-    // scope the sync used, not whether the deletion blocked.
-    machine.delete_file(".config/machine-only.txt");
-    machine.write_sync_state_raw(&format!(
-        "{{\n  \"machine_scope\": \"mx-xps-cy\",\n  \"last_synced_revision\": \"{}\"\n}}\n",
-        bookmark_revision(&machine, "mx-xps-cy")
-    ));
-
-    machine.run_ok("dotsync --force");
-    assert_eq!(
-        machine.read_file(".config/machine-only.txt"),
-        "machine config\n",
-        "sync state machine scope should govern sync regardless of any unrelated repo metadata"
-    );
-}
-
-#[test]
-fn a_machine_that_lost_its_sync_state_still_syncs() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
-    machine.run_ok("dotsync");
-
-    machine.delete_sync_state();
-    machine.delete_file(".bashrc");
-
-    // Deleting a managed file from home is drift only when dotsync can show it
-    // put the file there. Without sync state it cannot, so this is an ordinary
-    // incoming file and the machine converges rather than needing `--force`.
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "a machine with no sync state must still be able to sync\n{}",
-        render_output(&sync_output)
-    );
-    assert_eq!(machine.read_file(".bashrc"), "export DOTSYNC=repo\n");
-}
-
-#[test]
-fn a_machine_with_no_sync_record_says_so_instead_of_guessing() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=v1\n");
-    machine.run_ok("dotsync");
-
-    // Home holds exactly what dotsync wrote there. Losing the state file does
-    // not change that — it only means dotsync can no longer prove it.
-    machine.delete_sync_state();
-    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=v2\n");
-
-    let sync_output = machine.run("dotsync");
-    assert_eq!(
-        sync_output.status.code(),
-        Some(1),
-        "without a record dotsync cannot tell an edit here from an incoming change, so it must stop\n{}",
-        render_output(&sync_output)
-    );
-
-    let stderr = String::from_utf8_lossy(&sync_output.stderr).into_owned();
-    assert!(
-        !stderr.contains("never synced here"),
-        "the file was synced here; the diagnosis must not claim otherwise\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("just added"),
-        "the repo changed this file rather than adding it\n{stderr}"
-    );
-    assert!(
-        stderr.contains("no sync record"),
-        "the diagnosis must name the actual problem: the record is gone\n{stderr}"
-    );
-
-    // Both ways out still work.
-    machine.run_ok("dotsync --force");
-    assert_eq!(machine.read_file(".bashrc"), "export DOTSYNC=v2\n");
-}
-
-#[test]
-fn a_sync_interrupted_before_saving_state_is_not_drift_on_the_next_run() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    seed_remote_scope_file(&machine, "mx-xps-cy", ".apprc", "version = 1\n");
-    machine.run_ok("dotsync");
-    let state_before = machine.read_sync_state_raw();
-
-    seed_remote_scope_file(&machine, "mx-xps-cy", ".apprc", "version = 2\n");
-    machine.run_ok("dotsync");
-    assert_eq!(machine.read_file(".apprc"), "version = 2\n");
-
-    // A run that dies between finishing the home writes and saving sync state
-    // leaves exactly this: home already holds the new bytes, and the state file
-    // still points at the revision before them. The rerun must converge, not
-    // report the bytes it just wrote as local drift.
-    machine.write_sync_state_raw(&state_before);
-
-    let sync_output = machine.run("dotsync");
-    assert!(
-        sync_output.status.success(),
-        "an interrupted sync must converge on rerun\n{}",
-        render_output(&sync_output)
-    );
-    assert_eq!(machine.read_file(".apprc"), "version = 2\n");
 }
 
 #[test]
@@ -443,8 +118,12 @@ fn an_untracked_home_file_is_not_overwritten_by_an_incoming_add() {
     assert_eq!(machine_a.read_file(".newfile"), "theirs\n");
 }
 
+/// Deleting a managed file from home is a local change like any other: `diff`
+/// shows what it would discard, an ordinary sync carries it rather than
+/// stopping on it or quietly putting the file back, `commit` records it, and
+/// `--force` is how you change your mind.
 #[test]
-fn deleting_a_managed_file_blocks_sync_and_is_committable() {
+fn deleting_a_managed_file_is_a_change_the_sync_carries_and_commit_records() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
@@ -459,7 +138,7 @@ fn deleting_a_managed_file_blocks_sync_and_is_committable() {
     assert_eq!(
         diff_output.status.code(),
         Some(1),
-        "a deleted managed file is drift, and `diff` must show it\n{}",
+        "a deleted managed file is a change, and `diff` must show it\n{}",
         render_output(&diff_output)
     );
     let diff_stderr = String::from_utf8_lossy(&diff_output.stderr).into_owned();
@@ -468,23 +147,37 @@ fn deleting_a_managed_file_blocks_sync_and_is_committable() {
         "`diff` must render what the deletion would discard\n{diff_stderr}"
     );
 
-    let sync_output = machine.run("dotsync");
-    assert_eq!(
-        sync_output.status.code(),
-        Some(1),
-        "deletion drift blocks sync like an edit\n{}",
-        render_output(&sync_output)
-    );
+    // Nothing in the repo collides with the deletion, so the sync has nothing
+    // to decide: it carries the deletion and says it is still a change.
+    let sync_output = machine.run_ok("dotsync");
     assert!(
         !machine.file_exists(".bashrc"),
-        "the blocked sync must not quietly restore the deleted file"
+        "a sync that had nothing to merge must not put the file back\n{}",
+        render_output(&sync_output)
+    );
+    assert_eq!(
+        parse_stdout_json(&machine.run_ok("dotsync status --output json"))["changes"]
+            .as_array()
+            .map(Vec::len),
+        Some(1),
+        "and the deletion is still this machine's to decide about"
     );
 
+    // Changing your mind: `--force` discards the deletion with every other
+    // local change.
+    machine.run_ok("dotsync --force");
+    assert_eq!(machine.read_file(".bashrc"), "export DOTSYNC=repo\n");
+
+    machine.delete_file(".bashrc");
     machine.run_ok("dotsync commit mx-xps-cy -m 'drop bashrc' -- .bashrc");
     assert!(!bookmark_has_file(&machine, "mx-xps-cy", ".bashrc"));
     assert!(!machine.file_exists(".bashrc"));
 
     machine.run_ok("dotsync");
+    assert_stderr_snapshot(
+        &machine.run_ok("dotsync status"),
+        "dotsync: no changes for mx-xps-cy\n",
+    );
 }
 
 #[test]
@@ -738,6 +431,100 @@ fn a_sync_applies_incoming_changes_while_carrying_an_unrelated_local_edit() {
     }
 }
 
+/// Two edits to one file that do not touch the same lines. One of them is an
+/// uncommitted edit sitting in this machine's home; the other has already been
+/// published from somewhere else. They combine, and a plain `dotsync` is what
+/// combines them — which is exactly what happens today.
+///
+/// What does not happen today is dotsync telling the truth about it beforehand.
+/// Drift classification decides "conflict" by comparing bytes, so home and the
+/// tip differing anywhere at all reads as a three-way conflict: `status` and
+/// `diff` call the file conflicted, and then plain `dotsync` merges it without
+/// complaint. Two answers to one question, from two different merge engines.
+///
+/// So the claim here is that the report and the sync agree: this is a local
+/// edit *plus* an incoming change, it is not a conflict, and the run that
+/// carries it leaves home holding both changes.
+#[test]
+fn an_edit_here_and_a_change_elsewhere_in_the_same_file_combine_instead_of_conflicting() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    let base: String = (1..=90).map(|line| format!("line {line}\n")).collect();
+    machine_a.write_file(".config/app.conf", &base);
+    machine_a.run_ok("dotsync commit all -m 'seed app.conf' -- .config/app.conf");
+    machine_b.run_ok("dotsync");
+    assert_eq!(machine_b.read_file(".config/app.conf"), base);
+
+    // B is mid-edit at the top of the file and has not committed it.
+    let edited_here = base.replace("line 1\n", "line 1 edited on b\n");
+    machine_b.write_file(".config/app.conf", &edited_here);
+
+    // A publishes a change at the bottom of the same file.
+    let edited_elsewhere = base.replace("line 90\n", "line 90 edited on a\n");
+    machine_a.write_file(".config/app.conf", &edited_elsewhere);
+    machine_a.run_ok("dotsync commit all -m 'a edits the bottom' -- .config/app.conf");
+
+    let status = machine_b.run_ok("dotsync status --output json");
+    let payload = parse_stdout_json(&status);
+    let change = payload["changes"]
+        .as_array()
+        .expect("status answers with a changes array")
+        .iter()
+        .find(|change| change["path"] == ".config/app.conf")
+        .unwrap_or_else(|| {
+            panic!(
+                "home holds an edit of this machine's own, so the file is a change\n{}",
+                render_output(&status)
+            )
+        });
+    assert_ne!(
+        change["state"], "conflicted",
+        "nothing here conflicts: the sync below merges these two edges without being asked anything\n{}",
+        render_output(&status)
+    );
+
+    let both = base
+        .replace("line 1\n", "line 1 edited on b\n")
+        .replace("line 90\n", "line 90 edited on a\n");
+    machine_b.run_ok("dotsync");
+    assert_eq!(
+        machine_b.read_file(".config/app.conf"),
+        both,
+        "the sync combines the two edits rather than choosing between them"
+    );
+
+    // Having merged, this is an ordinary uncommitted local edit and says so —
+    // both sides of the file are in home now, so there is only one change left
+    // at this path.
+    let after = machine_b.run_ok("dotsync status --output json");
+    let payload = parse_stdout_json(&after);
+    let change = payload["changes"]
+        .as_array()
+        .expect("status answers with a changes array")
+        .iter()
+        .find(|change| change["path"] == ".config/app.conf")
+        .unwrap_or_else(|| {
+            panic!(
+                "the edit is still uncommitted, so it is still a change\n{}",
+                render_output(&after)
+            )
+        });
+    assert_eq!(
+        change["state"],
+        "modified",
+        "nothing is arriving any more, so this is a plain local edit\n{}",
+        render_output(&after)
+    );
+
+    machine_b.run_ok("dotsync commit all -m 'b edits the top' -- .config/app.conf");
+    assert_eq!(
+        remote_branch_file_contents(&machine_b, "all", ".config/app.conf"),
+        both,
+        "and neither machine's change is lost on the way to the remote"
+    );
+}
+
 /// The live fleet migrates by upgrading the binary and running `dotsync`
 /// (PLAN §2.6, "The live fleet"), and every machine in it is carrying a
 /// `sync-state.json` written by the release before. That file holds exactly
@@ -805,23 +592,11 @@ fn an_upgraded_machine_sheds_sync_state_json_and_keeps_working() {
 /// under test still writes one — so a run that has stopped writing it gets the
 /// old release's file fabricated in the old release's format.
 ///
-/// The path is read out of `config.toml` when there is one, because that is
-/// where the current release configures it, and falls back to the location it
-/// puts there by default.
+/// The path is the one the previous release wrote it to.
 fn ensure_the_previous_releases_sync_state(machine: &MachineEnvironment) -> std::path::PathBuf {
     machine.run_ok("dotsync");
 
-    let configured = std::fs::read_to_string(machine.home_dir.join(".config/dotsync/config.toml"))
-        .ok()
-        .and_then(|config| {
-            config.lines().find_map(|line| {
-                line.strip_prefix("state_path = \"")
-                    .and_then(|rest| rest.strip_suffix('"'))
-                    .map(str::to_string)
-            })
-        })
-        .unwrap_or_else(|| String::from(".config/dotsync/sync-state.json"));
-    let path = machine.home_dir.join(configured);
+    let path = machine.home_dir.join(".config/dotsync/sync-state.json");
 
     if !path.exists() {
         let scope = machine_scope_reported_by(machine)

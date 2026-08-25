@@ -60,13 +60,15 @@ fn commit_modifies_existing_file_on_scope() {
     machine.init_ok();
 
     seed_remote_scope_file(&machine, "linux", ".bashrc", "export PATH=\"$PATH\"\n");
+    // Cascaded down to this machine, so home really holds the scope's version
+    // and the edit below is an edit *of it*. Without that the file would be one
+    // home has never synced and `linux` would hold a different one, which is a
+    // conflict rather than a modification.
+    merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
     machine.run_ok("dotsync");
+    assert_eq!(machine.read_file(".bashrc"), "export PATH=\"$PATH\"\n");
 
     machine.write_file(".bashrc", "export PATH=\"$HOME/bin:$PATH\"\n");
-    machine.write_sync_state_raw(&format!(
-        "{{\"machine_scope\":\"all\",\"last_synced_revision\":\"{}\"}}",
-        bookmark_revision(&machine, "all")
-    ));
 
     machine.run_ok("dotsync commit linux -m 'update bashrc' -- .bashrc");
 
@@ -366,4 +368,35 @@ fn multiple_machines_can_contribute_to_all_without_losing_changes() {
         read_bookmark_file_contents(&machine_a, "all", ".config/shared-b.conf"),
         "from machine b\n"
     );
+}
+
+/// History has to be able to say which machine made a change (PLAN §2.3 step 2;
+/// Max: "just an oversight from how we're using JJ I guess, but yeah a good one
+/// to fix"). Every commit dotsync writes on this machine's behalf carries the
+/// machine, and there are two kinds of them: the commit that records what you
+/// selected, and the cascade commits that carry it down to every scope below.
+/// A cascade commit with no author is the more misleading of the two — it is
+/// the one every *other* machine's scope ends up pointing at.
+#[test]
+fn history_says_which_machine_made_a_change() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    machine.init_ok();
+
+    machine.write_file(".apprc", "ui_theme = dark\n");
+    machine.run_ok("dotsync commit all -m 'add apprc' -- .apprc");
+
+    assert_eq!(
+        remote_branch_author(&machine, "all"),
+        "mx-xps-cy",
+        "the commit that recorded the change says which machine recorded it"
+    );
+    for cascaded in ["linux", "mx-xps-cy"] {
+        assert_eq!(
+            remote_branch_author(&machine, cascaded),
+            "mx-xps-cy",
+            "and so does the cascade commit that carried it down to `{cascaded}`"
+        );
+    }
 }

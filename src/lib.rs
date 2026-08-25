@@ -4,27 +4,33 @@ mod commit;
 mod config;
 mod drift;
 mod error;
+mod home;
 mod inspect;
 mod machine;
+mod pause;
 mod repo;
 mod scope_graph;
+mod selection;
 mod session;
 mod status;
 mod sync;
+mod working_copy;
 
 pub use crate::bootstrap::{init, InitReport};
 pub use crate::commit::{
-    abort_paused_cascade, commit_and_sync, continue_after_conflict, AbortReport, CommitFailure,
-    CommitOptions, CommitReport, ContinueReport, RecordedCommit,
+    commit_and_sync, CommitFailure, CommitOptions, CommitReport, RecordedCommit,
 };
 pub use crate::config::DotsyncPaths;
 pub use crate::drift::FileState;
 pub use crate::error::{
-    CommitPathProblem, DotsyncError, ErrorReport, RefusedCommitPath, RejectedCommitPath,
-    SkipReason, SkippedCommitPath,
+    CommitPathProblem, ConflictRole, ConflictedFile, ConflictedVersion, DotsyncError, ErrorReport,
+    RefusedCommitPath, RejectedCommitPath, SkipReason, SkippedCommitPath,
 };
 pub use crate::inspect::{diff_home, view, DiffReport, ScopeInfo, ViewAnswer, ViewReport};
+pub use crate::pause::{
+    abort_paused_cascade, continue_after_conflict, AbortReport, ContinueReport, Resumed,
+};
 pub use crate::repo::PushReport;
 pub use crate::session::{Run, UnreachableRemote};
 pub use crate::status::{status, FileChange, StatusReport};
-pub use crate::sync::{sync, FileDrift, ForceScope, SyncCommandReport, SyncReport};
+pub use crate::sync::{sync, FileDrift, SyncCommandReport, SyncReport};

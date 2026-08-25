@@ -109,8 +109,8 @@ fn a_machine_joining_keeps_the_comments_already_in_the_config() {
     machine_a.init_ok();
 
     let described = machine_a.read_file(".config/dotsync/config.toml").replace(
-        "[sync]",
-        "# hand-written: hyprland and fish config live on `linux`.\n[sync]",
+        "\nlinux = ",
+        "\n# hand-written: hyprland and fish config live on `linux`.\nlinux = ",
     );
     machine_a.write_file(".config/dotsync/config.toml", &described);
     machine_a.run_ok("dotsync commit all -m 'describe linux' -- .config/dotsync/config.toml");
@@ -223,7 +223,7 @@ fn status_before_init_json_matches_recovery_message() {
 
     let status_output = machine.run_expecting("dotsync --output json status", 1);
 
-    let expected = r#"{"current_state":["expected repo path: {repo}; standard location: ~/.local/share/dotsync/repo"],"drifts":[],"error":"not_initialized","forced_overwrites":[],"message":"Dotsync could not find its hidden repo at {repo}. Run `dotsync init <remote-url>` from this home directory first.","status":"error"}
+    let expected = r#"{"conflicts":[],"current_state":["expected repo path: {repo}; standard location: ~/.local/share/dotsync/repo"],"drifts":[],"error":"not_initialized","forced_overwrites":[],"message":"Dotsync could not find its hidden repo at {repo}. Run `dotsync init <remote-url>` from this home directory first.","status":"error"}
 "#
     .replace("{repo}", &machine.repo_dir.display().to_string());
     let stdout = String::from_utf8_lossy(&status_output.stdout);

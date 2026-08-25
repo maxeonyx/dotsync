@@ -1,7 +1,7 @@
 use crate::{HumanOutput, SuccessOutput, UsageError};
 use dotsync::{
-    DotsyncError, ErrorReport, FileChange, FileDrift, FileState, PushReport, SkipReason,
-    SkippedCommitPath, SyncReport, UnreachableRemote,
+    ConflictedFile, DotsyncError, ErrorReport, FileChange, FileDrift, FileState, PushReport,
+    SkipReason, SkippedCommitPath, SyncReport, UnreachableRemote,
 };
 use serde_json::json;
 use similar::TextDiff;
@@ -36,16 +36,46 @@ pub(crate) fn synced_output(
         "overwritten_files": display_paths(
             &sync.drifts.iter().map(|drift| drift.repo_path.clone()).collect::<Vec<_>>(),
         ),
+        // The opposite of `overwritten_files`: home content this run kept and
+        // merged around. Reported because the run succeeded *and* left this
+        // machine holding uncommitted work, and an agent reading only the
+        // headline would have no way to know the second half.
+        "carried_changes": changes_json(&sync.carried_changes),
     });
     if let Some(push) = push {
         json["unpushed_scopes"] = json!(push.unpushed_scopes());
     }
+    let mut notes = carried_change_notes(&sync.carried_changes);
+    notes.extend(success_notes(&sync.drifts, push));
     SuccessOutput {
         json,
         human: HumanOutput::Message(headline),
-        notes: success_notes(&sync.drifts, push),
+        notes,
         exit_code: 0,
     }
+}
+
+/// What a sync merged around and left in home. Said out loud on a run that
+/// worked, because "synced 4 file(s)" and exit 0 otherwise reads as "this
+/// machine agrees with its scopes now", and it does not.
+fn carried_change_notes(carried: &[FileChange]) -> Vec<String> {
+    if carried.is_empty() {
+        return Vec::new();
+    }
+    let mut notes = vec![format!(
+        "dotsync: carried {} local change(s) through the sync; they are still only in home",
+        carried.len()
+    )];
+    notes.extend(
+        carried
+            .iter()
+            .map(|change| render_change_line(&change.path, change.state)),
+    );
+    notes.push(
+        "dotsync: commit them with `dotsync commit <scope> -m \"message\" -- <path>`, or run `dotsync status` to see them again."
+            .to_string(),
+    );
+    notes
 }
 
 pub(crate) fn display_paths(paths: &[PathBuf]) -> Vec<String> {
@@ -118,10 +148,15 @@ pub(crate) fn render_change_line(path: &Path, state: FileState) -> String {
 fn change_marker(state: FileState) -> &'static str {
     match state {
         FileState::EditedInHome | FileState::EditedInHomeButRemovedFromRepo => "M",
+        // A kind difference is the same shape of change as an edit — home holds
+        // something the scope does not — so it reads as one.
+        FileState::KindDiffersFromScope => "M",
+        // So is an edit the repo has moved under: home holds a change of this
+        // machine's own, and the reason line is where "and so does the repo"
+        // belongs, because nothing about it needs resolving.
+        FileState::DivergedEditThatMerges => "M",
         FileState::DeletedInHome | FileState::DeletedInHomeTipAlsoChanged => "D",
-        FileState::DivergedEdit
-        | FileState::IncomingNewCollidesWithUntrackedHome
-        | FileState::NoSyncRecord => "C",
+        FileState::DivergedEdit | FileState::IncomingNewCollidesWithUntrackedHome => "C",
         FileState::IncomingNew => "A",
         FileState::StaleNotYours => "U",
         FileState::RemovedFromRepo => "R",
@@ -142,9 +177,58 @@ pub(crate) fn render_error_json(error: &ErrorReport) -> serde_json::Value {
         "error": error.code,
         "message": error.message,
         "drifts": error.drifts.iter().map(render_drift_json).collect::<Vec<_>>(),
+        "conflicts": error.conflicts.iter().map(render_conflict_json).collect::<Vec<_>>(),
         "forced_overwrites": error.forced_overwrites.iter().map(|path| display_path(path)).collect::<Vec<_>>(),
         "current_state": error.current_state,
     })
+}
+
+/// One file a merge could not resolve, with every version of it: the version
+/// both sides changed, then each side, each under the name of where it came
+/// from.
+///
+/// Every version is here rather than a rendered three-way diff, because an
+/// agent resolving a conflict writes the merged file — and what it needs for
+/// that is the content, not a description of how the content differs. The
+/// versions are not in home, so this and the human rendering beside it are the
+/// only place they are.
+pub(crate) fn render_conflict_json(file: &ConflictedFile) -> serde_json::Value {
+    json!({
+        "path": display_path(&file.path),
+        "versions": file.versions.iter().map(|version| json!({
+            "role": version.role.code(),
+            "label": version.label,
+            // `null` rather than an empty string: a version that does not hold
+            // the file at all is one side having added it or deleted it, which
+            // is not the same fact as it being empty.
+            "contents": version.contents.as_ref().map(|bytes| String::from_utf8_lossy(bytes)),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// The same versions for a person. Contents are printed unindented under a
+/// header naming the version, so a line can be copied out of one of them into
+/// the file in home without picking indentation back off it.
+pub(crate) fn render_conflicts_human(files: &[ConflictedFile]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for file in files {
+        let path = display_path(&file.path);
+        lines.push(render_change_line(&file.path, file.state));
+        for version in &file.versions {
+            lines.push(format!(
+                "--- {path} | {}: {} ---",
+                version.role.code(),
+                version.label
+            ));
+            lines.push(match &version.contents {
+                Some(bytes) => String::from_utf8_lossy(bytes)
+                    .trim_end_matches('\n')
+                    .to_string(),
+                None => "(this version does not have the file)".to_string(),
+            });
+        }
+    }
+    lines
 }
 
 /// A usage error in the shape every other error has.
@@ -160,6 +244,7 @@ pub(crate) fn render_usage_error_json(error: &UsageError) -> serde_json::Value {
         "message": error.message,
         "current_state": Vec::<String>::new(),
         "drifts": Vec::<serde_json::Value>::new(),
+        "conflicts": Vec::<serde_json::Value>::new(),
         "forced_overwrites": Vec::<String>::new(),
     })
 }
@@ -236,16 +321,23 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
                 "Dotsync cannot merge diverged scopes yet — that is https://github.com/maxeonyx/dotsync/issues/17. Report this state rather than repairing the repo by hand.",
             ],
         ),
-        DotsyncError::DriftDetected { .. } => render_structured_error(
-            "drift detected",
-            "Dotsync keeps its hidden repo as the source of truth for your home-directory config: the repo is the source of truth, and dotsync syncs committed repo state into the live system.",
-            "This sync flow compares managed files in your home directory against the repo version for this machine scope before copying anything.",
-            "This flow expects managed files in your home directory to already match the repo, unless you intentionally choose to overwrite drift.",
-            "The files that differ are listed under `Changed files:` below, each with what it would be replaced by.",
-            "Dotsync stopped before overwriting local drift so you can inspect what would be replaced.",
+        DotsyncError::SyncConflict { scope, files } => render_structured_error(
+            if files.len() == 1 {
+                "home and this machine's scope both changed the same file"
+            } else {
+                "home and this machine's scope both changed the same files"
+            },
+            "Dotsync keeps its hidden repo as the source of truth for your home-directory config, and a sync merges what the scopes hold now with whatever you have edited in home since the last one. An edit dotsync can merge around is carried across the sync; nothing has to be committed first.",
+            "This sync flow merged three versions of every managed file: the version this machine last synced, the version in home now, and the version the scope holds now.",
+            "It expects at most one of home and the scope to have changed each file — or, where both did, to have changed different lines of it.",
+            &current_state_text(&error_report),
+            "Both sides changed the same part of the same file, so there is no merged version dotsync can work out on its own. Nothing was written: home is untouched, and the incoming changes to every other file are held back with it, because home is derived from one commit and a home built half from each side would make the next run read those incoming changes as edits of yours undoing them.",
             &[
-                "If the repo is correct, rerun with `dotsync --force` to overwrite the drift after reviewing the diffs.",
-                "If the live file is the change you wanted, run `dotsync status`, then commit the intended path with `dotsync commit <scope> -m \"message\" -- <path>`.",
+                "read the three versions of each file below, decide what the file should hold, and write that into the file at its real path in home.",
+                &format!(
+                    "then record your decision on a scope: `dotsync commit {scope} -m \"message\" -- <path>`. That is what makes it everybody's version, and it leaves this sync nothing left to merge."
+                ),
+                "or, if the version the scope already holds is the one you want, rerun with `dotsync --force`; that discards what is in home for every changed file, so check `dotsync status` first.",
             ],
         ),
         DotsyncError::CascadePaused { .. } => render_structured_error(
@@ -317,16 +409,6 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
             steps.push(
                 "do not use `~/`, absolute paths, or `..`; dotsync resolves every path against your home directory already, and records it verbatim.".to_string(),
             );
-            if rejected.iter().any(|rejected| rejected.is_symlink()) {
-                steps.push(
-                    "name the real file instead of the link, if it lives in your home directory."
-                        .to_string(),
-                );
-                steps.push(
-                    "config kept outside home and linked into place cannot be committed yet; dotsync has no answer for what a scope should hold for such a path, so it refuses rather than guessing."
-                        .to_string(),
-                );
-            }
             if rejected.iter().any(|rejected| rejected.is_home_root()) {
                 steps.push(
                     "name the directories or files you actually mean: `dotsync commit <scope> -m \"message\" -- .config/fish/ .bashrc`. Dotsync will not sweep a whole home directory onto a scope."
@@ -341,7 +423,7 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
             }
             if rejected.iter().any(|rejected| rejected.is_dotsync_state()) {
                 steps.push(
-                    "commit the config files you edited instead; dotsync's own state is not config and cannot travel on a scope."
+                    "commit the config files you edited instead; dotsync's hidden repo is not config and cannot travel on a scope."
                         .to_string(),
                 );
                 steps.push(
@@ -422,18 +504,6 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
             &[
                 "run `dotsync view --file <path>` to see which scopes hold it.",
                 "run `dotsync view --scope <scope>` to see what that scope does hold.",
-            ],
-        ),
-        DotsyncError::SyncState { .. } => render_structured_error(
-            "invalid sync state",
-            "Dotsync keeps the repo as the source of truth and uses a local sync-state file to remember which machine scope was last synced here and which revision that sync used.",
-            "This sync flow reads that local state to know which prior managed files may need removal and which machine scope should be treated as authoritative for this home.",
-            "It expects that state file, if present, to be valid and readable; it expects that state file, if present, to be valid.",
-            &error_report.message,
-            "Dotsync stopped because it cannot safely decide what prior sync state to trust.",
-            &[
-                "fix or delete the bad sync-state file and rerun the command.",
-                "After that, let dotsync recreate valid sync state from a successful sync.",
             ],
         ),
         // Every other command carries on against the last state it fetched
@@ -629,24 +699,12 @@ pub(crate) fn skipped_path_notes(skipped: &[SkippedCommitPath]) -> Vec<String> {
     notes.extend(listed(skipped.iter().map(|skipped| {
         format!("{} ({})", skipped.path.display(), skipped.reason.explain())
     })));
-    // One line of advice per kind of skip that has any, because the remedies
-    // are not the same: a file another machine changed is a sync away, and a
-    // link is not.
     if skipped
         .iter()
         .any(|skipped| matches!(skipped.reason, SkipReason::NotChangedHere(_)))
     {
         notes.push(
             "dotsync: run `dotsync` to bring those up to date, or name one exactly to be told what happened to it."
-                .to_string(),
-        );
-    }
-    if skipped
-        .iter()
-        .any(|skipped| matches!(skipped.reason, SkipReason::Symlink { .. }))
-    {
-        notes.push(
-            "dotsync: a link cannot be recorded on a scope; move the file it points at into home if you want it managed."
                 .to_string(),
         );
     }

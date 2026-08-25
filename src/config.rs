@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -20,7 +20,11 @@ pub(crate) const DOTSYNC_CONFIG_RELATIVE_PATH: &str = ".config/dotsync/config.to
 /// The root scope. Every machine descends from it, which is why the scope
 /// graph itself is read from here and nowhere else.
 pub(crate) const ALL_SCOPE: &str = "all";
-pub(crate) const DEFAULT_SYNC_STATE_RELATIVE_PATH: &str = ".config/dotsync/sync-state.json";
+
+/// Where the release before this one kept its machine-local record of what it
+/// had synced. `Home::acquire` deletes it: jj's own view holds that record now,
+/// and a second copy of it is a second authority.
+pub(crate) const SHED_SYNC_STATE_RELATIVE_PATH: &str = ".config/dotsync/sync-state.json";
 
 #[derive(Debug, Clone)]
 pub struct DotsyncPaths {
@@ -31,8 +35,6 @@ pub struct DotsyncPaths {
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawConfig {
     scopes: HashMap<String, RawScope>,
-    #[serde(default)]
-    sync: RawSyncConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -41,24 +43,9 @@ pub(crate) struct RawScope {
     parents: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct RawSyncConfig {
-    #[serde(default = "default_sync_state_relative_path")]
-    state_path: String,
-}
-
-impl Default for RawSyncConfig {
-    fn default() -> Self {
-        Self {
-            state_path: default_sync_state_relative_path(),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct DotsyncConfig {
     pub(crate) graph: ScopeGraph,
-    pub(crate) sync_state_relative_path: PathBuf,
 }
 
 /// What the file says about itself before it says anything about scopes.
@@ -80,11 +67,6 @@ const CONFIG_HEADER: &str = "\
 # choice gets made, so when you learn what a scope is for, write it down here
 # and commit this file to `all`.
 
-";
-
-const SYNC_STATE_COMMENT: &str = "\
-# Where dotsync records which machine scope this home uses. Machine-local: it
-# never travels on a scope.
 ";
 
 /// A scope dotsync is about to create, and enough about it to say what it is
@@ -118,24 +100,14 @@ impl NewScope {
     }
 }
 
-/// A config file for a machine joining a remote that has none: the header, the
-/// scopes this machine needs, and where its sync state lives.
-pub(crate) fn new_config(sync_state_relative_path: &Path, scopes: &[NewScope]) -> String {
+/// A config file for a machine joining a remote that has none: the header and
+/// the scopes this machine needs.
+pub(crate) fn new_config(scopes: &[NewScope]) -> String {
     let mut document = DocumentMut::new();
 
     let mut scope_table = Table::new();
     scope_table.decor_mut().set_prefix(CONFIG_HEADER);
     document.insert("scopes", Item::Table(scope_table));
-
-    let mut sync = Table::new();
-    sync.insert(
-        "state_path",
-        Item::Value(Value::from(sync_state_relative_path.display().to_string())),
-    );
-    if let Some(mut key) = sync.key_mut("state_path") {
-        key.leaf_decor_mut().set_prefix(SYNC_STATE_COMMENT);
-    }
-    document.insert("sync", Item::Table(sync));
 
     // A fresh document has a `[scopes]` table because this function just put
     // one there, so adding to it cannot fail for the reason it can in a file
@@ -284,18 +256,9 @@ pub(crate) fn parse_config(path: &Path, contents: &str) -> Result<DotsyncConfig,
                 .map(|(name, scope)| (name, scope.parents))
                 .collect(),
         )?,
-        sync_state_relative_path: PathBuf::from(raw.sync.state_path),
     })
-}
-
-pub(crate) fn internal_repo_paths(config: &DotsyncConfig) -> BTreeSet<PathBuf> {
-    BTreeSet::from([config.sync_state_relative_path.clone()])
 }
 
 pub(crate) fn repo_config_path(paths: &DotsyncPaths) -> PathBuf {
     paths.repo_root.join(DOTSYNC_CONFIG_RELATIVE_PATH)
-}
-
-pub(crate) fn default_sync_state_relative_path() -> String {
-    DEFAULT_SYNC_STATE_RELATIVE_PATH.to_string()
 }

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use jj_lib::backend::Signature;
 use jj_lib::commit::Commit;
 use jj_lib::object_id::ObjectId;
 use jj_lib::op_store::RefTarget;
@@ -14,6 +15,10 @@ use crate::scope_graph::ScopeGraph;
 pub(crate) struct CascadeCommand {
     pub(crate) root_scope: String,
     pub(crate) description: String,
+    /// The machine running the cascade. A cascade commit is history this
+    /// machine wrote, and it is the commit every other machine's scope bookmark
+    /// ends up pointing at, so it says so.
+    pub(crate) author: Signature,
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +156,7 @@ pub(crate) async fn execute_cascade_steps(
                 merged_tree,
             )
             .set_description(&command.description)
+            .set_author(command.author.clone())
             .write()
             .await
             .map_err(|err| jj_error(format!("write cascade commit for {}: {err}", step.scope)))?;

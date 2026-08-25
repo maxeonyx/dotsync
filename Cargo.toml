@@ -1,6 +1,6 @@
 [package]
 name = "dotsync"
-version = "0.3.27"
+version = "0.4.0"
 edition = "2021"
 description = "Agent-first dotfile sync with scope branches and merge cascades"
 license = "MIT"
@@ -8,6 +8,7 @@ repository = "https://github.com/maxeonyx/dotsync"
 
 [dependencies]
 agent-tools-updater = { path = "../../crates/agent-tools-updater" }
+async-trait = "0.1"
 clap = { version = "4.5.31", features = ["derive"] }
 gix = "0.80"
 jj-lib = "0.39"

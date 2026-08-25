@@ -441,6 +441,46 @@ impl MachineEnvironment {
             .unwrap_or_else(|err| panic!("read home symlink `{relative}`: {err}"))
     }
 
+    /// `chmod +x`, and nothing else: the bytes are untouched, so a run that
+    /// only compares content cannot see this happened.
+    pub fn make_executable(&self, relative: &str) {
+        let path = self.home_dir.join(relative);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path)
+                .unwrap_or_else(|err| panic!("stat `{relative}`: {err}"))
+                .permissions()
+                .mode();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode | 0o111))
+                .unwrap_or_else(|err| panic!("chmod +x `{relative}`: {err}"));
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            panic!("executable-bit fixtures are unix-only");
+        }
+    }
+
+    pub fn is_executable(&self, relative: &str) -> bool {
+        let path = self.home_dir.join(relative);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::metadata(&path)
+                .unwrap_or_else(|err| panic!("stat `{relative}`: {err}"))
+                .permissions()
+                .mode()
+                & 0o111
+                != 0
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            panic!("executable-bit fixtures are unix-only");
+        }
+    }
+
     /// Removes first, because writing to a path that holds a link writes
     /// through it — which is the bug several of these tests are about, and
     /// would silently corrupt their own fixtures.
@@ -454,34 +494,6 @@ impl MachineEnvironment {
         let path = self.home_dir.join(relative);
         fs::remove_file(&path).unwrap_or_else(|err| panic!("remove `{relative}`: {err}"));
         symlink_at(target, &path);
-    }
-
-    pub fn sync_state_relative_path(&self) -> PathBuf {
-        PathBuf::from(
-            read_bookmark_file_contents(self, "all", ".config/dotsync/config.toml")
-                .lines()
-                .find_map(|line| {
-                    line.strip_prefix("state_path = \"")
-                        .and_then(|rest| rest.strip_suffix('"'))
-                })
-                .expect("sync.state_path should be configured"),
-        )
-    }
-
-    pub fn sync_state_path(&self) -> PathBuf {
-        self.home_dir.join(self.sync_state_relative_path())
-    }
-
-    pub fn delete_sync_state(&self) {
-        fs::remove_file(self.sync_state_path()).expect("delete sync state file");
-    }
-
-    pub fn write_sync_state_raw(&self, contents: &str) {
-        write_file_at(&self.sync_state_path(), contents);
-    }
-
-    pub fn read_sync_state_raw(&self) -> String {
-        fs::read_to_string(self.sync_state_path()).expect("read sync state file")
     }
 
     pub fn modified_time(&self, relative: &str) -> std::time::SystemTime {
@@ -841,6 +853,17 @@ pub fn remote_branch_revision(machine: &MachineEnvironment, branch: &str) -> Str
     assert!(output.status.success(), "{}", render_output(&output));
     String::from_utf8(output.stdout)
         .expect("git rev-parse output should be utf-8")
+        .trim()
+        .to_string()
+}
+
+/// Who git says wrote the tip of a remote branch. Read from the remote rather
+/// than from the local repo because that is where the other machines read it.
+pub fn remote_branch_author(machine: &MachineEnvironment, branch: &str) -> String {
+    let output = git_in(&machine.remote_dir, &["log", "-1", "--format=%an", branch]);
+    assert!(output.status.success(), "{}", render_output(&output));
+    String::from_utf8(output.stdout)
+        .expect("git log output should be utf-8")
         .trim()
         .to_string()
 }

@@ -204,27 +204,35 @@ fn work_done_offline_reaches_the_remote_on_the_next_online_run() {
     }
 }
 
-/// A run that stops still has to say which state it stopped against. Drift is
-/// the commonest stop there is, and its advice is `--force` — overwrite home
-/// with the repo — so a reader who is not told the repo snapshot is however
-/// old this machine's last fetch was cannot judge that advice.
+/// A run that stops still has to say which state it stopped against. A
+/// conflict is the stop a sync can reach, and one of the things it offers is
+/// `--force` — overwrite home with what the scope holds — so a reader who is
+/// not told the scope snapshot is however old this machine's last fetch was
+/// cannot judge that advice.
 #[test]
 fn a_run_that_stops_offline_still_says_the_remote_was_out_of_reach() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     machine.init_ok();
-    machine.write_file(".bashrc", "export DOTSYNC=one\n");
-    machine.run_ok("dotsync commit all -m 'add bashrc' -- .bashrc");
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=one\n");
+    machine.run_ok("dotsync");
 
+    // A local edit against an incoming change to the same line: the merge a
+    // sync is cannot resolve that. The first stop is the online run, and it is
+    // what picked the incoming change up — so the machine goes offline already
+    // holding both sides of the collision.
     machine.write_file(".bashrc", "export DOTSYNC=edited\n");
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=theirs\n");
+    machine.run_expecting("dotsync", 1);
+
     harness.disconnect_remote();
 
     let sync_output = machine.run("dotsync --output json");
     assert_eq!(
         sync_output.status.code(),
         Some(1),
-        "drift still stops the run\n{}",
+        "the conflict still stops the run\n{}",
         render_output(&sync_output)
     );
     assert!(

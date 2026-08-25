@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
     abort_paused_cascade, commit_and_sync, continue_after_conflict, diff_home, init, status, sync,
-    view, CommitFailure, CommitOptions, DiffReport, DotsyncError, DotsyncPaths, ForceScope, Run,
+    view, CommitFailure, CommitOptions, DiffReport, DotsyncError, DotsyncPaths, Resumed, Run,
     UnreachableRemote, ViewAnswer,
 };
 mod render;
@@ -546,15 +546,6 @@ fn reject_force_before(force: bool, command: &str) -> Result<(), UsageError> {
     )))
 }
 
-/// `--force` on the commands that name no paths for it to scope to.
-fn blanket_force(force: bool) -> ForceScope {
-    if force {
-        ForceScope::Everything
-    } else {
-        ForceScope::Nothing
-    }
-}
-
 fn usage_error(message: &str) -> UsageError {
     UsageError {
         message: message.to_string(),
@@ -604,14 +595,21 @@ fn prompt_init_remote_url() -> Result<String, UsageError> {
 
 async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let run = continue_after_conflict(&paths, blanket_force(force)).await;
+    // `continue` names no paths, so its `--force` is necessarily blanket: it
+    // overwrites every locally changed file or none of them.
+    let run = continue_after_conflict(&paths, force).await;
     Ok(output_of("dotsync continue", run, |report| {
+        let synced = report.sync.synced_paths.len();
         render::synced_output(
             "continue",
-            format!(
-                "dotsync: resumed cascade and synced {} file(s)",
-                report.sync.synced_paths.len()
-            ),
+            match &report.resumed {
+                Resumed::Cascade { scope } => format!(
+                    "dotsync: resumed the cascade paused at {scope} and synced {synced} file(s)"
+                ),
+                Resumed::SyncConflict => format!(
+                    "dotsync: took your version of the conflicted file(s) and synced {synced} file(s)"
+                ),
+            },
             &report.sync,
             Some(&report.push),
         )
@@ -642,7 +640,7 @@ async fn run_abort() -> Result<CliOutput, DotsyncError> {
 
 async fn run_sync(force: bool) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let run = sync(&paths, blanket_force(force)).await;
+    let run = sync(&paths, force).await;
     Ok(output_of("dotsync", run, |report| {
         render::synced_output(
             "sync",
@@ -1025,6 +1023,16 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
             if !error_report.drifts.is_empty() {
                 eprintln!("\nChanged files:");
                 for line in render::render_drifts_human(&error_report.drifts) {
+                    eprintln!("{line}");
+                }
+            }
+            // The conflict itself, after the teaching block and apart from it,
+            // because it is the material to work from rather than more
+            // instructions — and because it is what dotsync hands over
+            // *instead* of writing markers into the file.
+            if !error_report.conflicts.is_empty() {
+                eprintln!("\nConflicted files:");
+                for line in render::render_conflicts_human(&error_report.conflicts) {
                     eprintln!("{line}");
                 }
             }

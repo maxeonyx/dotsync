@@ -368,14 +368,10 @@ pub(crate) fn load_scope_commit(
 
 pub(crate) fn collect_managed_tree_entries(
     tree: &jj_lib::merged_tree::MergedTree,
-    excluded_paths: &std::collections::BTreeSet<PathBuf>,
 ) -> Result<BTreeMap<PathBuf, TreeValue>, DotsyncError> {
     let mut entries = BTreeMap::new();
     for (path, value) in tree.entries() {
         let display_path = PathBuf::from(path.as_internal_file_string());
-        if excluded_paths.contains(&display_path) {
-            continue;
-        }
         let value = value.map_err(|err| {
             jj_error(format!("read tree entry {}: {err}", display_path.display()))
         })?;
@@ -396,6 +392,20 @@ pub(crate) fn collect_managed_tree_entries(
         }
     }
     Ok(entries)
+}
+
+/// The content of a tree entry that may not be there. Absent is not empty —
+/// a path no tree holds has no content, which is how a deletion and an
+/// addition read on their respective sides.
+pub(crate) async fn read_entry_bytes(
+    store: &Arc<jj_lib::store::Store>,
+    relative: &Path,
+    value: Option<&TreeValue>,
+) -> Result<Option<Vec<u8>>, DotsyncError> {
+    match value {
+        Some(value) => Ok(Some(read_tree_entry_bytes(store, relative, value).await?)),
+        None => Ok(None),
+    }
 }
 
 pub(crate) async fn read_tree_entry_bytes(

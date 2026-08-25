@@ -2,6 +2,8 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 
+use jj_lib::backend::{Signature, Timestamp};
+
 use crate::error::DotsyncError;
 
 #[derive(Debug, Clone)]
@@ -20,6 +22,18 @@ pub(crate) fn detect_machine() -> Result<MachineIdentity, DotsyncError> {
         os_scope,
         machine_scope,
     })
+}
+
+/// Every commit dotsync writes carries the machine that wrote it, so history
+/// can say where a change came from — the `author: ""` oversight PLAN §2.3
+/// step 2 retires. The machine scope is the name, because that is what machine
+/// identity *is* here: a hostname matched against a leaf bookmark.
+pub(crate) fn machine_signature(machine_scope: &str) -> Signature {
+    Signature {
+        name: machine_scope.to_string(),
+        email: format!("{machine_scope}@dotsync"),
+        timestamp: Timestamp::now(),
+    }
 }
 
 pub(crate) fn detect_os() -> &'static str {
