@@ -117,6 +117,12 @@ impl Home {
             )
             .map_err(|err| jj_error(format!("load working copy state: {err}")))?
         } else {
+            // First run of this model on this machine — a fresh `init` or an
+            // upgrade. The wc commit is created *before* the state is
+            // written, so the operation the state names holds it: a state
+            // whose operation predates the wc commit reads as stale on every
+            // later run and repairs against trees that never existed.
+            ensure_wc_commit(session, paths, &machine_scope, &workspace).await?;
             HomeWorkingCopy::init(
                 store.clone(),
                 paths.home_dir.clone(),
@@ -151,7 +157,7 @@ impl Home {
             .map_err(|err| jj_error(format!("re-read the repo under the lock: {err}")))?;
         session.advance_to(reloaded).await?;
 
-        let wc_commit = ensure_wc_commit(session, &machine_scope, &workspace).await?;
+        let wc_commit = ensure_wc_commit(session, paths, &machine_scope, &workspace).await?;
         shed_the_previous_releases_state(paths);
 
         let freshness = WorkingCopyFreshness::check_stale(&locked, &wc_commit, session.repo())
@@ -542,18 +548,28 @@ impl Home {
         // file names: that operation's view holds the wc commit as it was
         // when home was last materialized, and its parent is the mark home
         // still derives from.
-        let old_mark_id = self.last_materialized_mark(session, workspace).await?;
+        let old_mark_id = match self.last_materialized_mark(session, workspace).await? {
+            Some(id) => id,
+            // The state's operation predates this machine's first wc commit —
+            // a run of the release whose migration wrote the state before
+            // creating the commit. Nothing was ever materialized by this
+            // model, so home derives from what the wc commit was created on:
+            // its parent.
+            None => self.mark().await?.id().clone(),
+        };
         self.switch_to(session, old_mark_id, snapshot).await?;
         Ok(())
     }
 
     /// The parent of the wc commit as of the operation the working copy last
-    /// materialized — the commit home's bytes actually derive from.
+    /// materialized — the commit home's bytes actually derive from. `None`
+    /// when that operation has no wc commit for this workspace: nothing was
+    /// ever materialized as of it.
     async fn last_materialized_mark(
         &self,
         session: &Session,
         workspace: &WorkspaceNameBuf,
-    ) -> Result<CommitId, DotsyncError> {
+    ) -> Result<Option<CommitId>, DotsyncError> {
         let op = session
             .repo()
             .loader()
@@ -564,15 +580,15 @@ impl Home {
             .view()
             .await
             .map_err(|err| jj_error(format!("load the working copy's view: {err}")))?;
-        let wc_id = view
-            .get_wc_commit_id(workspace.as_ref())
-            .ok_or_else(|| jj_error("the working copy's operation has no working copy".into()))?;
+        let Some(wc_id) = view.get_wc_commit_id(workspace.as_ref()) else {
+            return Ok(None);
+        };
         let old_wc = session
             .repo()
             .store()
             .get_commit(wc_id)
             .map_err(|err| jj_error(format!("load the old working copy commit: {err}")))?;
-        Ok(old_wc.parent_ids()[0].clone())
+        Ok(Some(old_wc.parent_ids()[0].clone()))
     }
 
     /// The wc commit moves and home follows: the two halves of materializing a
@@ -654,14 +670,22 @@ impl Home {
 const WC_COMMIT_DESCRIPTION: &str = "dotsync: working copy";
 
 /// The wc commit for this machine's workspace, creating it if this repo has
-/// never had one — which is both `init`'s first run and the migration of a
-/// machine upgrading from the sync-state.json era. The new wc commit is an
-/// empty-diff child of the machine scope's bookmark: differences between home
-/// and that bookmark then appear as ordinary local changes on the very next
-/// snapshot, which is the D5 lesson (report, never assume) applied to
-/// migration. The old sync-state.json is not consulted at all.
+/// never had one. The new commit is an empty-diff child of the commit this
+/// machine has actually materialized, so the very next snapshot reports
+/// exactly home's own differences as local changes — the D5 lesson (report,
+/// never assume):
+///
+/// - A machine upgrading from the sync-state.json era materialized the
+///   machine scope's bookmark — the old release synced home to it — and the
+///   old state file still being on disk is what says so. Its contents are
+///   not consulted.
+/// - A machine with no old state file has materialized nothing, so its mark
+///   is the root commit and everything the scope holds is incoming. Parenting
+///   it on the bookmark instead would read home's emptiness as deletions and
+///   make `init` report its own first sync as overwritten drift.
 async fn ensure_wc_commit(
     session: &mut Session,
+    paths: &DotsyncPaths,
     machine_scope: &str,
     workspace: &WorkspaceNameBuf,
 ) -> Result<Commit, DotsyncError> {
@@ -672,11 +696,21 @@ async fn ensure_wc_commit(
             .get_commit(commit_id)
             .map_err(|err| jj_error(format!("load the working copy commit: {err}")));
     }
-    let scope_head = load_scope_commit(session.repo().as_ref(), machine_scope)?;
+    let upgrading = paths.home_dir.join(SHED_SYNC_STATE_RELATIVE_PATH).exists();
+    let mark = if upgrading {
+        load_scope_commit(session.repo().as_ref(), machine_scope)?
+    } else {
+        let root_id = session.repo().store().root_commit_id().clone();
+        session
+            .repo()
+            .store()
+            .get_commit(&root_id)
+            .map_err(|err| jj_error(format!("load the root commit: {err}")))?
+    };
     let mut tx = session.repo().start_transaction();
     let wc_commit = tx
         .repo_mut()
-        .new_commit(vec![scope_head.id().clone()], scope_head.tree())
+        .new_commit(vec![mark.id().clone()], mark.tree())
         .set_description(WC_COMMIT_DESCRIPTION)
         .set_author(machine_signature(machine_scope))
         .write()
