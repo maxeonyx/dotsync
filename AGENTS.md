@@ -7,6 +7,20 @@ build, test, and release without an `agent-tools` checkout.
 
 Run `cargo ratchet`, not plain `cargo test`. A new test must be red when first introduced and committed as `pending`; that expected red test keeps CI green. A new test must not pass when first introduced—doing so makes the ratchet and CI red. Implement only after the red commit, then rerun the ratchet and commit the promotion to `passing`.
 
+## Integration workflow
+
+Run `devenv test` before committing and pushing; it includes `actionlint`, so
+workflow syntax is checked offline. Source CI does not run on push. Open a pull
+request, merge current `main` into the feature branch, then explicitly dispatch:
+
+```bash
+gh workflow run ci.yml --ref <feature-branch> -f pr_number=<number>
+```
+
+The repository-serialized run records the required `Ready` check, builds the
+release artifacts, auto-merges the pull request, publishes those same artifacts,
+and records `integrated-ci` on the exact merge commit.
+
 ## Start Here
 
 - Read `DESIGN.md` before changing command behavior, scope semantics, sync rules, or any product requirement.
@@ -51,11 +65,21 @@ This project uses strict TDD via [tdd-ratchet](https://tdd-ratchet.maxeonyx.com)
 
 PRs in this repo can be merged without approval (Max, 2026-08-12).
 
-Single `ci.yml` workflow: main-version-bump guard, release-guard tests, format, lint, check, test, build matrix (x86_64 linux-gnu + windows), GitHub Release (version from Cargo.toml, skipped when that release already exists), Pages deploy (docs + binaries combined at dotsync.maxeonyx.com).
+Single explicitly dispatched `ci.yml` integration workflow: PR/base validation,
+actionlint, release-guard tests, format, lint, the test ratchet, Linux and
+Windows builds, auto-merge, GitHub Release, Pages, then an `integrated-ci`
+status on the exact merge commit.
 
-**A push to `main` needs a version bump only when it changes what CI would build.** That means `src/**`, `Cargo.toml`, `Cargo.lock` or `rust-toolchain.toml` — the list is `ARTIFACT_FILES` and `ARTIFACT_DIRS` in `scripts/check_main_version_bump.py`. Markdown, tests, `.test-status.json`, `scripts/**` and the workflow itself never need one: push them freely, CI still runs and still redeploys Pages, and the Release job sees its tag already exists and does nothing. When a bump *is* needed, all three of `Cargo.toml`, `Cargo.lock` and `docs/version.json` must move together — the guard rejects the push if they disagree, on every push, bump or not. `docs/version.json` is deployed verbatim to Pages (`dotsync.maxeonyx.com/version.json`) and read by the agent-tools umbrella, so leaving it behind ships a false version; Pages therefore deploys only after the Release job succeeds.
+Each integration run publishes a fresh release, so its PR must use a new version
+in `Cargo.toml`, `Cargo.lock`, and `docs/version.json`. The existing release
+guard still verifies that artifact-changing work actually moved these versions
+together. `docs/version.json` is deployed verbatim to Pages and read by the
+agent-tools umbrella.
 
-CI runs the guard on `main` (`range` mode) and runs `scripts/test_check_main_version_bump.py`, which covers the guard's own behaviour and checks that every artifact-relevant path is also a CI trigger path. The repo-local `pre-push` hook in `.githooks/pre-push` runs the same guard in `pre-push` mode for `main` pushes if the clone has hooks wired up — that check and nothing else, so pushing stays fast; clippy and the ratchet are CI's job.
+CI compares the PR head with `origin/main` in `range` mode and runs
+`scripts/test_check_main_version_bump.py`. The repo-local pre-push hook remains
+an early version check; `devenv test` is the full offline actionlint, format,
+clippy, and ratchet gate.
 
 When preparing a clone for local release work, set `git config core.hooksPath .githooks` so the repo-local `pre-push` hook actually runs.
 
