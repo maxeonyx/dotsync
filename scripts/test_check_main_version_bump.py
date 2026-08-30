@@ -193,30 +193,13 @@ def pre_push_ignores_other_branches(repo: Repo) -> None:
     expect(repo.guard("pre-push", stdin=stdin), passes=True)
 
 
-def workflow_triggers_cover_every_artifact_path(_repo: Repo) -> None:
-    """A path can only earn a release if a push touching it also runs CI.
-
-    The two lists live in different files and in different languages, so nothing
-    stops them drifting apart. If one did, a push touching only the drifted path
-    would never run CI, never build, and never publish — silently.
-    """
-    guard = GUARD.read_text()
-    files = set(re.findall(r'"([^"]+)"', re.search(r"ARTIFACT_FILES = frozenset\(\{([^}]*)\}\)", guard).group(1)))
-    dirs = set(re.findall(r'"([^"]+)"', re.search(r"ARTIFACT_DIRS = \(([^)]*)\)", guard).group(1)))
-
+def source_ci_is_explicitly_dispatched(_repo: Repo) -> None:
+    """Source CI must never spend runner minutes merely because a ref moved."""
     workflow = WORKFLOW.read_text()
-    trigger_block = re.search(r"\n    paths:\n((?:      - .*\n)+)", workflow).group(1)
-    triggers = set(re.findall(r"      - (.+)", trigger_block))
-
-    uncovered = sorted(
-        [path for path in files if path not in triggers]
-        + [directory for directory in dirs if f"{directory}**" not in triggers]
-    )
-    if uncovered:
-        raise AssertionError(
-            f"{', '.join(uncovered)} would require a version bump but would not trigger CI. "
-            f"Add them to the push paths in {WORKFLOW.relative_to(REPO_ROOT)}."
-        )
+    if "workflow_dispatch:" not in workflow or "pr_number:" not in workflow:
+        raise AssertionError("source CI must be explicitly dispatched for a pull request")
+    if "push:" in workflow or "pull_request:" in workflow or "merge_group:" in workflow:
+        raise AssertionError("source CI must not trigger automatically when a ref moves")
 
 
 def pre_push_refuses_deleting_main(repo: Repo) -> None:
@@ -241,7 +224,7 @@ CASES = [
     pre_push_allows_a_markdown_change,
     pre_push_ignores_other_branches,
     pre_push_refuses_deleting_main,
-    workflow_triggers_cover_every_artifact_path,
+    source_ci_is_explicitly_dispatched,
 ]
 
 
