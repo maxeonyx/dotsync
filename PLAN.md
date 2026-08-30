@@ -41,7 +41,7 @@ Concretely:
 - **The cull applies to the product surface, not just internals** (Max, 2026-08-12): "not just gurky internals, but sharp product edges too. Remember - me, and mainly agents with no memory, are the only users. So self-documentation is _critical_ and backwards compatibility (on the frontend, not the backend though (ie. the repo / scope model)) is an _antipattern_ on this project." When a flag, command shape, message, or JSON field is a sharp edge, redesign it outright rather than preserving it for compatibility. The repo/scope model (the backend) is where compatibility matters.
 - **Method for the cull: back-chain smells to root causes.** Don't fix smells where they present; trace each to the modelling decision that produced it and fix that, accepting potentially large refactorings. Smell inventory and root-cause analysis live in the "Smells and root causes" section below.
 - **Dotfiles repo history**: if a change would need to modify the live dotfiles repo history, try to find another way first, or stop and tell Max — he'll have a separate agent do only that. dotsync agents never mutate the hidden repo or the remote dotfiles history by hand.
-- **Work within the agent-tools workspace process** (`../../AGENTS.md`): improve process first, loop-based development, reviewer/implementer separation (the agent that made a fix cannot attest it), and after pushing dotsync main: update the workspace submodule pointer, regenerate the umbrella version file, and observe CI — reconcile it against intent, never chase green.
+- **Keep the repository standalone:** improve process first, use loop-based development, preserve reviewer/implementer separation, and reconcile pushed CI against intent rather than chasing green.
 
 ## Work plan (ordered)
 

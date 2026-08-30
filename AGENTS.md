@@ -1,6 +1,7 @@
 # dotsync - Agent Instructions
 
-This file guides AI agents working on the dotsync codebase itself. This tool is developed from the [agent-tools workspace](https://github.com/maxeonyx/agent-tools); clone and develop there, not from this repo directly.
+This repository is self-contained for development. A standalone clone must
+build, test, and release without an `agent-tools` checkout.
 
 ## TDD ratchet — read before testing
 
@@ -8,7 +9,6 @@ Run `cargo ratchet`, not plain `cargo test`. A new test must be red when first i
 
 ## Start Here
 
-- If you were started inside this submodule, read the workspace `../../AGENTS.md` too — it defines the development process (loops, standards/concerns, reviewer/implementer separation) and post-push obligations (submodule pointer update, CI reconciliation) that apply to all tools including this one.
 - Read `DESIGN.md` before changing command behavior, scope semantics, sync rules, or any product requirement.
 - Read `PLAN.md` for current priorities, the ordered work plan, and standing constraints (notably: never hand-mutate the hidden repo or dotfiles history).
 - Read `README.md` when updating public-facing positioning, quick-start content, or outbound links.

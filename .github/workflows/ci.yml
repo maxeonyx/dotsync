@@ -42,15 +42,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Prepare workspace path dependencies
+      - name: Prepare cargo-ratchet source
         run: |
-          mkdir -p ../../crates
-          git clone --depth=1 https://github.com/maxeonyx/agent-tools ../../agent-tools-deps
-          cp -R ../../agent-tools-deps/crates/agent-tools-updater ../../crates/agent-tools-updater
-          cp -R ../../agent-tools-deps/crates/help-test ../../crates/help-test
-          mkdir -p ../../ratchet-install/tools ../../ratchet-install/crates
-          git clone --depth=1 https://github.com/maxeonyx/tdd-ratchet-rs ../../ratchet-install/tools/tdd-ratchet
-          cp -R ../../agent-tools-deps/crates/help-test ../../ratchet-install/crates/help-test
+          mkdir -p ../../ratchet-install
+          git clone --depth=1 https://github.com/maxeonyx/tdd-ratchet-rs ../../ratchet-install/tdd-ratchet
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -67,7 +62,7 @@ jobs:
         run: cargo clippy -- -D warnings
       - name: Install cargo-ratchet
         run: |
-          cargo install --path ../../ratchet-install/tools/tdd-ratchet --locked
+          cargo install --path ../../ratchet-install/tdd-ratchet --locked
           cargo install cargo-nextest --locked
       - name: Run tests (ratchet)
         run: cargo ratchet
@@ -91,13 +86,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
-
-      - name: Prepare workspace path dependencies
-        run: |
-          mkdir -p ../../crates
-          git clone --depth=1 https://github.com/maxeonyx/agent-tools ../../agent-tools-deps
-          cp -R ../../agent-tools-deps/crates/agent-tools-updater ../../crates/agent-tools-updater
-          cp -R ../../agent-tools-deps/crates/help-test ../../crates/help-test
 
       - uses: dtolnay/rust-toolchain@stable
         with:
