@@ -1,8 +1,6 @@
 // A paused cascade: how one arises, what home holds while it is paused, how
 // `continue` and `abort` end it, and how every other command reports it.
 
-use std::fs;
-
 mod harness;
 use harness::*;
 
@@ -1261,93 +1259,25 @@ fn continue_refuses_conflict_markers_left_in_another_machines_scope() {
     );
 }
 
-/// DESIGN: "The cascade never pauses structurally — every convergence pass
-/// completes in one atomic transaction, writing every merge commit, conflicted
-/// or not", and "Conflicted heads are not pushed. They stay local-ahead ...
-/// until resolved; everything non-conflicted still pushes."
+/// A pause publishes nothing, including the scopes whose merge was fine —
+/// where "fine" here means `all`, which this run committed to, and `linux` and
+/// `goof-b`, which merged that commit cleanly. Only `goof-a`, another
+/// machine's leaf, holds the collision.
 ///
-/// Today neither half happens: the cascade stops at the conflict, and the
-/// `WithheldPausedCascade` guard withholds *everything*, including `all`,
-/// which is not conflicted and whose commit is the entire reason the run
-/// existed. So a pause strands committed history unpushed — the exact shape of
-/// the 2026-07-27 wedge, and what design principle 5 ("a drift stop must not
-/// strand unpushed commits") exists to prevent.
+/// The alternative is what makes this worth a test of its own: publishing the
+/// scopes that did not conflict is publishing the *cause* of the conflict,
+/// because the cause is a commit on a scope that merged cleanly everywhere
+/// else. Once `all` is on the remote, no local command can take it back, so
+/// every later run re-derives the same conflict and `dotsync abort` can never
+/// clear it — three aborts, three pauses. Withholding keeps abort meaning what
+/// it says, and the cost — committed history sitting unpublished — is a cost
+/// only while it is invisible, which is what `unpushed_scopes` is for.
 ///
-/// PLAN item 3 wants the eligibility check inside `push_scope_updates` "so
-/// every call site is covered by construction". A black-box test cannot see
-/// where the check lives, so it asks the next best thing: a second, separate
-/// run — a plain `dotsync`, a different call site — has to give the same
-/// answer.
+/// The out-of-ancestry shape, because it is the one where withholding takes
+/// something from the machine in front of you: `goof-b`'s own finished config
+/// waits behind a conflict on somebody else's branch.
 #[test]
-fn a_pause_publishes_the_scopes_it_did_not_conflict_on() {
-    let harness = TestHarness::new();
-    let machine_a = harness.machine("machine-a", "linux", "goof-a");
-    let machine_b = harness.machine("machine-b", "linux", "goof-b");
-
-    machine_a.init_ok();
-    machine_b.init_ok_under("linux");
-    machine_a.run_ok("dotsync --force");
-
-    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
-    machine_a.run_ok("dotsync commit all -m 'add base config' -- .config/app.conf");
-    machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
-    machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
-
-    machine_b.run_ok("dotsync");
-
-    // Recorded before the pause so the assertions below are about what this
-    // run published, not about what the remote happened to hold.
-    let conflicted_scopes = ["linux", "goof-a", "goof-b"];
-    let before = conflicted_scopes.map(|scope| remote_branch_revision(&machine_b, scope));
-
-    machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
-    let pause = machine_b.run_expecting(
-        "dotsync commit all -m 'update shared config' -- .config/app.conf",
-        3,
-    );
-
-    assert_eq!(
-        remote_branch_file_contents(&machine_b, "all", ".config/app.conf"),
-        "setting = \"all\"\n",
-        "`all` is not conflicted, and its commit is the whole reason this run existed: a pause must not strand it\n{}",
-        render_output(&pause)
-    );
-    for (scope, was) in conflicted_scopes.iter().zip(&before) {
-        assert_eq!(
-            &remote_branch_revision(&machine_b, scope),
-            was,
-            "`{scope}` inherited the conflict, and a conflicted head is never pushed"
-        );
-    }
-
-    // A different command, and therefore a different push call site, has to
-    // give the same answer. Its exit code is not asserted: what plain
-    // `dotsync` does when it meets a pause is a separate open question.
-    machine_b.run("dotsync");
-    assert_eq!(
-        remote_branch_file_contents(&machine_b, "all", ".config/app.conf"),
-        "setting = \"all\"\n"
-    );
-    for (scope, was) in conflicted_scopes.iter().zip(&before) {
-        assert_eq!(
-            &remote_branch_revision(&machine_b, scope),
-            was,
-            "a later run pushed the conflicted head of `{scope}`"
-        );
-    }
-}
-
-/// The same rule where it separates one scope from the rest instead of
-/// stopping everything: the conflict is on `goof-a`, so `all`, `linux` and
-/// this machine's own `goof-b` are all clean merges with nothing wrong with
-/// them, and `goof-a` alone stays local until it is resolved.
-///
-/// This is the shape that matters for the machine sitting in front of you.
-/// With the conflict on another machine's branch, withholding the whole push
-/// means this machine's own scope — its own finished config — sits unpublished
-/// behind someone else's unresolved merge.
-#[test]
-fn a_pause_on_another_machines_scope_still_publishes_this_machines_own() {
+fn a_pause_on_another_machines_scope_withholds_this_machines_own_too() {
     let harness = TestHarness::new();
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
@@ -1362,7 +1292,8 @@ fn a_pause_on_another_machines_scope_still_publishes_this_machines_own() {
     machine_a.run_ok("dotsync commit goof-a -m 'customize goof-a config' -- .config/app.conf");
 
     machine_b.run_ok("dotsync");
-    let goof_a_before = remote_branch_revision(&machine_b, "goof-a");
+    let scopes = ["all", "linux", "goof-a", "goof-b"];
+    let before = scopes.map(|scope| remote_branch_revision(&machine_b, scope));
 
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     let pause = machine_b.run_expecting(
@@ -1370,19 +1301,42 @@ fn a_pause_on_another_machines_scope_still_publishes_this_machines_own() {
         3,
     );
 
-    for scope in ["all", "linux", "goof-b"] {
+    for (scope, was) in scopes.iter().zip(&before) {
         assert_eq!(
-            remote_branch_file_contents(&machine_b, scope, ".config/app.conf"),
-            "setting = \"all\"\n",
-            "`{scope}` merged cleanly, so it publishes: another machine's unresolved merge is not a reason to hold this machine's own config back\n{}",
+            &remote_branch_revision(&machine_b, scope),
+            was,
+            "`{scope}` reached the remote at a pause, and `dotsync abort` cannot take back what the remote has\n{}",
             render_output(&pause)
         );
     }
-    assert_eq!(
-        remote_branch_revision(&machine_b, "goof-a"),
-        goof_a_before,
-        "and the one conflicted head stays local until it is resolved"
-    );
+
+    // Withholding is only defensible while the machine says what it is
+    // holding, so that is part of the same requirement. `goof-b` is not in
+    // that list and does not belong in it: the pass stopped at `goof-a` before
+    // it got there, so this machine's own scope holds nothing new to withhold
+    // — it is unconverged rather than unpublished, which is the same wait
+    // under a different name.
+    let status = machine_b.run_expecting("dotsync status --output json", 0);
+    let withheld = parse_stdout_json(&status)["unpushed_scopes"].to_string();
+    for scope in ["all", "linux"] {
+        assert!(
+            withheld.contains(scope),
+            "`{scope}` is committed here and withheld, so `status` has to name it: {withheld}\n{}",
+            render_output(&status)
+        );
+    }
+
+    // And the whole lot goes once the conflict is resolved: withholding defers
+    // publishing, it does not cancel it.
+    machine_b.write_file(".config/app.conf", "setting = \"all+goof-a\"\n");
+    machine_b.run("dotsync continue");
+    for (scope, was) in scopes.iter().zip(&before) {
+        assert_ne!(
+            &remote_branch_revision(&machine_b, scope),
+            was,
+            "`{scope}` is still unpublished after the resolution"
+        );
+    }
 }
 
 /// DESIGN: "'Paused' is not a stored mode; it is a derived observation: one or

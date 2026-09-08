@@ -154,5 +154,11 @@
     "dotsync::sync_and_drift$the_conflict_stop_lists_files_the_way_status_does_and_apart_from_its_instructions": "passing",
     "dotsync::sync_and_drift$v03_plain_sync_ignores_unrelated_home_changes": "passing",
     "dotsync::version_json$version_json_flag_prints_machine_readable_version": "passing"
+  },
+  "removals": [
+    "dotsync::conflicts$a_pause_publishes_the_scopes_it_did_not_conflict_on"
+  ],
+  "renames": {
+    "dotsync::conflicts$a_pause_on_another_machines_scope_withholds_this_machines_own_too": "dotsync::conflicts$a_pause_on_another_machines_scope_still_publishes_this_machines_own"
   }
 }
