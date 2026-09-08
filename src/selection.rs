@@ -30,7 +30,7 @@ use crate::error::{
 };
 use crate::home::{repo_path_of, Home};
 use crate::repo::{
-    collect_managed_tree_entries, load_scope_commit, read_entry_bytes, read_tree_entry_bytes,
+    collect_managed_tree_entries, read_entry_bytes, read_tree_entry_bytes, scope_head_commit,
 };
 use crate::session::Session;
 use crate::sync::classify_home_against_head;
@@ -92,8 +92,8 @@ pub(crate) async fn select_changes_to_record(
             .collect::<Result<Vec<_>, DotsyncError>>()?;
         home.observe_paths(session, named).await?;
     }
-    let machine_head = load_scope_commit(session.repo().as_ref(), machine_scope)?;
-    let classified = classify_home_against_head(session, home, &machine_head).await?;
+    let machine_head = scope_head_commit(session.repo().as_ref(), machine_scope)?;
+    let classified = classify_home_against_head(session, home, &machine_head.tree()).await?;
 
     // Naming a directory says "commit what changed under here". A bare commit
     // says the same thing about every file already on the scope, so both step
@@ -208,7 +208,7 @@ pub(crate) fn load_scope_entries(
     repo: &dyn jj_lib::repo::Repo,
     scope: &str,
 ) -> Result<BTreeMap<PathBuf, TreeValue>, DotsyncError> {
-    let commit = load_scope_commit(repo, scope)?;
+    let commit = scope_head_commit(repo, scope)?;
     collect_managed_tree_entries(&commit.tree())
 }
 

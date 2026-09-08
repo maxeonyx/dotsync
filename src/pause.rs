@@ -32,7 +32,7 @@ use crate::error::DotsyncError;
 use crate::home::{repo_path_of, Home, Resolved};
 use crate::machine::machine_signature;
 use crate::repo::{
-    collect_managed_tree_entries, load_scope_commit, push_scope_updates, read_entry_bytes,
+    collect_managed_tree_entries, push_scope_updates, read_entry_bytes, scope_head_commit,
     PushReport,
 };
 use crate::session::{in_session, Run, Session};
@@ -336,7 +336,7 @@ async fn complete_a_sync_conflict(
     home: &mut Home,
 ) -> Result<ContinueReport, DotsyncError> {
     let machine_scope = home.machine_scope().to_string();
-    let head = load_scope_commit(session.repo().as_ref(), &machine_scope)?;
+    let head = scope_head_commit(session.repo().as_ref(), &machine_scope)?;
     match home.resolve_with_home_bytes(session, &head).await? {
         // Home and the head merge cleanly, so there is nothing here that only
         // the agent could have decided.
@@ -345,7 +345,7 @@ async fn complete_a_sync_conflict(
     }
 
     let push = push_scope_updates(session).await?;
-    let classified = classify_home_against_head(session, home, &head).await?;
+    let classified = classify_home_against_head(session, home, &head.tree()).await?;
     Ok(ContinueReport {
         resumed: Resumed::SyncConflict,
         sync: SyncReport {

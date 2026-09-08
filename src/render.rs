@@ -98,6 +98,33 @@ pub(crate) fn paused_cascade_notes(paused_cascade: Option<&String>) -> Vec<Strin
     ]
 }
 
+/// What a read-only command says about a scope it found contested.
+///
+/// A note for the same reason a paused cascade is one: it qualifies the answer
+/// rather than being it, and it is the reason the next plain `dotsync` will
+/// stop — which is the question `status` is being run to answer by the time
+/// anyone reads this.
+pub(crate) fn diverged_scope_notes(scopes: &[String]) -> Vec<String> {
+    if scopes.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        format!(
+            "dotsync: {} diverged: this machine and the remote each hold commits the other does not",
+            quoted_scopes(scopes)
+        ),
+        "dotsync: a sync cannot merge that yet (https://github.com/maxeonyx/dotsync/issues/17), so it stops instead and nothing is published.".to_string(),
+    ]
+}
+
+fn quoted_scopes(scopes: &[String]) -> String {
+    scopes
+        .iter()
+        .map(|scope| format!("`{scope}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// One changed file, for a machine. The same object wherever dotsync reports a
 /// file that differs from what the scopes hold: `status`, `diff`, and the
 /// drift a run stopped on. `state` is the code to branch on; `reason` is the
@@ -312,8 +339,8 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
         DotsyncError::ScopeDiverged { scope, .. } => render_structured_error(
             &format!("scope `{scope}` has diverged from the remote"),
             "Dotsync fetches each scope's published history before syncing or committing, so every machine picks up what the others have recorded.",
-            "This fetch flow fast-forwards a scope when the remote has simply moved ahead, and leaves the scope alone when this machine holds commits it has not published yet.",
-            "It expects the local and remote positions of a scope to be on one line of history, so that one of them is an ancestor of the other.",
+            "That fetch moves a scope's head forward when the remote has simply moved ahead, and leaves it where it is when this machine holds commits it has not published yet.",
+            "It expects a scope's head and the published one to be on one line of history, so that one of them is an ancestor of the other.",
             &current_state_text(&error_report),
             "This machine and the remote both have commits on this scope that the other does not, so neither side can be fast-forwarded onto the other.",
             &[

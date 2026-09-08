@@ -4,7 +4,7 @@ use jj_lib::repo::ReadonlyRepo;
 
 use crate::config::{load_config, DotsyncConfig, DotsyncPaths};
 use crate::error::DotsyncError;
-use crate::repo::{fetch_origin, load_repo_direct};
+use crate::repo::{diverged_scopes, fetch_origin, load_repo_direct, scope_diverged};
 
 /// Everything one run of dotsync knows: where home and the hidden repo are,
 /// the repo as this run opened it, the scope graph read out of that repo, and
@@ -56,7 +56,10 @@ impl Session {
         &self.repo
     }
 
-    /// The one fetch a run makes.
+    /// The one fetch a run makes, and the whole of what a read-only command
+    /// needs: jj's import puts every scope's head into one of its three states
+    /// — absent, one commit, or contested — and `scope_head` reads it back
+    /// out, so there is no repo state a report has to be assembled around.
     ///
     /// A remote out of reach is not a dead end. DESIGN's "offline is just
     /// deferred convergence" says to carry on against the last state we did
@@ -76,6 +79,29 @@ impl Session {
                 Ok(())
             }
             Err(error) => Err(error),
+        }
+    }
+
+    /// What a run that writes does before it writes: fetch, and stop if this
+    /// run would have to merge a divergence it cannot.
+    ///
+    /// Read-only commands call `fetch` instead and report the same divergence,
+    /// because describing a state is the one thing that works in every state.
+    /// A run that writes cannot: a contested head has no single commit to
+    /// cascade from or to publish, so carrying on would leave the scope
+    /// silently unconverged while the run reported success.
+    ///
+    /// The stop is here, once, rather than at whichever site happened to need
+    /// a single commit id first — that is what let one contested head produce
+    /// five different outcomes, two of them silent.
+    pub(crate) async fn converge(&mut self) -> Result<(), DotsyncError> {
+        self.fetch().await?;
+        match diverged_scopes(self.repo.as_ref(), &self.config.graph)
+            .first()
+            .map(|scope| scope_diverged(self.repo.view(), scope))
+        {
+            Some(diverged) => Err(diverged),
+            None => Ok(()),
         }
     }
 
