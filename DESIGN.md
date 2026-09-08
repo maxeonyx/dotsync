@@ -106,7 +106,7 @@ Written abstractly, on purpose. What the code calls each of these is a separate,
 ### Three things, and only three
 
 1. **Home** — what this machine has right now at the managed paths.
-2. **The repo** — what every machine should have, layered by scope. Config, conflicts and pause state are all data inside this.
+2. **The repo** — what every machine should have, layered by scope. Config is data inside it. A conflict is not: it is what merging two of its heads produces, and nothing stores one.
 3. **The mark** — which commit this machine last materialized into home. One id.
 
 The mark is the one people leave out, so here is why it is not optional. Take `.config/app.conf`, where home holds `setting = "b"` and the machine scope holds `setting = "a"`. Those two facts alone do not tell you what to do next. If the mark says this machine last wrote `"a"` into home, then somebody edited the file afterwards, and syncing over it throws that edit away. If the mark says this machine last wrote `"b"`, then the repo moved on somewhere else and syncing over it is the entire job. Identical observations of home and the repo, opposite correct actions. The mark is the only thing that separates them.
@@ -255,9 +255,12 @@ Every state a machine can be in — mid-crash, post-failed-push, freshly offline
 
 **Push is a loop, not a step.** A rejected push isn't an error; it means another machine pushed first. Fetch, converge, push again. Push happens immediately after history is created — before the home sync — so a sync-side stop (a conflict with home) never strands committed history unpushed.
 
-**Read-only commands report; they never decide.** `status`, `diff`, and `view` create no commits, publish nothing, and never write to home. They fetch (when online) and _report_ what convergence would do — including "pulling would conflict on these files in scope X" — computed as in-memory merges via jj-lib. Only `dotsync` (sync), `commit`, and `continue` converge.
+**Read-only commands report; they never decide.** `status`, `diff`, and `view` move no scope bookmark, publish nothing, and never write to home. They fetch (when online) and _report_ what convergence would do — including "pulling would conflict on these files in scope X" — by running the convergence pass itself in a transaction nothing commits. Only `dotsync` (sync), `commit`, and `continue` converge for real.
 
-One thing they do change, and it is worth writing down rather than claiming otherwise: importing what the fetch brought fast-forwards a scope's local bookmark onto a position the remote already published. That is the one case of convergence that creates nothing — the merge is trivially the remote's head — so it takes no decision away from the next run, and there is no state a read-only command can leave behind that a plain `dotsync` would not have reached anyway. It is still a write where none was wanted. Not doing it needs the run to answer from a fetched view it never records, which is a change to how a run holds the repo rather than to what convergence is.
+Two things they do write, worth stating rather than claiming otherwise:
+
+- Importing what the fetch brought fast-forwards a scope's local bookmark onto a position the remote already published. That is the one case of convergence that creates nothing — the merge is trivially the remote's head — so it takes no decision away from the next run, and there is no state a read-only command can leave behind that a plain `dotsync` would not have reached anyway. Not doing it needs the run to answer from a fetched view it never records, which is a change to how a run holds the repo rather than to what convergence is.
+- Predicting the pass on a machine that has unconverged work writes the merges it predicts into the object store, where no bookmark and no operation points at them. They are the same objects the next writing run creates, and they cost what jj's own snapshots cost.
 
 **Offline is just deferred convergence.** If fetch fails due to network, dotsync skips it and proceeds against last-known remote state. Local history builds up ahead of the remote — which is a normal convergence input, handled the next time the machine is online. There is no offline mode and no queue.
 
@@ -265,13 +268,17 @@ One thing they do change, and it is worth writing down rather than claiming othe
 
 There is deliberately no visible working copy — a working copy next to the live config would mean three copies of everything. But the live config directory **is the working copy for all intents and purposes**, and it gets the full working-copy treatment. The user can never move it backward or sideways to another version or scope (inspection is done via `dotsync view`); it only ever goes forward. And when a merge conflicts, the conflict has to be put in front of whoever resolves it — whether that means writing it into the files they work in is the one open question here, and "The resolution surface" below is where it is left open.
 
-### Conflicts are commits, not a paused mode
+### "Paused" is derived, not stored
 
-jj's defining feature is that conflicts are first-class objects inside commits: a merge commit can be created with a conflicted tree, and descendants inherit the conflict through their own merges until it is resolved. dotsync leans on this fully. **The cascade never pauses structurally** — every convergence pass completes in one atomic transaction, writing every merge commit, conflicted or not. "Paused" is not a stored mode; it is a derived observation: _one or more local scope heads have conflicted trees._ The conflicted heads act as the queue of pending resolution work.
+A merge that holds a file two sides changed differently is not history. The pass stops at it, writes nothing for that scope or anything below it, and the run stops with the conflict in front of whoever has to resolve it. So "paused" is not a stored mode and not a commit either: it is the answer to _where would the pass stop_, and it is computed by running the pass in a transaction nothing commits. The same commits give the same merge, so a resolution shows up the moment it is written, a crash leaves nothing behind to be stale, and a read-only command cannot describe the machine differently from the run that follows it.
 
-An earlier design stored pause intent in a machine-local state file (merge parent ids, remaining cascade steps, pre-pause heads) and refused to create conflicted history. That was a holdover from the working-copy era and created a class of dead ends: the file was written outside the repo transaction (crash = half-cascaded bookmarks with no record), it was invisible (no command displayed it), and it was the only copy of the intent. With conflicts in history, every piece of that state is derivable: the conflicted scope and files from the head trees, the merge parents and description from the conflicted commit itself, and nothing else is needed because there are no "remaining steps" — the cascade already completed around the conflict.
+Three paused states exist, and each is derived from a different place:
 
-**Principle: keep exactly the minimum required state.** The only machine-local state is jj's own working-copy record — the view's working-copy commit entry (the machine scope and the mark, per-machine facts that shared history cannot contain) and the working copy's freshness record beside the repo. Anything derivable from the repo must be derived, never cached in a side file. Derived state is automatically correct after a crash; stored state is a fresh opportunity to be wrong.
+- **a scope's merge** — from the pass;
+- **home against this machine's own scope head** — from home, the mark and the head, which is the same three-way merge every sync computes;
+- **a `commit` whose own merge conflicted** — from the one record dotsync keeps beside the repo, because that merge has home as one of its two sides. Recomputing it after the answer is written finds nothing conflicted, and the scope and the message the run was carrying only ever existed in its arguments.
+
+**Principle: keep exactly the minimum required state.** Machine-local state is jj's own working-copy record — the view's working-copy commit entry (the machine scope and the mark, per-machine facts that shared history cannot contain) and the working copy's freshness record — plus one record of a run that stopped: where every scope stood before it wrote anything, which is where `abort` returns them to, and the commit it was making if that is what stopped it. Each of those is a fact about a run rather than about the repo, which is why no amount of reading the repo recovers it. Anything that *is* derivable from the repo must be derived, never cached in a side file. Derived state is automatically correct after a crash; stored state is a fresh opportunity to be wrong.
 
 ### The resolution surface
 
@@ -284,8 +291,8 @@ An earlier design stored pause intent in a machine-local state file (merge paren
 The bullets below say which of them assume an answer.
 
 - **If markers are materialized**, a conflict anywhere in this machine's scope ancestry propagates down into the machine scope's tree, so ordinary sync writes it into the affected home files. Drift detection then treats those markers as the expected home content while they are there — which is what stops a forced sync from replacing a resolution in progress with the unresolved file.
-- **`dotsync show conflict` renders the conflict state at any time**: DAG position, the rootmost conflicted scope, which scopes' changes are colliding, the conflicted files, and the instructions. Because it renders derived state rather than a stored record, it is automatically correct after any crash, on any machine. `status` points here whenever conflicts exist.
-- **`continue` applies the resolution at the rootmost conflicted scope and propagates it**: descendant merges that inherited the same conflict resolve automatically through jj's descendant rewriting. `commit` refuses while a merge is paused, pointing at the resolution flow. Whether `continue` exists at all rides on the same experiment — see below.
+- **`dotsync show conflict` renders the conflict state at any time**: DAG position, the scope whose merge stopped, which scopes' changes are colliding, the conflicted files, and the instructions. Because it renders derived state rather than a stored record, it is automatically correct after any crash, on any machine. `status` points here whenever conflicts exist.
+- **`continue` is the pass again with an answer supplied.** It recomputes the merge that stopped, takes home's bytes at exactly the paths that merge could not resolve, and hands those to the pass — so the resolution is recorded on the scope that stopped, and everything below it merges a parent that moved, which is ordinary convergence. There is no remaining cascade to remember: the pass finds what is left by looking. An answer that does not cover a second conflict leaves that merge conflicted, and the pass stops there as it would have anyway, which is what keeps home's bytes off a conflict nobody has been shown. `commit` refuses while a merge is waiting, pointing at the resolution flow. Whether `continue` exists at all rides on the same experiment — see below.
 - **"Resolved" is a property of the content, and refusing markers is the whole of it.** `continue` refuses a file that still holds conflict markers, since markers recorded as the merged contents cascade to every descendant and reach every other machine's live config. It refuses nothing else. In particular an unchanged file is a resolution — the agent read both versions and kept the one already there — so the pause says as much, and the tempting "unchanged means unresolved" check is the thing to avoid: it is silently wrong for exactly the agent that did the work properly. Markers are detected by a start line *and* an end line, because a lone run of seven `=` or `-` characters is ordinary config.
 - **Conflicts outside this machine's ancestry** (e.g. a cascade from `all` conflicting only in the `windows` subtree while this machine is linux) don't appear in home naturally, and resolving one borrows the home path as a scratch buffer for somebody else's config. The pause states the switch loudly — "this machine is `mx-xps-cy`, which does not descend from `windows`, so what you are resolving is not this machine's config; `mx-xps-cy`'s own version comes back after `continue` or `abort`" — because without it the agent reads another machine's settings as its own.
 
@@ -302,13 +309,15 @@ If they are not materialized, home reads identically before the agent starts and
 - **A pause publishes nothing**, and `dotsync continue` publishes the lot. The scopes the pass converged before it stopped stay local-ahead, which is an ordinary convergence state, and the read-only commands name them so that a machine holding history back does not read as a machine with nothing to say.
 
   All or nothing, because the cause of a cascade conflict is a commit on a scope that merged cleanly: `dotsync commit all` collides at `linux`, and `all` is the scope that is fine. Publish `all` and no local command can take it back, so every later run re-derives the same conflict and `dotsync abort` can never clear it. Withholding keeps abort able to undo what the run did, and keeps the shared remote free of conflict encodings that plain git tooling renders poorly — at the cost that only the machine holding the conflict can resolve it.
-- **`abort` goes back to the last fully cascaded machine scope tip.** It abandons the unpushed conflicted commits, returns the affected scope bookmarks to their last non-conflicted positions, and reverts **all** the config files — a full sync of home to the machine scope's last fully cascaded tip, not a selective restore. Whatever the pause put into home, and the home edit that caused the aborted commit, are both gone from home afterward; that's the point of abort. Pushed history is never touched — conflicted heads are never pushed, so everything abandoned is local-only. Clean remote integration discarded along the way costs nothing: the next convergence pass re-derives it.
+- **`abort` takes back what the run that stopped committed, and puts home back.** Every scope it moved returns to where that run found it, and home is synced to the machine scope's restored tip — reverting **all** the config files, not a selective restore. Whatever the pause put into home, and the home edit that caused the aborted commit, are both gone from home afterward; that's the point of abort. Nothing published is touched, because a pause publishes nothing, so everything discarded is local-only. Clean remote integration discarded along the way costs nothing: the next convergence pass re-derives it.
+
+  **Abort is not a way out of every conflict, and says so when it is not.** When the colliding change arrived from the remote instead of from this machine, there was nothing of this machine's in the way: home goes back, the merge still stops in the same place, and the run reports that and exits with the code that means a merge is waiting. Only a resolution ends that one. Which is not a dead end — `continue` is the way through, and abort names it.
 
 ## Failure model: no dead ends
 
 Every state dotsync can produce — including states produced by crashing at the worst possible moment, a failed push, or another machine racing — must be a state that dotsync commands alone can diagnose and recover from. If a run is interrupted anywhere, the remedy is "run dotsync again" (or `continue`/`abort` for a paused cascade). Never repo surgery.
 
-This is mostly a corollary of the convergence model: interrupted work leaves local-ahead or diverged bookmarks, and those are ordinary convergence inputs. The remaining obligations are ordering and atomicity: persist pause intent in the same effective step as the history it describes, push as soon as history exists, and keep read-only commands working on any state (they report weirdness; they don't refuse to run because of it).
+This is mostly a corollary of the convergence model: interrupted work leaves local-ahead or diverged bookmarks, and those are ordinary convergence inputs, and a merge that stops is recomputed rather than remembered. The remaining obligations are ordering and atomicity: push as soon as history exists, and keep read-only commands working on any state (they report weirdness; they don't refuse to run because of it).
 
 ## Commands
 
@@ -338,9 +347,9 @@ It also reports three things that are true of the machine rather than of home, b
 
 **`dotsync show conflict`** _(not implemented — PLAN item 3)_: Re-render the current paused cascade: DAG position, paused scope, colliding scopes, conflicted files, and resolution instructions. Works at any time while a pause exists, for agents that lost the original output.
 
-**`dotsync continue`** _(existence conditional — see "Whether `continue` survives")_: Continue a paused cascade once the conflict has been resolved, recording the resolved contents at the rootmost conflicted scope. Refuses a resolution that still holds conflict markers.
+**`dotsync continue`** _(existence conditional — see "Whether `continue` survives")_: Continue a paused cascade once the conflict has been resolved, recording the resolved contents on the scope whose merge stopped and publishing everything the pause held back. Refuses a resolution that still holds conflict markers.
 
-**`dotsync abort`**: Abort a paused cascade, restore scope branches to their pre-pause revisions, clear the pause marker, and sync the current machine home back to the restored repo state.
+**`dotsync abort`**: Discard what the run that stopped committed, restoring every scope it moved to where that run found it, and sync the current machine home back to the restored state. Says so and exits 3 if the merge is still waiting afterwards, which is what a conflict that came from the remote does.
 
 ### Exit codes
 
@@ -349,9 +358,9 @@ It also reports three things that are true of the machine rather than of home, b
 | 0 | The command did what it says. |
 | 1 | dotsync stopped, or `dotsync diff` found changes. Under `--output json` the payload's `status` separates the two: `"error"` for a stop, `"ok"` for the changes `diff` found. |
 | 2 | The command line was wrong. |
-| 3 | A paused cascade is waiting: resolve the conflict and run `dotsync continue`, or run `dotsync abort` to discard it. |
+| 3 | A merge is waiting: resolve the conflict and run `dotsync continue`, or run `dotsync abort` to discard what this machine committed. |
 
-3 is a property of the state, not of the command that met it: the run that creates a pause, a `commit` that runs into one, and a `continue` that finds nothing resolved all exit 3, because they all have the same remedy. Only `diff` ever exits non-zero without having stopped, and it does so because a script needs to tell clean from dirty without parsing.
+3 is a property of the state, not of the command that met it: the run that creates a pause, a `commit` that runs into one, a `continue` that finds nothing resolved, and an `abort` that could not clear it all exit 3, because they all have the same remedy. Only `diff` ever exits non-zero without having stopped, and it does so because a script needs to tell clean from dirty without parsing.
 
 `--force` takes the repo's side instead of stopping, and reports every local change it discarded — so you always see what was overwritten, even having chosen not to stop for it. On `commit`, `--force` covers only the paths that commit named; see "Local changes and the mark" above.
 
