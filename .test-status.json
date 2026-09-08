@@ -152,8 +152,5 @@
     "dotsync::sync_and_drift$the_conflict_stop_lists_files_the_way_status_does_and_apart_from_its_instructions": "passing",
     "dotsync::sync_and_drift$v03_plain_sync_ignores_unrelated_home_changes": "passing",
     "dotsync::version_json$version_json_flag_prints_machine_readable_version": "passing"
-  },
-  "renames": {
-    "dotsync::conflicts$discarding_at_a_pause_does_not_overwrite_the_resolution_in_progress": "dotsync::conflicts$forcing_a_sync_does_not_overwrite_a_conflict_resolution_in_progress"
   }
 }
