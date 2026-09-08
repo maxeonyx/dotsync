@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
-use crate::config::DotsyncPaths;
 use crate::drift::{changed_paths, FileState};
 use crate::error::DotsyncError;
 use crate::home::Home;
+use crate::paths::DotsyncPaths;
 use crate::repo::diverged_scopes;
 use crate::session::{in_session, Run, Session};
 use crate::sync::{classify_home_against_machine_scope, finishing};
@@ -78,6 +78,6 @@ async fn status_report(
         paused_cascade: crate::pause::paused_cascade_scope(session.paths())?,
         changes: file_changes(FileState::is_drift),
         incoming: file_changes(FileState::is_incoming),
-        diverged_scopes: diverged_scopes(session.repo().as_ref(), &session.config().graph),
+        diverged_scopes: diverged_scopes(session.repo().as_ref(), session.graph()),
     })
 }

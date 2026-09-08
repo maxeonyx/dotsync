@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use jj_lib::backend::Signature;
 use jj_lib::commit::Commit;
@@ -56,15 +56,15 @@ impl ScopeHeads {
         graph: &ScopeGraph,
     ) -> Result<Self, DotsyncError> {
         let mut heads = HashMap::new();
-        for scope in graph.parents.keys() {
+        for scope in graph.names() {
             if repo
                 .view()
-                .get_local_bookmark(RefNameBuf::from(scope.as_str()).as_ref())
+                .get_local_bookmark(RefNameBuf::from(scope).as_ref())
                 .is_absent()
             {
                 continue;
             }
-            heads.insert(scope.clone(), scope_head_commit(repo, scope)?);
+            heads.insert(scope.to_string(), scope_head_commit(repo, scope)?);
         }
         Ok(Self { heads })
     }
@@ -100,11 +100,12 @@ pub(crate) fn build_cascade_plan(
     command: &CascadeCommand,
 ) -> Vec<CascadeStep> {
     let mut steps = Vec::new();
-    for scope in descendants_in_topological_order(graph, &command.root_scope) {
-        if !scope_heads.contains(&scope) {
+    for scope in graph.descendants_in_cascade_order(&command.root_scope) {
+        if !scope_heads.contains(&scope.name) {
             continue;
         }
-        let parent_scopes = graph.parents[&scope]
+        let parent_scopes = scope
+            .parents
             .iter()
             .filter(|parent| scope_heads.contains(parent))
             .cloned()
@@ -113,7 +114,7 @@ pub(crate) fn build_cascade_plan(
             continue;
         }
         steps.push(CascadeStep {
-            scope,
+            scope: scope.name.clone(),
             parent_scopes,
         });
     }
@@ -174,42 +175,4 @@ pub(crate) async fn execute_cascade_steps(
         scope_heads.update(step.scope.clone(), new_commit);
     }
     Ok(CascadeOutcome::Completed)
-}
-
-fn descendants_in_topological_order(graph: &ScopeGraph, scope: &str) -> Vec<String> {
-    let descendants: HashSet<String> = descendants_of(graph, scope).into_iter().collect();
-    let mut remaining = descendants.clone();
-    let mut ordered = Vec::new();
-    while !remaining.is_empty() {
-        let mut ready: Vec<String> = remaining
-            .iter()
-            .filter(|candidate| {
-                graph.parents[*candidate]
-                    .iter()
-                    .all(|parent| !descendants.contains(parent) || ordered.contains(parent))
-            })
-            .cloned()
-            .collect();
-        ready.sort();
-        for candidate in ready {
-            remaining.remove(&candidate);
-            ordered.push(candidate);
-        }
-    }
-    ordered
-}
-
-fn descendants_of(graph: &ScopeGraph, scope: &str) -> Vec<String> {
-    let mut descendants = Vec::new();
-    let mut stack = graph.children.get(scope).cloned().unwrap_or_default();
-    let mut seen = HashSet::new();
-    while let Some(child) = stack.pop() {
-        if seen.insert(child.clone()) {
-            descendants.push(child.clone());
-            if let Some(grandchildren) = graph.children.get(&child) {
-                stack.extend(grandchildren.iter().cloned());
-            }
-        }
-    }
-    descendants
 }

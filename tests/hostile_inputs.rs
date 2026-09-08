@@ -6,42 +6,35 @@
 // scenario file drives a workflow. Everything in here hands dotsync something
 // and asks what it does with it.
 //
-// Two of these arrive through `config.toml` today, and PLAN §2.3 cuts that
-// file at step 4 and brings it back with a reconciler at step 8. So none of
-// these tests asserts anything about how a scope comes to exist: they assert
-// what has to be true of dotsync whichever way it does. The `config.toml`
-// editing is confined to the two helpers at the bottom of this file, which are
-// the setup and not the subject — when the file goes, they change and the
-// assertions do not.
+// None of these tests asserts anything about how a scope comes to exist: they
+// assert what has to be true of dotsync whichever way it does. The setup is
+// confined to the helpers at the bottom of this file — a plain git client
+// doing to the remote what a plain git client can do.
 
 mod harness;
 use harness::*;
 
-/// One machine renames another machine's scope. From where it is standing the
-/// new graph is perfectly valid — every scope it belongs to is still there —
-/// so the change is published, and the machine that was renamed is the one
-/// that pays.
+/// A machine's scope, renamed out from under it. Nothing in dotsync renames a
+/// scope — the graph is append-only — so the way this happens is a plain git
+/// client on the shared remote, which is the same way it happened through
+/// `config.toml`: from where the renamer is standing everything is fine, and
+/// the machine that was renamed is the one that pays.
 ///
 /// Reproduced by hand on v0.3.25 and recorded in PLAN §2.2: the renamed
-/// machine gets exit 1 out of every command. `dotsync`, `status` and `diff`
-/// say `unable to determine current machine scope`, one line, no teaching
-/// block and nothing to do next; `view` says the scope has no history;
-/// `continue` and `abort` say there is no paused cascade; `init` says already
-/// initialized. Its branch is sitting on the remote untouched. There is simply
-/// no route back to it.
+/// machine got exit 1 out of every command, one line each, no teaching block
+/// and nothing to do next — `view` said the scope had no history, `abort` and
+/// `continue` said there was no paused cascade, `init` said already
+/// initialized. Its branch was sitting on the remote untouched. There was
+/// simply no route back to it.
 ///
-/// What this pins is the route back, not the rename. A future where publishing
-/// a rearrangement that breaks somebody else is refused outright passes this
-/// too, because then there is nothing to recover from — which is why the run
-/// that publishes it is deliberately not required to succeed.
+/// What this pins is the route back, not the rename.
 #[test]
 fn a_machine_whose_scope_the_fleet_renamed_has_a_route_back() {
     let harness = TestHarness::new();
-    let (machine_a, machine_b) = two_synced_machines(&harness);
+    let (_machine_a, machine_b) = two_synced_machines(&harness);
     machine_b.run_ok("dotsync");
 
-    rename_a_scope(&machine_a, "goof-b", "goof-b-renamed");
-    machine_a.run("dotsync commit all -m 'rename goof-b' -- .config/dotsync/config.toml");
+    rename_a_branch_with_a_plain_git_client(&machine_b, "goof-b", "goof-b-renamed");
 
     assert_dotsync_can_get_this_machine_working(&machine_b);
 }
@@ -51,9 +44,10 @@ fn a_machine_whose_scope_the_fleet_renamed_has_a_route_back() {
 /// reported success a moment earlier.
 ///
 /// Reproduced by hand on v0.3.25 and recorded in PLAN §2.2: declaring a scope
-/// the way `docs/SKILL.md` instructs creates no bookmark, at commit or at
-/// sync, and from then on `view` exits 1 with "scope `hyprland` is configured,
-/// but this machine's repo has no history for it" wherever the config reaches.
+/// in `config.toml` the way `docs/SKILL.md` instructed created no bookmark, at
+/// commit or at sync, and from then on `view` exited 1 with "scope `hyprland`
+/// is configured, but this machine's repo has no history for it" wherever the
+/// config reached.
 ///
 /// PLAN §2.3 step 3 is what this pins: `status`, `diff` and `view` "must work
 /// on any repo state". A read-only command that refuses to describe the state
@@ -71,8 +65,7 @@ fn view_still_answers_on_every_machine_after_a_scope_joins_the_graph() {
     let (machine_a, machine_b) = two_synced_machines(&harness);
     machine_b.run_ok("dotsync");
 
-    declare_a_scope(&machine_a, "hyprland", "linux");
-    machine_a.run("dotsync commit all -m 'add the hyprland scope' -- .config/dotsync/config.toml");
+    machine_a.run("dotsync create-scope hyprland --parent linux");
     machine_b.run("dotsync");
 
     for (whose, machine) in [
@@ -200,31 +193,12 @@ fn a_branch_rewound_on_the_remote_is_not_pushed_back() {
     );
 }
 
-/// Renames a scope in this machine's home `config.toml`, the way an agent
-/// editing the file would. Setup, not subject: PLAN §2.3 step 4 cuts this file
-/// and step 8 brings it back with a reconciler behind it, so this helper is
-/// expected to be rewritten and the tests using it are not.
-fn rename_a_scope(machine: &MachineEnvironment, from: &str, to: &str) {
-    let path = ".config/dotsync/config.toml";
-    let config = machine.read_file(path);
-    let renamed = config.replace(&format!("\n{from} = "), &format!("\n{to} = "));
-    assert_ne!(config, renamed, "the fixture found no `{from}` to rename");
-    machine.write_file(path, &renamed);
-}
-
-/// Declares a new scope in this machine's home `config.toml` — `docs/SKILL.md`
-/// tells an agent to edit this file and commit it to `all`, and this is that
-/// edit. Setup, not subject, for the same reason as `rename_a_scope`.
-fn declare_a_scope(machine: &MachineEnvironment, name: &str, parent: &str) {
-    let path = ".config/dotsync/config.toml";
-    let config = machine.read_file(path);
-    let declared = config.replace(
-        "\n[scopes]\n",
-        &format!("\n[scopes]\n\n# `{name}` — every machine running {name}.\n{name} = {{ parents = [\"{parent}\"] }}\n"),
-    );
-    assert_ne!(
-        config, declared,
-        "the fixture found no `[scopes]` table to add to"
-    );
-    machine.write_file(path, &declared);
+/// Renames a branch on the shared remote with a plain git client: the scope's
+/// history is still there, under a name nothing is looking for. Setup, not
+/// subject.
+fn rename_a_branch_with_a_plain_git_client(machine: &MachineEnvironment, from: &str, to: &str) {
+    let at = remote_branch_revision(machine, from);
+    let create = git_in(&machine.remote_dir, &["branch", to, &at]);
+    assert!(create.status.success(), "{}", render_output(&create));
+    delete_a_branch_with_a_plain_git_client(machine, from);
 }

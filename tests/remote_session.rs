@@ -300,7 +300,8 @@ fn an_init_that_could_not_reach_the_remote_can_simply_be_retried() {
         render_output(&retried_init)
     );
     assert!(
-        machine.file_exists(".config/dotsync/config.toml"),
-        "the retried init must have set this machine up properly"
+        machine.run("dotsync status --output json").status.success(),
+        "the retried init must have set this machine up properly\n{}",
+        render_output(&retried_init)
     );
 }

@@ -144,6 +144,18 @@ impl MachineEnvironment {
         output
     }
 
+    /// `init`, joining a fleet that already has scopes — which means saying
+    /// where this machine's config comes from.
+    pub fn init_ok_under(&self, parent: &str) -> Output {
+        let output = self.init_with(&format!("--parent {parent}"));
+        assert!(
+            output.status.success(),
+            "expected `dotsync init --parent {parent}` to succeed\n{}",
+            render_output(&output)
+        );
+        output
+    }
+
     /// Runs dotsync, asserts it exited 0, and hands the output back.
     ///
     /// The idiom this replaces asserted exactly this and nothing more, so a
@@ -753,36 +765,12 @@ pub fn remove_remote_scope_file(machine: &MachineEnvironment, scope: &str, relat
     git_push(&clone_dir, scope);
 }
 
+/// Adds a scope between `linux` and the machine's own, the way a fleet grows
+/// one: created by dotsync on one machine, and reached by the machines that
+/// join under it.
 pub fn add_hyprland_scope(machine: &MachineEnvironment) {
-    let clone_dir = machine.home_dir.join("remote-all.ignore");
-    if clone_dir.exists() {
-        fs::remove_dir_all(&clone_dir).expect("remove old remote all clone dir");
-    }
-    clone_remote_branch_to(&clone_dir, &machine.remote_dir, "all");
-
-    let config_path = clone_dir.join(".config/dotsync/config.toml");
-    let original = fs::read_to_string(&config_path).expect("read remote config");
-    // Edited the way a person would: one scope entry at a time, leaving the
-    // comments dotsync wrote between them where they are.
-    let updated = original.replace(
-        "mx-xps-cy = { parents = [\"linux\"] }",
-        "hyprland = { parents = [\"linux\"] }\nmx-xps-cy = { parents = [\"hyprland\"] }",
-    );
-    assert_ne!(
-        updated, original,
-        "expected init config shape to match test harness"
-    );
-    fs::write(&config_path, updated).expect("write remote config");
-    git_commit_all(&clone_dir, "test: add hyprland scope");
-    git_push(&clone_dir, "all");
-
-    let hyprland_clone_dir = machine.home_dir.join("remote-hyprland.ignore");
-    if hyprland_clone_dir.exists() {
-        fs::remove_dir_all(&hyprland_clone_dir).expect("remove old remote hyprland clone dir");
-    }
-    clone_remote_branch_to(&hyprland_clone_dir, &machine.remote_dir, "linux");
-    git_checkout_new_branch(&hyprland_clone_dir, "hyprland");
-    git_push(&hyprland_clone_dir, "hyprland");
+    let created = machine.run("dotsync create-scope hyprland --parent linux");
+    assert!(created.status.success(), "{}", render_output(&created));
 }
 
 /// Pushes a branch that has nothing to do with dotsync, the way anything else
@@ -1152,8 +1140,7 @@ pub fn pause_a_conflict_on(
 
     let init_a = machine_a.init();
     assert!(init_a.status.success(), "{}", render_output(&init_a));
-    let init_b = machine_b.init();
-    assert!(init_b.status.success(), "{}", render_output(&init_b));
+    machine_b.init_ok_under("linux");
     let sync_a_after_join = machine_a.run("dotsync --force");
     assert!(
         sync_a_after_join.status.success(),
@@ -1249,15 +1236,16 @@ pub fn dotsync_args(command: &str) -> Vec<String> {
 }
 
 /// Two machines on one remote, both initialised and both synced to the same
-/// state. `machine_a` syncs last because `machine_b`'s init adds its own scope
-/// to the shared scope graph, which reaches `machine_a`'s home config.
+/// state. `machine_a` goes first, because it is the one that creates the
+/// fleet: `machine_b` joins the graph `machine_a` started, under the shared
+/// `linux` scope.
 pub fn two_synced_machines(harness: &TestHarness) -> (MachineEnvironment, MachineEnvironment) {
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
     let init_a = machine_a.init();
     assert!(init_a.status.success(), "{}", render_output(&init_a));
-    let init_b = machine_b.init();
+    let init_b = machine_b.init_with("--parent linux");
     assert!(init_b.status.success(), "{}", render_output(&init_b));
     let sync_a = machine_a.run("dotsync --force");
     assert!(sync_a.status.success(), "{}", render_output(&sync_a));

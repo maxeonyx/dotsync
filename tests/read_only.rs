@@ -282,7 +282,6 @@ linux <- all
 mx-xps-cy <- linux
 
 Files
-.config/dotsync/config.toml
 .gitconfig
 ",
     );
@@ -305,7 +304,6 @@ fn view_scope_shows_checked_in_file_tree() {
         &view_output,
         "\
 Scope mx-xps-cy
-.config/dotsync/config.toml
 .gitconfig
 ",
     );

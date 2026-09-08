@@ -180,57 +180,6 @@ fn commit_path_that_escapes_home_is_an_error() {
 }
 
 #[test]
-fn committing_the_scope_graph_outside_all_is_an_error() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    let config_path = ".config/dotsync/config.toml";
-    let original = machine.read_file(config_path);
-    machine.write_file(
-        config_path,
-        &format!("{original}\n# hyprland: wayland compositor config\n"),
-    );
-    let linux_before = bookmark_revision(&machine, "linux");
-
-    // Dotsync only ever reads the scope graph from `all`. A copy recorded on
-    // another scope configures nothing, but it still syncs into home on that
-    // scope's machines, where it overwrites the real one.
-    let wrong_scope = machine.run(&format!(
-        "dotsync commit linux -m 'describe hyprland' -- {config_path}"
-    ));
-    assert_eq!(
-        wrong_scope.status.code(),
-        Some(1),
-        "committing the scope graph to a non-all scope should be refused\n{}",
-        render_output(&wrong_scope)
-    );
-    assert_eq!(
-        bookmark_revision(&machine, "linux"),
-        linux_before,
-        "the refused commit must not move the scope"
-    );
-
-    let stderr = String::from_utf8_lossy(&wrong_scope.stderr).into_owned();
-    assert!(
-        stderr.contains("dotsync only reads it from `all`"),
-        "the refusal must teach where the scope graph lives\n{}",
-        render_output(&wrong_scope)
-    );
-
-    // The same change is fine on `all`, which is the only place it is read.
-    machine.run_ok(&format!(
-        "dotsync commit all -m 'describe hyprland' -- {config_path}"
-    ));
-    assert!(
-        read_bookmark_file_contents(&machine, "all", config_path)
-            .contains("# hyprland: wayland compositor config"),
-        "the scope graph change should land on all"
-    );
-}
-
-#[test]
 fn commit_path_inside_dotsyncs_own_state_is_an_error() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
@@ -293,7 +242,7 @@ Correct flow:
 - name paths relative to your home directory: `dotsync commit all -m \"message\" -- .config/fish/config.fish`.
 - do not use `~/`, absolute paths, or `..`; dotsync resolves every path against your home directory already, and records it verbatim.
 - commit the config files you edited instead; dotsync's hidden repo is not config and cannot travel on a scope.
-- to change which scopes exist, edit `.config/dotsync/config.toml` in home and commit that path to `all`.
+- to add a scope, run `dotsync create-scope <name> --parent <scope>`; scopes are branches in dotsync's own repo, not files in home.
 - run `dotsync status` to see which managed files changed.
 ",
             machine.repo_dir.display()
@@ -842,7 +791,7 @@ fn a_successful_forced_commit_says_what_it_overwrote() {
         "\
 dotsync: recorded 1 file(s) over an incoming change, because you passed `--force`
 - .apprc
-dotsync: committed all and synced 2 file(s)
+dotsync: committed all and synced 1 file(s)
 ",
     );
 }

@@ -102,14 +102,14 @@
     "dotsync::help_text$top_level_help_explains_scope_and_basic_workflow": "passing",
     "dotsync::hostile_inputs$a_branch_deleted_from_the_remote_does_not_stop_this_machine": "pending",
     "dotsync::hostile_inputs$a_branch_rewound_on_the_remote_is_not_pushed_back": "pending",
-    "dotsync::hostile_inputs$a_machine_named_after_a_shared_scope_does_not_publish_its_private_config": "pending",
+    "dotsync::hostile_inputs$a_machine_named_after_a_shared_scope_does_not_publish_its_private_config": "passing",
     "dotsync::hostile_inputs$a_machine_whose_scope_the_fleet_renamed_has_a_route_back": "passing",
     "dotsync::hostile_inputs$view_still_answers_on_every_machine_after_a_scope_joins_the_graph": "passing",
     "dotsync::init_and_config$a_machine_joining_keeps_the_comments_already_in_the_config": "passing",
-    "dotsync::init_and_config$a_scope_created_on_one_machine_is_usable_from_another": "pending",
+    "dotsync::init_and_config$a_scope_created_on_one_machine_is_usable_from_another": "passing",
     "dotsync::init_and_config$init_creates_no_visible_git_directory": "passing",
     "dotsync::init_and_config$init_on_an_initialized_machine_says_what_to_run_instead": "passing",
-    "dotsync::init_and_config$init_refuses_a_parent_scope_that_does_not_exist": "pending",
+    "dotsync::init_and_config$init_refuses_a_parent_scope_that_does_not_exist": "passing",
     "dotsync::init_and_config$init_reports_no_drift": "passing",
     "dotsync::init_and_config$init_without_remote_noninteractive_matches_full_recovery_message": "passing",
     "dotsync::init_and_config$init_writes_a_config_whose_comments_teach_scope_choice": "passing",
@@ -135,7 +135,7 @@
     "dotsync::read_only$the_overview_says_which_scope_is_this_machine": "pending",
     "dotsync::read_only$view_file_says_which_scope_owns_the_file": "pending",
     "dotsync::read_only$view_file_shows_scopes_and_scoped_file_content": "passing",
-    "dotsync::read_only$view_says_what_each_scope_is_for": "pending",
+    "dotsync::read_only$view_says_what_each_scope_is_for": "passing",
     "dotsync::read_only$view_says_when_no_scope_holds_a_file": "passing",
     "dotsync::read_only$view_scope_shows_checked_in_file_tree": "passing",
     "dotsync::read_only$view_summarizes_checked_in_scopes_and_files": "passing",
@@ -160,5 +160,10 @@
     "dotsync::sync_and_drift$the_conflict_stop_lists_files_the_way_status_does_and_apart_from_its_instructions": "passing",
     "dotsync::sync_and_drift$v03_plain_sync_ignores_unrelated_home_changes": "passing",
     "dotsync::version_json$version_json_flag_prints_machine_readable_version": "passing"
-  }
+  },
+  "removals": [
+    "dotsync::init_and_config$init_writes_a_config_whose_comments_teach_scope_choice",
+    "dotsync::init_and_config$a_machine_joining_keeps_the_comments_already_in_the_config",
+    "dotsync::commit_selection$committing_the_scope_graph_outside_all_is_an_error"
+  ]
 }

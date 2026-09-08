@@ -442,19 +442,13 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
                         .to_string(),
                 );
             }
-            if rejected.iter().any(|rejected| rejected.is_scope_graph()) {
-                steps.push(
-                    "commit the scope graph to `all`, which is the only scope dotsync reads it from: `dotsync commit all -m \"message\" -- .config/dotsync/config.toml`."
-                        .to_string(),
-                );
-            }
             if rejected.iter().any(|rejected| rejected.is_dotsync_state()) {
                 steps.push(
                     "commit the config files you edited instead; dotsync's hidden repo is not config and cannot travel on a scope."
                         .to_string(),
                 );
                 steps.push(
-                    "to change which scopes exist, edit `.config/dotsync/config.toml` in home and commit that path to `all`."
+                    "to add a scope, run `dotsync create-scope <name> --parent <scope>`; scopes are branches in dotsync's own repo, not files in home."
                         .to_string(),
                 );
             }
@@ -500,8 +494,8 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
         DotsyncError::InvalidScope { .. } => render_structured_error(
             "invalid scope",
             "Dotsync stores dotfiles in a scope DAG so shared config can live on shared ancestor scopes and machine-specific config can stay isolated on leaf scopes.",
-            "This flow resolves the scope you named against the scope graph, which dotsync reads from `.config/dotsync/config.toml` on the `all` scope.",
-            "It expects the scope you name to exist in that graph.",
+            "This flow resolves the scope you named against the scope graph, which dotsync reads off its own repo: every scope is a branch, created once and never moved.",
+            "It expects the scope you name to be one of them.",
             &error_report.message,
             "Dotsync stopped because there is no such scope: it can neither place a change on one nor show you what one holds.",
             &[
@@ -588,21 +582,115 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
                 "to point this machine at a different remote, move the existing repo aside by hand first — dotsync has no command for that yet.",
             ],
         ),
+        // Every stop about where a scope hangs teaches the same thing, because
+        // it is the same question asked at three moments: joining a fleet,
+        // adding a scope, and finding out this machine has none.
+        DotsyncError::NoSuchParentScope { .. } | DotsyncError::ParentScopeRequired { .. } => {
+            render_structured_error(
+                "that scope is not in the repo",
+                THE_SCOPE_GRAPH,
+                "This flow was about to create a scope, hanging it off the scopes you named.",
+                "It expects every parent you name to be a scope this repo already has, because a scope is created where its parents are and cannot be moved afterwards.",
+                &current_state_text(&error_report),
+                "A scope hung off a name nothing answers to would receive nothing and reach nothing.",
+                &[
+                    "run `dotsync view` to see the scopes there are.",
+                    "then name the one this config should come from: the root-est scope whose machines should all share it.",
+                    "to create the parent itself first, run `dotsync create-scope <name> --parent <scope>`.",
+                ],
+            )
+        }
+        DotsyncError::MachineScopeIsShared { scope, children } => render_structured_error(
+            "that scope is shared with other machines",
+            THE_SCOPE_GRAPH,
+            "This init flow was about to adopt the scope named after this machine's hostname as the scope only this machine holds.",
+            "It expects that scope to be a leaf: nothing else hanging off it, so nothing it holds reaches anywhere else.",
+            &current_state_text(&error_report),
+            &format!(
+                "`{scope}` is what `{}` inherit from, so config committed to it would reach them as well — which is the opposite of what a machine's own scope is for.",
+                children.join("` and `")
+            ),
+            &[
+                "set DOTSYNC_HOSTNAME to a name that is this machine's alone, then run `dotsync init <remote-url> --parent <scope>` again.",
+                "run `dotsync view` to see which scopes exist and what hangs off them.",
+            ],
+        ),
+        DotsyncError::MachineScopeAlreadyPlaced { .. } => render_structured_error(
+            "this machine's scope already exists",
+            THE_SCOPE_GRAPH,
+            "This init flow looked for the scope named after this machine's hostname, and found it.",
+            "It expects to be told where to hang a scope it is creating, and nothing when it is adopting one that exists.",
+            &current_state_text(&error_report),
+            "Where a scope hangs was decided when it was created, and the graph is append-only, so `--parent` here could only be ignored or wrong.",
+            &[
+                "run `dotsync init <remote-url>` without `--parent` to adopt this machine's scope as it stands.",
+                "run `dotsync view` to see where it hangs.",
+            ],
+        ),
+        DotsyncError::MachineScopeMissing { scope, root, .. } => render_structured_error(
+            "this machine has no scope",
+            THE_SCOPE_GRAPH,
+            "This flow looked for the scope named after this machine's hostname, which is the one this machine syncs into home.",
+            "It expects that scope to be in the repo: `dotsync init` creates it when the machine joins.",
+            &current_state_text(&error_report),
+            "Without it there is nothing that says what belongs on this machine, so there is nothing to sync, and nowhere to record a change of its own.",
+            &[
+                "run `dotsync view` to see the scopes there are.",
+                &format!(
+                    "give this machine a scope again with `dotsync create-scope {scope} --parent <the scope its config should come from>`."
+                ),
+                &match root {
+                    Some(root) => format!(
+                        "if you do not know which, `dotsync create-scope {scope} --parent {root}` hangs it off the root scope: everything every machine shares, and nothing else."
+                    ),
+                    None => "this repo has no scopes at all, so there is nothing to hang one off — `dotsync init <remote-url>` against the remote that has them.".to_string(),
+                },
+                "if this machine is meant to be called something else, set DOTSYNC_HOSTNAME and rerun.",
+            ],
+        ),
+        DotsyncError::ScopeNameTaken { scope } => render_structured_error(
+            "that name is taken",
+            THE_SCOPE_GRAPH,
+            "This flow was about to create a scope, which means creating a branch of that name in dotsync's repo.",
+            "It expects the name to be free, on this machine and on the remote.",
+            &error_report.message,
+            &format!(
+                "Something already answers to `{scope}` — a scope somebody created, or a branch pushed by something that is not dotsync. Writing over it would take it away from whoever is using it."
+            ),
+            &[
+                "run `dotsync view` to see whether it is already a scope, in which case there is nothing to create.",
+                "otherwise pick another name.",
+            ],
+        ),
+        DotsyncError::ScopeCreationConflict { files, .. } => render_structured_error(
+            "those parent scopes disagree",
+            THE_SCOPE_GRAPH,
+            "This flow was about to create a scope holding everything its parents hold, which for more than one parent means merging what they hold.",
+            "It expects the parents to agree about every file they share, or to have changed different lines of it.",
+            &current_state_text(&error_report),
+            &format!(
+                "The new scope's first commit would be a conflict in {} that nobody asked for and no command is waiting to resolve.",
+                files.join(", ")
+            ),
+            &[
+                "run `dotsync view --file <path>` to see which scopes hold the file and what each of them says.",
+                "commit one agreed version to a scope both parents inherit from, let it cascade, then create the scope.",
+                "or create the scope under one parent for now.",
+            ],
+        ),
         DotsyncError::HomeNotSet
         | DotsyncError::NonUtf8Path { .. }
         | DotsyncError::GitSubmodule { .. }
         | DotsyncError::NoPausedCascade
         | DotsyncError::Io { .. }
-        | DotsyncError::ConfigParse { .. }
-        | DotsyncError::ConfigEdit { .. }
-        | DotsyncError::MissingParent { .. }
-        | DotsyncError::ScopeCycle { .. }
-        | DotsyncError::NoCurrentScope
         | DotsyncError::ScopeNotInRepo { .. }
         | DotsyncError::MissingHostname
         | DotsyncError::Jj { .. } => format!("dotsync: {}", error_report.message),
     }
 }
+
+/// What dotsync does, for every stop about the shape of the graph.
+const THE_SCOPE_GRAPH: &str = "Dotsync stores dotfiles in a DAG of scopes, and a machine holds everything its own scope holds plus everything the scopes above it hold. Every scope is a branch in dotsync's hidden repo, created once, where its parents are.";
 
 pub(crate) fn render_structured_error(
     summary: &str,

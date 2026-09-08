@@ -22,8 +22,8 @@ use jj_lib::settings::UserSettings;
 use jj_lib::str_util::StringExpression;
 use jj_lib::view::View;
 
-use crate::config::DotsyncPaths;
 use crate::error::{jj_error, DotsyncError};
+use crate::paths::DotsyncPaths;
 use crate::scope_graph::ScopeGraph;
 use crate::session::Session;
 
@@ -207,10 +207,9 @@ pub(crate) fn scope_head_commit(repo: &dyn Repo, scope: &str) -> Result<Commit, 
 /// be followed by a `dotsync` that stops on it.
 pub(crate) fn diverged_scopes(repo: &dyn Repo, graph: &ScopeGraph) -> Vec<String> {
     graph
-        .parents
-        .keys()
+        .names()
         .filter(|scope| scope_head(repo, scope).has_conflict())
-        .cloned()
+        .map(str::to_string)
         .collect()
 }
 

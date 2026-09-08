@@ -33,7 +33,7 @@ fn concurrent_same_scope_file_edits_require_resolution() {
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
     machine_a.init_ok();
-    machine_b.init_ok();
+    machine_b.init_ok_under("linux");
     machine_a.run_ok("dotsync --force");
 
     // Establish the shared base version first.
@@ -188,7 +188,7 @@ fn shared_scope_conflict_pauses_and_continue_applies_resolution_to_machine_homes
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
     machine_a.init_ok();
-    machine_b.init_ok();
+    machine_b.init_ok_under("linux");
     machine_a.run_ok("dotsync --force");
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
@@ -424,7 +424,7 @@ fn continue_preserves_non_conflicting_parent_changes_from_paused_merge() {
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
     machine_a.init_ok();
-    machine_b.init_ok();
+    machine_b.init_ok_under("linux");
     machine_a.run_ok("dotsync --force");
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
@@ -494,7 +494,7 @@ fn continue_json_reports_unpushed_scopes() {
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
     machine_a.init_ok();
-    machine_b.init_ok();
+    machine_b.init_ok_under("linux");
     machine_a.run_ok("dotsync --force");
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
@@ -551,7 +551,7 @@ fn commit_while_cascade_paused_is_blocked_without_mutating_scope() {
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
     machine_a.init_ok();
-    machine_b.init_ok();
+    machine_b.init_ok_under("linux");
     machine_a.run_ok("dotsync --force");
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
@@ -625,7 +625,7 @@ fn paused_cascade_withholds_publishing_until_it_is_resolved() {
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
     machine_a.init_ok();
-    machine_b.init_ok();
+    machine_b.init_ok_under("linux");
     machine_a.run_ok("dotsync --force");
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
@@ -706,7 +706,7 @@ fn abort_paused_cascade_restores_pre_pause_state_and_clears_pause() {
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
     machine_a.init_ok();
-    machine_b.init_ok();
+    machine_b.init_ok_under("linux");
     machine_a.run_ok("dotsync --force");
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
@@ -743,7 +743,7 @@ dotsync: overwrote 1 drifted file(s)
 @@ -1 +1 @@
 -setting = \"linux\"
 +setting = \"all\"
-dotsync: aborted the cascade paused at linux and synced 2 file(s)
+dotsync: aborted the cascade paused at linux and synced 1 file(s)
 ",
     );
 
@@ -772,7 +772,7 @@ fn abort_paused_cascade_restores_non_conflicting_selected_paths() {
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
     machine_a.init_ok();
-    machine_b.init_ok();
+    machine_b.init_ok_under("linux");
     machine_a.run_ok("dotsync --force");
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
@@ -1376,7 +1376,7 @@ fn a_pause_publishes_the_scopes_it_did_not_conflict_on() {
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
     machine_a.init_ok();
-    machine_b.init_ok();
+    machine_b.init_ok_under("linux");
     machine_a.run_ok("dotsync --force");
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
@@ -1444,7 +1444,7 @@ fn a_pause_on_another_machines_scope_still_publishes_this_machines_own() {
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
     machine_a.init_ok();
-    machine_b.init_ok();
+    machine_b.init_ok_under("linux");
     machine_a.run_ok("dotsync --force");
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
