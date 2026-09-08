@@ -11,9 +11,12 @@ Run `cargo ratchet`, not plain `cargo test`. A new test must be red when first i
 
 Run `devenv test` before committing and pushing; it includes `actionlint`, so
 workflow syntax is checked offline. Source CI does not run on push. Open a pull
-request, merge current `main` into the feature branch, then explicitly dispatch:
+request, merge current `main` into the feature branch, mark the pull request
+ready — the run's own merge step fails with `Pull Request is still a draft`
+otherwise, after spending ten minutes building — then explicitly dispatch:
 
 ```bash
+gh pr ready <number>
 gh workflow run ci.yml --ref <feature-branch> -f pr_number=<number>
 ```
 
