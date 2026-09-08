@@ -16,20 +16,19 @@ use jj_lib::ref_name::RefNameBuf;
 use jj_lib::repo::Repo as _;
 use jj_lib::rewrite::merge_commit_trees;
 
-use crate::cascade::{
-    build_cascade_plan, execute_cascade_steps, CascadeCommand, CascadeOutcome, ScopeHeads,
-};
-use crate::error::{DotsyncError, SkippedCommitPath};
+use crate::converge;
+use crate::error::{ConflictedFile, DotsyncError, SkippedCommitPath};
 use crate::home::{repo_path_of, Home};
 use crate::machine::machine_signature;
 use crate::paths::DotsyncPaths;
 use crate::pause::{
-    home_contents, parent_commit_ids_for_step, reject_commit_if_cascade_paused,
-    remaining_steps_after_pause, save_paused_cascade_state, PausedCascadeState, PausedCascadeStep,
+    converge_or_pause, home_contents, publish_or_pause, reject_commit_if_cascade_paused,
+    save_paused_cascade_state, PausedCascadeState,
 };
-use crate::repo::{push_scope_updates, PushReport};
+use crate::repo::{scope_head_commit, PushReport};
 use crate::selection::{load_scope_entries, select_changes_to_record, Selection};
 use crate::session::{in_session, Run, Session};
+use crate::sync::conflicted_versions;
 use crate::sync::{finishing, SyncReport};
 
 #[derive(Debug, Clone)]
@@ -148,12 +147,18 @@ async fn commit_in_session(
     home: &mut Home,
     options: CommitOptions,
 ) -> Result<CommitReport, CommitFailure> {
-    session.converge().await?;
-    // Publish what earlier runs left behind before looking at this commit at
-    // all: this commit may turn out to add nothing, and a machine with an
-    // interrupted push behind it must still heal. Anything this run goes on to
-    // create is published by the push after the cascade.
-    let pending_push = push_scope_updates(session).await?;
+    // Converge before looking at this commit at all: DESIGN's "commit is
+    // converge, add the new commit, converge again". Building a commit on a
+    // head that another machine has moved is how a change comes to be recorded
+    // against a version of the scope that no longer exists.
+    session.fetch().await?;
+    let checkpoint = converge::checkpoint(session.repo().as_ref(), session.graph());
+    converge_or_pause(session, home, &checkpoint).await?;
+    // Publish what earlier runs left behind: this commit may turn out to add
+    // nothing, and a machine with an interrupted push behind it must still
+    // heal. Anything this run goes on to create is published by the push after
+    // the second pass.
+    let pending_push = publish_or_pause(session, home, &checkpoint).await?;
     let graph = session.graph().clone();
 
     if !graph.contains(&options.scope) {
@@ -204,9 +209,7 @@ async fn commit_in_session(
 
     let repo = session.repo().clone();
     let mut tx = repo.start_transaction();
-    let mut scope_heads = ScopeHeads::load_existing(tx.repo_mut().base_repo(), &graph)?;
-    let original_scope_commit_ids = scope_heads.commit_ids_by_scope();
-    let base_commit = scope_heads.require(&options.scope)?;
+    let base_commit = scope_head_commit(tx.repo_mut().base_repo().as_ref(), &options.scope)?;
 
     let merge_base_tree = commit_merge_base_tree(
         tx.repo_mut(),
@@ -253,26 +256,7 @@ async fn commit_in_session(
     })?;
 
     if new_tree.has_conflict() {
-        let conflicted_files = conflicted_files_from_tree(&new_tree, &options.scope)?;
-        let conflicted_paths = conflicted_files
-            .iter()
-            .map(PathBuf::from)
-            .collect::<Vec<_>>();
-        let remaining_steps = build_cascade_plan(
-            &graph,
-            &scope_heads,
-            &CascadeCommand {
-                root_scope: options.scope.clone(),
-                description: format!("dotsync: cascade from {}", options.scope),
-                author: machine_signature(&machine_scope),
-            },
-        )
-        .iter()
-        .map(|step| PausedCascadeStep {
-            scope: step.scope.clone(),
-            parent_scopes: step.parent_scopes.clone(),
-        })
-        .collect();
+        let conflicted_paths = conflicted_paths_of(&new_tree, &options.scope)?;
         // Nothing was written, so there is no transaction to keep: the pause
         // resolves against the scope head that is already there. Dropped
         // before reading home, because reading home can amend the working copy
@@ -285,15 +269,27 @@ async fn commit_in_session(
                 machine_scope: machine_scope.clone(),
                 paused_scope: options.scope.clone(),
                 parent_commit_ids: vec![base_commit.id().hex()],
-                remaining_steps,
                 description: options.message.clone(),
-                original_scope_commit_ids: original_scope_commit_ids.clone(),
+                original_scope_commit_ids: checkpoint.clone(),
                 paused_home_contents,
             },
         )?;
+        let mut files = Vec::new();
+        for relative in &conflicted_paths {
+            let Some(versions) =
+                conflicted_versions(session, &new_tree, relative, &options.scope).await?
+            else {
+                continue;
+            };
+            files.push(ConflictedFile {
+                path: relative.clone(),
+                state: None,
+                versions,
+            });
+        }
         return Err(DotsyncError::CascadePaused {
             scope: options.scope,
-            conflicted_files: conflicted_files.join(", "),
+            files,
         }
         .into());
     }
@@ -321,66 +317,10 @@ async fn commit_in_session(
         RefNameBuf::from(options.scope.as_str()).as_ref(),
         RefTarget::normal(new_commit.id().clone()),
     );
-    scope_heads.update(options.scope.clone(), new_commit);
-
-    let cascade_command = CascadeCommand {
-        root_scope: options.scope.clone(),
-        description: format!("dotsync: cascade from {}", options.scope),
-        author: machine_signature(&machine_scope),
-    };
-    let plan = build_cascade_plan(&graph, &scope_heads, &cascade_command);
-    match execute_cascade_steps(tx.repo_mut(), &mut scope_heads, &plan, &cascade_command).await? {
-        CascadeOutcome::Completed => {}
-        CascadeOutcome::Paused {
-            scope,
-            conflicted_files,
-        } => {
-            let paused_step = plan
-                .iter()
-                .find(|step| step.scope == scope)
-                .ok_or_else(|| DotsyncError::Jj {
-                    message: format!("paused cascade step `{scope}` was not in plan"),
-                })?;
-            let parent_commit_ids = parent_commit_ids_for_step(&scope_heads, paused_step)?;
-            let remaining_steps = remaining_steps_after_pause(&plan, &scope);
-            session
-                .advance_to(tx.commit("dotsync: pause cascade").await.map_err(|err| {
-                    DotsyncError::Jj {
-                        message: format!(
-                            "commit paused cascade state for {}: {err}",
-                            options.scope
-                        ),
-                    }
-                })?)
-                .await?;
-            let conflicted_paths = conflicted_files
-                .iter()
-                .map(PathBuf::from)
-                .collect::<Vec<_>>();
-            let paused_home_contents = home_contents(session, home, &conflicted_paths).await?;
-            save_paused_cascade_state(
-                session.paths(),
-                &PausedCascadeState {
-                    machine_scope: machine_scope.clone(),
-                    paused_scope: scope.clone(),
-                    parent_commit_ids,
-                    remaining_steps,
-                    description: cascade_command.description,
-                    original_scope_commit_ids,
-                    paused_home_contents,
-                },
-            )?;
-            return Err(DotsyncError::CascadePaused {
-                scope,
-                conflicted_files: conflicted_files.join(", "),
-            }
-            .into());
-        }
-    }
 
     session
         .advance_to(
-            tx.commit("dotsync: commit and cascade")
+            tx.commit("dotsync: commit scoped change")
                 .await
                 .map_err(|err| DotsyncError::Jj {
                     message: format!("commit scoped change for {}: {err}", options.scope),
@@ -388,16 +328,25 @@ async fn commit_in_session(
         )
         .await?;
 
-    // Push as soon as the history exists: the home sync below can legitimately
-    // stop on drift, and a stop must never strand committed scope history.
-    let push = push_scope_updates(session).await;
-    // From here the forced history exists and is published, so every exit has
-    // to carry what it overwrote.
+    // From here the history exists, so every exit has to carry what it
+    // overwrote — the forced overwrites are in it and nothing later can take
+    // them back.
     let stopped = |error: DotsyncError| CommitFailure {
         forced_overwrites: forced_overwrites.clone(),
         error: Box::new(error),
     };
-    let push = push.map_err(stopped)?;
+    // The second pass: this commit moved one scope, and every scope below it
+    // now merges a parent that moved. It is the same operation the run opened
+    // with, which is why there is no cascade to plan.
+    converge_or_pause(session, home, &checkpoint)
+        .await
+        .map_err(stopped)?;
+    // Push as soon as the history exists: the home sync below can legitimately
+    // stop on a conflict, and a stop must never strand committed scope
+    // history.
+    let push = publish_or_pause(session, home, &checkpoint)
+        .await
+        .map_err(stopped)?;
     // The same home sync every other command ends with. It needs nothing said
     // about the paths this commit just recorded: they reached the scope from
     // home, so the merge that moves home onto the new head finds home's side
@@ -473,16 +422,16 @@ async fn commit_merge_base_tree(
         })
 }
 
-fn conflicted_files_from_tree(
+fn conflicted_paths_of(
     tree: &jj_lib::merged_tree::MergedTree,
     scope: &str,
-) -> Result<Vec<String>, DotsyncError> {
+) -> Result<Vec<PathBuf>, DotsyncError> {
     tree.conflicts()
         .map(|(path, value)| {
             value.map_err(|err| DotsyncError::Jj {
                 message: format!("read conflict for {scope}: {err}"),
             })?;
-            Ok(path.as_internal_file_string().to_string())
+            Ok(PathBuf::from(path.as_internal_file_string()))
         })
         .collect()
 }

@@ -88,32 +88,26 @@ impl ScopeGraph {
         found
     }
 
-    /// Every scope below `scope`, parents before children — the order a
-    /// cascade runs in.
-    pub(crate) fn descendants_in_cascade_order(&self, scope: &str) -> Vec<&Scope> {
-        let mut descendants: HashSet<String> = HashSet::new();
-        let mut queue: VecDeque<String> = self
-            .get(scope)
-            .map(|scope| scope.children.clone())
-            .unwrap_or_default()
-            .into();
-        while let Some(name) = queue.pop_front() {
-            if descendants.insert(name.clone()) {
-                if let Some(child) = self.scopes.get(&name) {
-                    queue.extend(child.children.iter().cloned());
-                }
-            }
-        }
-
+    /// Every scope, parents before children — the order convergence runs in,
+    /// so that a scope is merged after the parents whose heads it merges.
+    ///
+    /// Every scope rather than the descendants of one: a run converges the
+    /// whole graph, because the head that moved may be one no command of
+    /// this machine's touched. A change published to `all` by a machine whose
+    /// own cascade never finished reaches nobody until some other machine
+    /// merges it down, and a pass rooted at whatever this run committed would
+    /// never look there.
+    pub(crate) fn in_cascade_order(&self) -> Vec<&Scope> {
         let mut ordered: Vec<&Scope> = Vec::new();
-        let mut remaining = descendants;
+        let mut remaining: HashSet<String> = self.scopes.keys().cloned().collect();
         while !remaining.is_empty() {
             let mut ready: Vec<String> = remaining
                 .iter()
                 .filter(|name| {
-                    self.scopes[*name].parents.iter().all(|parent| {
-                        !remaining.contains(parent) || ordered.iter().any(|s| &s.name == parent)
-                    })
+                    self.scopes[*name]
+                        .parents
+                        .iter()
+                        .all(|parent| !remaining.contains(parent))
                 })
                 .cloned()
                 .collect();

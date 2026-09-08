@@ -1,14 +1,18 @@
-//! A paused cascade, and the two commands that end one.
+//! A paused convergence, and the two commands that end one.
 //!
-//! A cascade pauses when merging a scope into its child conflicts. That is
-//! recorded in a file beside the repo — the one piece of dotsync-invented state
-//! left, and PLAN §2.3 step 6 derives it from the conflicted commits instead —
-//! and `continue` and `abort` are the two ways out of it.
+//! Convergence pauses when a scope's merge holds a file two sides changed
+//! differently. The merge itself is not stored — the next pass recomputes it
+//! from the same commits — but two things about the pause are, in a file
+//! beside the repo, and PLAN §2.3 step 6 derives them from the conflicted
+//! commits instead: what home held when the conflict first appeared, so that
+//! `continue` can tell a resolution from an untouched file, and where every
+//! scope stood beforehand, so that `abort` has somewhere to go back to.
 //!
 //! `continue` also ends the *other* paused state, the conflict between home and
-//! this machine's own scope head. That one stores nothing: it is recomputed from
-//! home, the mark and the head every run, so the pause file is what tells the
-//! two apart, and there being neither is what "nothing is paused" means.
+//! this machine's own scope head. That one stores nothing at all: it is
+//! recomputed from home, the mark and the head every run, so the pause file is
+//! what tells the two apart, and there being neither is what "nothing is
+//! paused" means.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -23,46 +27,34 @@ use jj_lib::ref_name::RefNameBuf;
 use jj_lib::repo::Repo as _;
 use jj_lib::rewrite::merge_commit_trees;
 
-use crate::cascade::{
-    execute_cascade_steps, CascadeCommand, CascadeOutcome, CascadeStep, ScopeHeads,
-};
+use crate::converge::{self, Converged, Published};
 use crate::drift::{changed_paths, FileState};
-use crate::error::DotsyncError;
+use crate::error::{ConflictedFile, DotsyncError};
 use crate::home::{repo_path_of, Home, Resolved};
 use crate::machine::machine_signature;
 use crate::paths::DotsyncPaths;
-use crate::repo::{
-    collect_managed_tree_entries, push_scope_updates, read_entry_bytes, scope_head_commit,
-    PushReport,
-};
+use crate::repo::{collect_managed_tree_entries, read_entry_bytes, scope_head_commit, PushReport};
 use crate::session::{in_session, Run, Session};
 use crate::status::FileChange;
-use crate::sync::{classify_home_against_head, finishing, SyncReport};
+use crate::sync::{classify_home_against_head, conflicted_versions, finishing, SyncReport};
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) struct PausedCascadeState {
     pub(crate) machine_scope: String,
     pub(crate) paused_scope: String,
     pub(crate) parent_commit_ids: Vec<String>,
-    pub(crate) remaining_steps: Vec<PausedCascadeStep>,
     pub(crate) description: String,
     #[serde(default)]
     pub(crate) original_scope_commit_ids: BTreeMap<String, String>,
-    /// The conflicted files, and what each held in home when the cascade
-    /// paused. `continue` resolves exactly these paths, and refuses when they
-    /// have not changed — see `unresolved_conflicted_files`. Defaulted rather
-    /// than required so that a pause file written before this field existed
-    /// still loads and can still be aborted; `continue` refuses such a pause
-    /// outright. Deleted with this whole file when conflicts become commits
-    /// (PLAN item 3), like the `WithheldPausedCascade` publish guard.
+    /// The conflicted files, and what each held in home when the conflict
+    /// first appeared. `continue` resolves exactly these paths, and refuses
+    /// when they have not changed — see `unresolved_conflicted_files`.
+    /// Defaulted rather than required so that a pause file written before this
+    /// field existed still loads and can still be aborted; `continue` refuses
+    /// such a pause outright. Deleted with this whole file when conflicts
+    /// become commits (PLAN §2.3 step 6).
     #[serde(default)]
     pub(crate) paused_home_contents: BTreeMap<PathBuf, Option<Vec<u8>>>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub(crate) struct PausedCascadeStep {
-    pub(crate) scope: String,
-    pub(crate) parent_scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +85,108 @@ pub struct AbortReport {
     /// was made on either, which is why it says which of the three it is.
     pub paused_scope: String,
     pub sync: SyncReport,
+}
+
+/// Converges every scope, and turns a merge that could not resolve into the
+/// stop that presents it.
+///
+/// Every command that writes starts here, so a pause is the same object
+/// however the conflict arose — two machines that both moved a scope, a change
+/// cascading into a scope that had moved, or a parent scope somebody published
+/// without cascading it. There is one merge and one way it can stop.
+pub(crate) async fn converge_or_pause(
+    session: &mut Session,
+    home: &mut Home,
+    checkpoint: &BTreeMap<String, String>,
+) -> Result<(), DotsyncError> {
+    match converge::converge(session, home.machine_scope()).await? {
+        Converged::Completed => Ok(()),
+        Converged::Paused(pause) => Err(pause_at(session, home, checkpoint, pause).await?),
+    }
+}
+
+/// Publishes what this machine has, converging onto anything that arrives
+/// while it tries.
+pub(crate) async fn publish_or_pause(
+    session: &mut Session,
+    home: &mut Home,
+    checkpoint: &BTreeMap<String, String>,
+) -> Result<PushReport, DotsyncError> {
+    match converge::publish(session, home.machine_scope()).await? {
+        Published::Report(report) => Ok(report),
+        Published::Paused(pause) => Err(pause_at(session, home, checkpoint, pause).await?),
+    }
+}
+
+/// Records the pause and builds the stop that presents it.
+///
+/// The merge itself is not recorded — it is recomputed from the same commits
+/// on every run, so a resolution shows up the moment it is written. What is
+/// recorded is what only this moment knows: what home held when the conflict
+/// first appeared, which is what tells a resolution from an untouched file,
+/// and where the scopes stood before this run wrote anything, which is where
+/// `abort` goes back to.
+///
+/// "When the conflict first appeared" is why an existing pause at the same
+/// scope keeps its own record. A rerun meets the same conflict and would
+/// otherwise write down whatever the agent had typed so far as the baseline,
+/// which makes a half-written resolution read as no resolution at all.
+pub(crate) async fn pause_at(
+    session: &mut Session,
+    home: &mut Home,
+    checkpoint: &BTreeMap<String, String>,
+    pause: converge::Pause,
+) -> Result<DotsyncError, DotsyncError> {
+    let conflicted: Vec<PathBuf> = pause
+        .merged
+        .conflicts()
+        .map(|(path, value)| {
+            value.map_err(|err| DotsyncError::Jj {
+                message: format!("read conflict for {}: {err}", pause.scope),
+            })?;
+            Ok(PathBuf::from(path.as_internal_file_string()))
+        })
+        .collect::<Result<Vec<_>, DotsyncError>>()?;
+
+    let mut paused_home_contents = home_contents(session, home, &conflicted).await?;
+    if let Ok(existing) = load_paused_cascade_state(session.paths()) {
+        if existing.paused_scope == pause.scope {
+            for (path, contents) in existing.paused_home_contents {
+                paused_home_contents.insert(path, contents);
+            }
+        }
+    }
+
+    let machine_scope = home.machine_scope().to_string();
+    save_paused_cascade_state(
+        session.paths(),
+        &PausedCascadeState {
+            machine_scope,
+            paused_scope: pause.scope.clone(),
+            parent_commit_ids: pause.parents.iter().map(|id| id.hex()).collect(),
+            description: pause.description,
+            original_scope_commit_ids: checkpoint.clone(),
+            paused_home_contents,
+        },
+    )?;
+
+    let mut files = Vec::new();
+    for relative in &conflicted {
+        let Some(versions) =
+            conflicted_versions(session, &pause.merged, relative, &pause.scope).await?
+        else {
+            continue;
+        };
+        files.push(ConflictedFile {
+            path: relative.clone(),
+            state: None,
+            versions,
+        });
+    }
+    Ok(DotsyncError::CascadePaused {
+        scope: pause.scope,
+        files,
+    })
 }
 
 /// Home contents of the conflicted files, recorded when a cascade pauses so
@@ -188,10 +282,8 @@ async fn continue_in_session(
             paths: unresolved,
         });
     }
-    let graph = session.graph().clone();
     let repo = session.repo().clone();
     let mut tx = repo.start_transaction();
-    let mut scope_heads = ScopeHeads::load_existing(tx.repo_mut().base_repo(), &graph)?;
     let parent_commits = state
         .parent_commit_ids
         .iter()
@@ -240,79 +332,26 @@ async fn continue_in_session(
         RefNameBuf::from(state.paused_scope.as_str()).as_ref(),
         RefTarget::normal(resolved_commit.id().clone()),
     );
-    scope_heads.update(state.paused_scope.clone(), resolved_commit);
-
-    let command = CascadeCommand {
-        root_scope: state.paused_scope.clone(),
-        description: state.description.clone(),
-        author: machine_signature(&state.machine_scope),
-    };
-    let remaining_plan = state
-        .remaining_steps
-        .iter()
-        .map(|step| CascadeStep {
-            scope: step.scope.clone(),
-            parent_scopes: step.parent_scopes.clone(),
-        })
-        .collect::<Vec<_>>();
-    match execute_cascade_steps(tx.repo_mut(), &mut scope_heads, &remaining_plan, &command).await? {
-        CascadeOutcome::Completed => {}
-        CascadeOutcome::Paused {
-            scope,
-            conflicted_files,
-        } => {
-            let paused_step = remaining_plan
-                .iter()
-                .find(|step| step.scope == scope)
-                .ok_or_else(|| DotsyncError::Jj {
-                    message: format!("paused cascade step `{scope}` was not in remaining plan"),
-                })?;
-            let parent_commit_ids = parent_commit_ids_for_step(&scope_heads, paused_step)?;
-            let remaining_steps = remaining_steps_after_pause(&remaining_plan, &scope);
-            session
-                .advance_to(
-                    tx.commit("dotsync: pause cascade again")
-                        .await
-                        .map_err(|err| DotsyncError::Jj {
-                            message: format!("commit repeated paused cascade state: {err}"),
-                        })?,
-                )
-                .await?;
-            let conflicted_paths = conflicted_files
-                .iter()
-                .map(PathBuf::from)
-                .collect::<Vec<_>>();
-            let paused_home_contents = home_contents(session, home, &conflicted_paths).await?;
-            save_paused_cascade_state(
-                session.paths(),
-                &PausedCascadeState {
-                    machine_scope: state.machine_scope,
-                    paused_scope: scope.clone(),
-                    parent_commit_ids,
-                    remaining_steps,
-                    description: state.description,
-                    original_scope_commit_ids: state.original_scope_commit_ids,
-                    paused_home_contents,
-                },
-            )?;
-            return Err(DotsyncError::CascadePaused {
-                scope,
-                conflicted_files: conflicted_files.join(", "),
-            });
-        }
-    }
-
     session
         .advance_to(
-            tx.commit("dotsync: continue cascade")
+            tx.commit("dotsync: record the resolution")
                 .await
                 .map_err(|err| DotsyncError::Jj {
-                    message: format!("commit continued cascade: {err}"),
+                    message: format!("commit the resolution: {err}"),
                 })?,
         )
         .await?;
+    // The pause file goes before the pass runs, so that a pass which stops on
+    // a second conflict writes a pause describing that one — with its own
+    // record of what home held, since this scope's resolution is now history.
     remove_paused_cascade_state(session.paths())?;
-    let push = push_scope_updates(session).await?;
+
+    // Everything below the resolved scope now merges a parent that moved,
+    // which is the ordinary convergence — there is no "remaining cascade" to
+    // remember, because the pass finds whatever is left to do by looking.
+    let checkpoint = state.original_scope_commit_ids;
+    converge_or_pause(session, home, &checkpoint).await?;
+    let push = publish_or_pause(session, home, &checkpoint).await?;
     let sync = crate::sync::sync_home_to_machine_scope(session, home, discard_local).await?;
     Ok(ContinueReport {
         resumed: Resumed::Cascade {
@@ -344,7 +383,8 @@ async fn complete_a_sync_conflict(
         Resolved::Applied => {}
     }
 
-    let push = push_scope_updates(session).await?;
+    let checkpoint = converge::checkpoint(session.repo().as_ref(), session.graph());
+    let push = publish_or_pause(session, home, &checkpoint).await?;
     let classified = classify_home_against_head(session, home, &head.tree()).await?;
     Ok(ContinueReport {
         resumed: Resumed::SyncConflict,
@@ -479,33 +519,6 @@ pub(crate) fn reject_commit_if_cascade_paused(paths: &DotsyncPaths) -> Result<()
         Err(DotsyncError::NoPausedCascade) => Ok(()),
         Err(error) => Err(error),
     }
-}
-
-pub(crate) fn parent_commit_ids_for_step(
-    scope_heads: &ScopeHeads,
-    step: &CascadeStep,
-) -> Result<Vec<String>, DotsyncError> {
-    let mut ids = Vec::with_capacity(step.parent_scopes.len() + 1);
-    ids.push(scope_heads.require(&step.scope)?.id().hex());
-    for parent_scope in &step.parent_scopes {
-        ids.push(scope_heads.require(parent_scope)?.id().hex());
-    }
-    Ok(ids)
-}
-
-pub(crate) fn remaining_steps_after_pause(
-    steps: &[CascadeStep],
-    paused_scope: &str,
-) -> Vec<PausedCascadeStep> {
-    steps
-        .iter()
-        .skip_while(|step| step.scope != paused_scope)
-        .skip(1)
-        .map(|step| PausedCascadeStep {
-            scope: step.scope.clone(),
-            parent_scopes: step.parent_scopes.clone(),
-        })
-        .collect()
 }
 
 fn load_commit_by_hex(

@@ -12,15 +12,13 @@ use jj_lib::git::{
     GitPushOptions, GitSidebandLineTerminator, GitSubprocessCallback, GitSubprocessOptions,
 };
 use jj_lib::merged_tree::MergedTree;
-use jj_lib::object_id::ObjectId;
 use jj_lib::op_store::RefTarget;
-use jj_lib::ref_name::{RefNameBuf, RemoteRefSymbol};
+use jj_lib::ref_name::RefNameBuf;
 use jj_lib::refs::BookmarkPushUpdate;
 use jj_lib::repo::{ReadonlyRepo, Repo, RepoLoader, StoreFactories};
 use jj_lib::rewrite::merge_commit_trees;
 use jj_lib::settings::UserSettings;
 use jj_lib::str_util::StringExpression;
-use jj_lib::view::View;
 
 use crate::error::{jj_error, DotsyncError};
 use crate::paths::DotsyncPaths;
@@ -29,7 +27,7 @@ use crate::session::Session;
 
 /// The one remote dotsync has. Named here because "origin" is spelled at every
 /// site that asks the view a question about the remote.
-const ORIGIN: &str = "origin";
+pub(crate) const ORIGIN: &str = "origin";
 
 pub(crate) fn default_settings() -> Result<UserSettings, DotsyncError> {
     let config = StackedConfig::with_defaults();
@@ -181,63 +179,36 @@ pub(crate) async fn scope_head_tree(
 /// The one commit a scope's head is, for the commands that write history onto
 /// it.
 ///
-/// A commit is written onto a parent rather than onto possibilities, so the two
-/// states that are not a single commit are refusals here, and each says which
-/// one it met: a scope with no head has nothing to build on, and a contested
-/// one has to be merged before anything can be written on it.
+/// Every command that writes runs the convergence pass first, and that pass
+/// leaves each scope's head a single commit or stops — so by the time anything
+/// asks this question a contested head is a state the run has already dealt
+/// with. What is left is a scope this repo holds no head for at all, which is
+/// something outside dotsync having moved the branch.
 pub(crate) fn scope_head_commit(repo: &dyn Repo, scope: &str) -> Result<Commit, DotsyncError> {
-    let target = scope_head(repo, scope);
-    if target.has_conflict() {
-        return Err(scope_diverged(repo.view(), scope));
-    }
-    let commit_id = target
-        .as_normal()
-        .ok_or_else(|| DotsyncError::ScopeNotInRepo {
-            scope: scope.to_string(),
-        })?;
+    let commit_id =
+        scope_head(repo, scope)
+            .as_normal()
+            .ok_or_else(|| DotsyncError::ScopeNotInRepo {
+                scope: scope.to_string(),
+            })?;
     repo.store()
         .get_commit(commit_id)
         .map_err(|err| jj_error(format!("load scope commit for {scope}: {err}")))
 }
 
-/// The scopes whose head is contested.
+/// The scopes whose head is contested — two machines moved it and it holds
+/// both positions.
 ///
-/// Read-only commands report this and writing commands stop on it, from one
-/// reading of one state — so a `status` that says nothing about a scope cannot
-/// be followed by a `dotsync` that stops on it.
+/// Only the commands that report ever see one. A run that writes converges
+/// first, which is what turns a contested head back into a single commit, so
+/// this describes a repo that has been told two things and has not been asked
+/// to reconcile them yet.
 pub(crate) fn diverged_scopes(repo: &dyn Repo, graph: &ScopeGraph) -> Vec<String> {
     graph
         .names()
         .filter(|scope| scope_head(repo, scope).has_conflict())
         .map(str::to_string)
         .collect()
-}
-
-/// The stop a run that writes makes when a scope's head is contested.
-///
-/// Named for the state rather than for the command, because every command that
-/// writes meets it the same way and none of them can merge it.
-pub(crate) fn scope_diverged(view: &View, scope: &str) -> DotsyncError {
-    let name = RefNameBuf::from(scope);
-    let hexes = |target: &RefTarget| {
-        target
-            .added_ids()
-            .map(|id| id.hex())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    DotsyncError::ScopeDiverged {
-        scope: scope.to_string(),
-        head: hexes(view.get_local_bookmark(name.as_ref())),
-        published: hexes(
-            &view
-                .get_remote_bookmark(RemoteRefSymbol {
-                    name: name.as_ref(),
-                    remote: ORIGIN.as_ref(),
-                })
-                .target,
-        ),
-    }
 }
 
 /// What a run did about publishing local scope commits. Any scope named by
@@ -255,14 +226,7 @@ pub enum PushReport {
     /// The remote refused these scopes.
     Refused {
         scopes: Vec<String>,
-        rejection_reason: Option<String>,
-    },
-    /// Dotsync did not offer these scopes to the remote, because publishing a
-    /// half-cascaded scope would put history on the remote that `dotsync abort`
-    /// could no longer take back.
-    WithheldPausedCascade {
-        scopes: Vec<String>,
-        paused_scope: String,
+        rejection: Rejection,
     },
     /// The remote could not be reached, so these scopes stay local-ahead until
     /// a run that can reach it publishes them. That is the same state a
@@ -271,12 +235,42 @@ pub enum PushReport {
     Unreachable { scopes: Vec<String>, reason: String },
 }
 
+/// Why the remote said no — which decides whether asking again can change the
+/// answer.
+///
+/// Dotsync offers each scope with the position it last saw the remote at, so a
+/// remote that has moved since fails that lease. That is another machine
+/// having pushed first, and converging onto what it published is the answer;
+/// the run tries again by itself. A remote that refuses the write for any
+/// other reason — a hook, a permission — will refuse it again for as long as
+/// whatever refused it is in place, so the run says so and stops.
+#[derive(Debug, Clone)]
+pub enum Rejection {
+    /// The remote moved after this run last looked at it.
+    RemoteMoved,
+    /// The remote refused the write itself, in its own words.
+    RefusedTheWrite { reason: Option<String> },
+}
+
+impl Rejection {
+    pub fn reason(&self) -> String {
+        match self {
+            Rejection::RemoteMoved => {
+                "another machine published to it after this run last looked".to_string()
+            }
+            Rejection::RefusedTheWrite { reason: Some(said) } => said.clone(),
+            Rejection::RefusedTheWrite { reason: None } => {
+                "no reason reported by the remote".to_string()
+            }
+        }
+    }
+}
+
 impl PushReport {
     pub fn unpushed_scopes(&self) -> &[String] {
         match self {
             PushReport::UpToDate => &[],
             PushReport::Refused { scopes, .. } => scopes,
-            PushReport::WithheldPausedCascade { scopes, .. } => scopes,
             PushReport::Unreachable { scopes, .. } => scopes,
         }
     }
@@ -316,14 +310,6 @@ fn pending_bookmark_updates(
                 },
             ))
         })
-        .collect()
-}
-
-/// The scopes a push would offer the remote right now.
-pub(crate) fn pending_push_scopes(session: &Session) -> Vec<String> {
-    pending_bookmark_updates(session.repo(), session.graph())
-        .into_iter()
-        .map(|(name, _)| name.as_str().to_string())
         .collect()
 }
 
@@ -383,13 +369,23 @@ pub(crate) async fn push_scope_updates(session: &mut Session) -> Result<PushRepo
     if refused.is_empty() {
         return Ok(PushReport::UpToDate);
     }
+    // jj separates the two: `rejected` is the lease this run offered failing,
+    // and `remote_rejected` is the remote turning the write down. Anything
+    // that is not purely the first is treated as the second, so a run only
+    // ever retries a race it can actually win.
+    let rejection = match stats.remote_rejected.is_empty() && !stats.rejected.is_empty() {
+        true => Rejection::RemoteMoved,
+        false => Rejection::RefusedTheWrite {
+            reason: stats
+                .remote_rejected
+                .iter()
+                .chain(stats.rejected.iter())
+                .find_map(|(_, reason)| reason.clone()),
+        },
+    };
     Ok(PushReport::Refused {
         scopes: refused,
-        rejection_reason: stats
-            .rejected
-            .iter()
-            .chain(stats.remote_rejected.iter())
-            .find_map(|(_, reason)| reason.clone()),
+        rejection,
     })
 }
 

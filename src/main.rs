@@ -1123,7 +1123,7 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
             error,
             forced_overwrites,
         }) => {
-            let exit_code = if error.is_paused_cascade() { 3 } else { 1 };
+            let exit_code = if error.paused_scope().is_some() { 3 } else { 1 };
             for note in render::forced_overwrite_notes(&forced_overwrites) {
                 eprintln!("{note}");
             }

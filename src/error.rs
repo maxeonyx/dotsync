@@ -10,6 +10,10 @@ pub struct ErrorReport {
     pub code: &'static str,
     pub message: String,
     pub drifts: Vec<FileDrift>,
+    /// The scope a conflict is waiting to be resolved at, when that is what
+    /// stopped the run. The same field every successful report carries, from
+    /// the same place, so `status` and the run that stopped name it alike.
+    pub paused_cascade: Option<String>,
     /// What dotsync found, one fact per entry.
     ///
     /// A list rather than a paragraph because a run that refused three paths
@@ -40,9 +44,12 @@ pub struct ErrorReport {
 #[derive(Debug, Clone)]
 pub struct ConflictedFile {
     pub path: PathBuf,
-    /// Where the file stands across the three sides, so a conflicted file is
-    /// rendered with the same marker and the same reason `status` gives it.
-    pub state: FileState,
+    /// Where the file stands across the three sides home knows about, so a
+    /// conflict between home and this machine's scope is rendered with the
+    /// same marker and the same reason `status` gives it. `None` when the two
+    /// sides are two scopes rather than home and one: that vocabulary is about
+    /// home, and a merge home is not part of has no answer in it.
+    pub state: Option<FileState>,
     /// Base first, then the sides, in the order the merge holds them.
     pub versions: Vec<ConflictedVersion>,
 }
@@ -315,16 +322,6 @@ pub enum DotsyncError {
     /// failure with a jj message.
     #[error("`{}` is not on scope `{scope}`", path.display())]
     FileNotOnScope { scope: String, path: PathBuf },
-    #[error(
-        "scope `{scope}` has diverged: this machine and the remote each have commits the other does not"
-    )]
-    ScopeDiverged {
-        scope: String,
-        /// Both sides of the contested head, which is what "diverged" is: two
-        /// candidate positions, neither of them "the" head.
-        head: String,
-        published: String,
-    },
     /// The scope graph names a scope this machine's repo has no history for.
     /// Says what it means rather than which of jj's objects is missing:
     /// "bookmark" is a concept dotsync exists to keep out of the user's way.
@@ -341,10 +338,14 @@ pub enum DotsyncError {
         scope: String,
         files: Vec<ConflictedFile>,
     },
-    #[error("cascade paused at scope `{scope}` with conflicts in {conflicted_files}")]
+    /// Converging a scope met a file two sides changed differently. The merge
+    /// is not written and the scope's head does not move, so nothing about the
+    /// pause is history — a rerun computes the same merge from the same
+    /// commits and presents the same conflict.
+    #[error("converging scope `{scope}` stopped on {} conflicted file(s)", files.len())]
     CascadePaused {
         scope: String,
-        conflicted_files: String,
+        files: Vec<ConflictedFile>,
     },
     #[error("paused cascade at scope `{scope}` must be resolved before starting another commit")]
     PausedCascadeInProgress { scope: String },
@@ -383,23 +384,26 @@ pub enum DotsyncError {
 }
 
 impl DotsyncError {
-    /// Whether this stop is "a paused cascade is in the way", which is the one
-    /// state with a remedy of its own: resolve the conflicted files and run
-    /// `dotsync continue`, or discard the cascade with `dotsync abort`.
+    /// The scope this stop is paused at, when the stop is "a conflict is
+    /// waiting for a decision" — the one state with a remedy of its own:
+    /// resolve the conflicted files and run `dotsync continue`, or discard the
+    /// merge with `dotsync abort`.
     ///
-    /// The binary turns this into exit code 3. It is a property of the state
+    /// Both the exit code 3 the binary uses and the `paused_cascade` every
+    /// payload carries are read off this, so an agent cannot be told the state
+    /// through one channel and not the other. It is a property of the state
     /// rather than of which command met it, because it used to be neither: the
     /// run that created the pause exited 3 and the next run that ran into it
     /// exited 1, so an agent that had learned "3 means go and resolve" was told
     /// its very next command had failed for some other reason. Exhaustive on
     /// purpose — a new variant describing this state has to answer the
     /// question rather than inherit a default.
-    pub fn is_paused_cascade(&self) -> bool {
+    pub fn paused_scope(&self) -> Option<&str> {
         match self {
-            DotsyncError::CascadePaused { .. }
-            | DotsyncError::PausedCascadeInProgress { .. }
-            | DotsyncError::UnresolvedConflict { .. }
-            | DotsyncError::PausePredatesResolutionCheck { .. } => true,
+            DotsyncError::CascadePaused { scope, .. }
+            | DotsyncError::PausedCascadeInProgress { scope }
+            | DotsyncError::UnresolvedConflict { scope, .. }
+            | DotsyncError::PausePredatesResolutionCheck { scope } => Some(scope),
             DotsyncError::HomeNotSet
             | DotsyncError::NonUtf8Path { .. }
             | DotsyncError::GitSubmodule { .. }
@@ -415,7 +419,6 @@ impl DotsyncError {
             | DotsyncError::ScopeNameTaken { .. }
             | DotsyncError::ScopeCreationConflict { .. }
             | DotsyncError::InvalidScope { .. }
-            | DotsyncError::ScopeDiverged { .. }
             | DotsyncError::ScopeNotInRepo { .. }
             | DotsyncError::FileNotOnScope { .. }
             | DotsyncError::SyncConflict { .. }
@@ -424,11 +427,11 @@ impl DotsyncError {
             | DotsyncError::NotInitialized { .. }
             | DotsyncError::MissingHostname
             | DotsyncError::RemoteUnreachable { .. }
-            | DotsyncError::Jj { .. } => false,
+            | DotsyncError::Jj { .. } => None,
             // Whatever stopped the init is what the reader has to act on, and
-            // an init cannot meet a paused cascade — but saying so through the
+            // an init cannot meet a paused merge — but saying so through the
             // wrapped error keeps that true by construction.
-            DotsyncError::PartialInitLeftBehind { original, .. } => original.is_paused_cascade(),
+            DotsyncError::PartialInitLeftBehind { original, .. } => original.paused_scope(),
         }
     }
 
@@ -438,12 +441,21 @@ impl DotsyncError {
                 code: "sync_conflict",
                 message: self.to_string(),
                 drifts: Vec::new(),
+                paused_cascade: self.paused_scope().map(str::to_string),
+                current_state: error_current_state(self),
+                forced_overwrites: Vec::new(),
+                conflicts: files.clone(),
+            },
+            DotsyncError::CascadePaused { files, .. } => ErrorReport {
+                code: "cascade_paused",
+                message: self.to_string(),
+                drifts: Vec::new(),
+                paused_cascade: self.paused_scope().map(str::to_string),
                 current_state: error_current_state(self),
                 forced_overwrites: Vec::new(),
                 conflicts: files.clone(),
             },
             DotsyncError::InvalidScope { .. } => basic_error_report("invalid_scope", self),
-            DotsyncError::ScopeDiverged { .. } => basic_error_report("scope_diverged", self),
             DotsyncError::ScopeNotInRepo { .. } => basic_error_report("scope_not_in_repo", self),
             DotsyncError::FileNotOnScope { .. } => basic_error_report("file_not_on_scope", self),
             DotsyncError::NoSuchParentScope { .. } => {
@@ -465,7 +477,6 @@ impl DotsyncError {
             DotsyncError::ScopeCreationConflict { .. } => {
                 basic_error_report("scope_creation_conflict", self)
             }
-            DotsyncError::CascadePaused { .. } => basic_error_report("cascade_paused", self),
             DotsyncError::PausedCascadeInProgress { .. } => {
                 basic_error_report("paused_cascade_in_progress", self)
             }
@@ -480,6 +491,7 @@ impl DotsyncError {
                     path.display()
                 ),
                 drifts: Vec::new(),
+                paused_cascade: self.paused_scope().map(str::to_string),
                 current_state: error_current_state(self),
                 forced_overwrites: Vec::new(),
                 conflicts: Vec::new(),
@@ -523,6 +535,7 @@ pub(crate) fn basic_error_report(code: &'static str, error: &DotsyncError) -> Er
         code,
         message: error.to_string(),
         drifts: Vec::new(),
+        paused_cascade: error.paused_scope().map(str::to_string),
         current_state: error_current_state(error),
         forced_overwrites: Vec::new(),
         conflicts: Vec::new(),
@@ -542,14 +555,17 @@ fn one_or_many(count: usize, one: &str, many: &str) -> String {
 pub(crate) fn error_current_state(error: &DotsyncError) -> Vec<String> {
     match error {
         DotsyncError::InvalidScope { scope } => vec![format!("requested scope: {scope}")],
-        DotsyncError::ScopeDiverged {
-            scope,
-            head,
-            published,
-        } => vec![format!(
-            "scope: {scope}; its head holds: {head}; the remote published: {published}"
-        )],
-        DotsyncError::CascadePaused { scope, .. } => vec![format!("paused scope: {scope}")],
+        // One entry per file, for the reason `SyncConflict` has one: one file
+        // is one decision to make, and every version of it is printed below.
+        DotsyncError::CascadePaused { scope, files } => files
+            .iter()
+            .map(|file| {
+                format!(
+                    "`{}` was changed differently by two of the histories merging into `{scope}`",
+                    file.path.display()
+                )
+            })
+            .collect(),
         DotsyncError::UnusableCommitPaths { scope, rejected } => rejected
             .iter()
             .map(|rejected| rejected.explain(scope))
