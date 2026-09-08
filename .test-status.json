@@ -41,6 +41,7 @@
     "dotsync::commit_selection$forcing_a_stale_commit_records_what_it_overwrote": "passing",
     "dotsync::commit_selection$naming_one_unusable_path_reads_as_one_path": "passing",
     "dotsync::commit_selection$selected_add_modify_and_delete_are_applied_without_touching_unselected_changes": "passing",
+    "dotsync::conflicts$a_conflict_that_came_from_the_remote_is_still_reported_after_abort": "pending",
     "dotsync::conflicts$a_local_edit_conflicting_with_an_incoming_change_stops_the_sync_whole": "passing",
     "dotsync::conflicts$a_pause_on_another_machines_scope_puts_that_conflict_in_front_of_the_agent": "passing",
     "dotsync::conflicts$a_pause_on_another_machines_scope_says_whose_config_is_in_the_file": "passing",
@@ -153,8 +154,5 @@
     "dotsync::sync_and_drift$the_conflict_stop_lists_files_the_way_status_does_and_apart_from_its_instructions": "passing",
     "dotsync::sync_and_drift$v03_plain_sync_ignores_unrelated_home_changes": "passing",
     "dotsync::version_json$version_json_flag_prints_machine_readable_version": "passing"
-  },
-  "renames": {
-    "dotsync::conflicts$a_pause_on_another_machines_scope_withholds_this_machines_own_too": "dotsync::conflicts$a_pause_on_another_machines_scope_still_publishes_this_machines_own"
   }
 }

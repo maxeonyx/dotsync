@@ -1339,6 +1339,71 @@ fn a_pause_on_another_machines_scope_withholds_this_machines_own_too() {
     }
 }
 
+/// `dotsync abort` takes back what this machine committed, and a conflict that
+/// arrived from the remote is not that — so aborting one cannot end it, and
+/// the machine has to say so. Driven on v0.6.0 and recorded in PLAN §2.3 step
+/// 6: abort exits 0 saying `discarded the merge paused at 'linux'`, `status`
+/// then answers `no changes` with no `paused_cascade`, and the very next
+/// command exits 3 on the same conflict. Three aborts, three pauses, and the
+/// one command an agent runs to find out where it stands is the one that says
+/// everything is fine.
+///
+/// The lie is the pause file being the only authority: abort deleted it, so
+/// there was nothing left to read. What the machine is in is not a fact about
+/// a file — the merge of `all` and `linux` conflicts whether or not anybody
+/// wrote that down — so this asks `status` to answer from the repo, and to
+/// agree with the run that follows it.
+#[test]
+fn a_conflict_that_came_from_the_remote_is_still_reported_after_abort() {
+    let harness = TestHarness::new();
+    let machine_a = harness.machine("machine-a", "linux", "goof-a");
+    let machine_b = harness.machine("machine-b", "linux", "goof-b");
+
+    machine_a.init_ok();
+    machine_b.init_ok_under("linux");
+    machine_a.run_ok("dotsync --force");
+
+    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
+    machine_a.run_ok("dotsync commit all -m 'add base config' -- .config/app.conf");
+    machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
+    machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
+    machine_b.run_ok("dotsync");
+
+    commit_to_a_scope_with_a_plain_git_client(
+        &machine_b,
+        "all",
+        ".config/app.conf",
+        "setting = \"from-elsewhere\"\n",
+    );
+
+    machine_b.run_expecting("dotsync", 3);
+    let aborted = machine_b.run("dotsync abort");
+    assert_eq!(
+        aborted.status.code(),
+        Some(3),
+        "abort put home back and took nothing away from the remote, so the machine is still paused — and 3 is what says a pause is waiting\n{}",
+        render_output(&aborted)
+    );
+
+    let status = machine_b.run_expecting("dotsync status --output json", 0);
+    assert_eq!(
+        parse_stdout_json(&status)["paused_cascade"],
+        "linux",
+        "the conflict is still in the repo, so `status` has to still report it\n{}",
+        render_output(&status)
+    );
+
+    // The point of asking `status`: whatever it says has to be what the next
+    // run does.
+    let next = machine_b.run("dotsync");
+    assert_eq!(
+        next.status.code(),
+        Some(3),
+        "`status` said clean and the next run stopped, which is the disagreement this is about\n{}",
+        render_output(&next)
+    );
+}
+
 /// DESIGN: "'Paused' is not a stored mode; it is a derived observation: one or
 /// more local scope heads have conflicted trees", and "Anything derivable from
 /// the repo must be derived, never cached in a side file. Derived state is
