@@ -1404,6 +1404,50 @@ fn a_conflict_that_came_from_the_remote_is_still_reported_after_abort() {
     );
 }
 
+/// The versions the pause printed are the only copies there are: nothing is
+/// written into home, and neither side is on a scope this machine syncs from.
+/// So an agent that lost that output — a new session, a scrolled terminal —
+/// has to be able to ask for them again, which is the whole of what `dotsync
+/// show conflict` was designed to do and the reason `view` absorbs it: `view`
+/// already answers "what is checked in", and the pause is derived, so it is
+/// correct whenever it is asked.
+#[test]
+fn view_reprints_the_conflict_the_pause_message_showed() {
+    let harness = TestHarness::new();
+    let (machine, _pause) = pause_a_conflict_on_linux(&harness);
+
+    let view = machine.run_ok("dotsync view --output json");
+    let json = parse_stdout_json(&view);
+    assert_eq!(
+        json["paused_cascade"], "linux",
+        "{}",
+        render_output(&view)
+    );
+    assert_eq!(
+        json["conflicts"],
+        serde_json::json!([{
+            "path": ".config/app.conf",
+            "state": serde_json::Value::Null,
+            "versions": [
+                {"role": "base", "label": "`all` as it was published", "contents": "setting = \"base\"\n"},
+                {"role": "side", "label": "`all` as this machine has it", "contents": "setting = \"all\"\n"},
+                {"role": "side", "label": "scope `linux`", "contents": "setting = \"linux\"\n"},
+            ],
+        }]),
+        "every version of every conflicted file, the same object the stop carried\n{}",
+        render_output(&view)
+    );
+
+    let human = machine.run_ok("dotsync view");
+    let presented = render_output(&human);
+    for version in ["setting = \"base\"", "setting = \"all\"", "setting = \"linux\""] {
+        assert!(
+            presented.contains(version),
+            "the human channel is where an agent reads them back: {version} is missing\n{presented}"
+        );
+    }
+}
+
 /// DESIGN: "'Paused' is not a stored mode; it is a derived observation: one or
 /// more local scope heads have conflicted trees", and "Anything derivable from
 /// the repo must be derived, never cached in a side file. Derived state is

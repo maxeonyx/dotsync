@@ -4,6 +4,36 @@
 mod harness;
 use harness::*;
 
+/// Omitting `-m` is already a hard error, so `-m ""` is a hole in a rule that
+/// exists rather than a new policy: it lands a commit with an empty subject in
+/// shared history, where nothing can ever say what it was for.
+#[test]
+fn a_commit_with_an_empty_message_is_refused() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    machine.init_ok();
+    machine.write_file(".apprc", "ui = dark\n");
+
+    let empty = machine.run_expecting("dotsync commit all -m '' -- .apprc", 1);
+    let blank = machine.run_expecting("dotsync commit all -m '   ' -- .apprc", 1);
+    for refused in [&empty, &blank] {
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("message"),
+            "the stop says what was missing\n{}",
+            render_output(refused)
+        );
+    }
+    assert!(
+        !bookmark_has_file(&machine, "all", ".apprc"),
+        "a refused commit records nothing\n{}",
+        render_output(&empty)
+    );
+
+    machine.run_ok("dotsync commit all -m 'add apprc' -- .apprc");
+    assert!(bookmark_has_file(&machine, "all", ".apprc"));
+}
+
 #[test]
 fn explicit_commit_command_adds_file_to_scope_and_syncs() {
     let harness = TestHarness::new();

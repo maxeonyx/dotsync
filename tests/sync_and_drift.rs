@@ -306,6 +306,85 @@ fn a_forced_sync_says_which_home_files_it_overwrote() {
     assert_eq!(machine.read_file(".bashrc"), "export DOTSYNC=repo\n");
 }
 
+/// Changing your mind about one file, named.
+///
+/// `--force` was a mood a whole run was in: every local change lost, and no
+/// way to say which one was meant — so it could not tell a stale config file
+/// from a resolution being written. `discard` is the same escape hatch as a
+/// decision about paths.
+#[test]
+fn discarding_a_named_change_takes_the_scopes_version() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    machine.init_ok();
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".vimrc", "set number\n");
+    machine.run_ok("dotsync");
+
+    machine.write_file(".bashrc", "export DOTSYNC=mine\n");
+    machine.write_file(".vimrc", "set nonumber\n");
+
+    let discarded = machine.run_ok("dotsync discard .bashrc --output json");
+    assert_eq!(
+        parse_stdout_json(&discarded)["overwritten_files"],
+        serde_json::json!([".bashrc"]),
+        "the file whose contents this run discarded has to be in the payload\n{}",
+        render_output(&discarded)
+    );
+    assert_eq!(machine.read_file(".bashrc"), "export DOTSYNC=repo\n");
+
+    assert_eq!(
+        machine.read_file(".vimrc"),
+        "set nonumber\n",
+        "a change the run did not name is not the run's to discard\n{}",
+        render_output(&discarded)
+    );
+    let status = machine.run_ok("dotsync status --output json");
+    assert_eq!(
+        parse_stdout_json(&status)["changes"],
+        serde_json::json!([{
+            "path": ".vimrc",
+            "state": "modified",
+            "reason": "edited here since the last sync",
+        }]),
+        "and it is still this machine's to decide about\n{}",
+        render_output(&status)
+    );
+}
+
+/// Naming a path that holds nothing of yours is a mistake, and a run that
+/// answered "discarded 0 file(s)" to a typo would be the same silent no-op
+/// `dotsync commit typo.conf` was fixed for.
+#[test]
+fn discarding_a_path_that_holds_no_change_of_yours_is_refused() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    machine.init_ok();
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
+    machine.run_ok("dotsync");
+
+    let typo = machine.run_expecting("dotsync discard .bashrcc", 1);
+    let stderr = String::from_utf8_lossy(&typo.stderr).into_owned();
+    assert!(
+        stderr.contains(".bashrcc"),
+        "the stop names the path it could not act on\n{stderr}"
+    );
+
+    let unchanged = machine.run_expecting("dotsync discard .bashrc", 1);
+    assert!(
+        String::from_utf8_lossy(&unchanged.stderr).contains(".bashrc"),
+        "a managed file with no change of yours is nothing to discard either\n{}",
+        render_output(&unchanged)
+    );
+    assert_eq!(
+        machine.read_file(".bashrc"),
+        "export DOTSYNC=repo\n",
+        "and the run that refused wrote nothing"
+    );
+}
+
 /// One value, one field. `scope` and `machine_scope` used to be byte-identical
 /// on every command that only syncs, so a reader could not tell which question
 /// `scope` answered without knowing which command produced it.
