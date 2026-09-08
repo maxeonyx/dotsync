@@ -381,7 +381,6 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
                 "read the versions of each file below, decide what it should hold, and write that into the file at its real path in home; the file has to change, because dotsync reads the resolution back out of it.",
                 "run `dotsync continue` from the same machine to record your decision and finish converging.",
                 "or run `dotsync abort` from the same machine to discard it; that reverts the conflicted files in home to this machine's scope state, so save anything you want to keep outside home first.",
-                "do not run another dotsync commit until this is resolved.",
             ],
         ),
         DotsyncError::PausePredatesResolutionCheck { .. } => render_structured_error(
