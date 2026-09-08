@@ -4,6 +4,7 @@ use crate::config::DotsyncPaths;
 use crate::drift::{changed_paths, FileState};
 use crate::error::DotsyncError;
 use crate::home::Home;
+use crate::repo::diverged_scopes;
 use crate::session::{in_session, Run, Session};
 use crate::sync::{classify_home_against_machine_scope, finishing};
 
@@ -28,6 +29,10 @@ pub struct StatusReport {
     pub changes: Vec<FileChange>,
     /// The repo moved and home did not. Plain `dotsync` applies these.
     pub incoming: Vec<FileChange>,
+    /// The scopes this machine and the remote have each moved. Reported
+    /// because it is the state a plain `dotsync` will stop on, and `status` is
+    /// what gets run to find out why.
+    pub diverged_scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,5 +78,6 @@ async fn status_report(
         paused_cascade: crate::pause::paused_cascade_scope(session.paths())?,
         changes: file_changes(FileState::is_drift),
         incoming: file_changes(FileState::is_incoming),
+        diverged_scopes: diverged_scopes(session.repo().as_ref(), &session.config().graph),
     })
 }

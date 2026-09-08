@@ -118,7 +118,7 @@
     "dotsync::read_only$diff_reports_an_inserted_line_as_a_single_addition": "passing",
     "dotsync::read_only$diff_shows_line_oriented_home_drift_without_syncing": "passing",
     "dotsync::read_only$diff_works_while_local_scopes_are_ahead_of_remote": "passing",
-    "dotsync::read_only$read_only_commands_describe_a_diverged_scope_instead_of_refusing_to_run": "pending",
+    "dotsync::read_only$read_only_commands_describe_a_diverged_scope_instead_of_refusing_to_run": "passing",
     "dotsync::read_only$read_only_commands_leave_the_scope_bookmarks_where_they_found_them": "pending",
     "dotsync::read_only$status_and_diff_describe_the_same_change_with_the_same_words": "passing",
     "dotsync::read_only$status_clean_shows_no_changes": "passing",

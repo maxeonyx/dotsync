@@ -98,6 +98,33 @@ pub(crate) fn paused_cascade_notes(paused_cascade: Option<&String>) -> Vec<Strin
     ]
 }
 
+/// What a read-only command says about a scope it found contested.
+///
+/// A note for the same reason a paused cascade is one: it qualifies the answer
+/// rather than being it, and it is the reason the next plain `dotsync` will
+/// stop — which is the question `status` is being run to answer by the time
+/// anyone reads this.
+pub(crate) fn diverged_scope_notes(scopes: &[String]) -> Vec<String> {
+    if scopes.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        format!(
+            "dotsync: {} diverged: this machine and the remote each hold commits the other does not",
+            quoted_scopes(scopes)
+        ),
+        "dotsync: a sync cannot merge that yet (https://github.com/maxeonyx/dotsync/issues/17), so it stops instead and nothing is published.".to_string(),
+    ]
+}
+
+fn quoted_scopes(scopes: &[String]) -> String {
+    scopes
+        .iter()
+        .map(|scope| format!("`{scope}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// One changed file, for a machine. The same object wherever dotsync reports a
 /// file that differs from what the scopes hold: `status`, `diff`, and the
 /// drift a run stopped on. `state` is the code to branch on; `reason` is the

@@ -8,7 +8,9 @@ use crate::config::DotsyncPaths;
 use crate::drift::{changed_paths, FileState};
 use crate::error::{jj_error, DotsyncError};
 use crate::home::Home;
-use crate::repo::{collect_managed_tree_entries, read_tree_entry_bytes, scope_head_tree};
+use crate::repo::{
+    collect_managed_tree_entries, diverged_scopes, read_tree_entry_bytes, scope_head_tree,
+};
 use crate::scope_graph::scope_depth;
 use crate::session::{in_session, Run, Session};
 use crate::sync::{classify_home_against_machine_scope, file_drift, finishing, FileDrift};
@@ -27,6 +29,9 @@ pub struct ViewReport {
     /// an agent reaches for to get its bearings, and "this machine cannot
     /// commit anything" is the most important bearing there is.
     pub paused_cascade: Option<String>,
+    /// See `StatusReport::diverged_scopes`. Also true of the machine rather
+    /// than of the question.
+    pub diverged_scopes: Vec<String>,
     pub found: ViewAnswer,
 }
 
@@ -61,6 +66,8 @@ pub struct DiffReport {
     /// See `StatusReport::paused_cascade`: `diff` answers the same question in
     /// more detail, so it owes the same warning.
     pub paused_cascade: Option<String>,
+    /// See `StatusReport::diverged_scopes`.
+    pub diverged_scopes: Vec<String>,
     pub drifts: Vec<FileDrift>,
 }
 
@@ -124,6 +131,7 @@ pub async fn view(
 
         Ok(ViewReport {
             paused_cascade: crate::pause::paused_cascade_scope(session.paths())?,
+            diverged_scopes: diverged_scopes(session.repo().as_ref(), &session.config().graph),
             found,
         })
     })
@@ -225,6 +233,7 @@ async fn diff_report(session: &mut Session, home: &mut Home) -> Result<DiffRepor
     Ok(DiffReport {
         machine_scope,
         paused_cascade: crate::pause::paused_cascade_scope(session.paths())?,
+        diverged_scopes: diverged_scopes(session.repo().as_ref(), &session.config().graph),
         drifts,
     })
 }
