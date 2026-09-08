@@ -323,7 +323,9 @@ A machine whose scope already exists adopts it, and refuses `--parent`, because 
 
 **`dotsync commit <scope> -m "message"`** (no paths): Commit every managed file this machine has changed, which is exactly the set `dotsync status` lists as changes. It does not scan all of home for unrelated new files; new paths are intentionally opted into with explicit path arguments.
 
-**`dotsync status`**: List managed files this machine has changed, and separately the files another machine changed that home has not caught up to. Says so when a cascade is paused, because that machine can commit nothing until it is resolved. Read-only, and exits 0 either way.
+**`dotsync status`**: List managed files this machine has changed, and separately the files another machine changed that home has not caught up to. Read-only, and exits 0 either way.
+
+It also reports three things that are true of the machine rather than of home, because each of them describes a machine that is not doing what "no changes" implies: a paused cascade, since that machine can commit nothing until it is resolved; scopes whose head this machine and the remote have each moved, since the next writing run merges them; and scopes committed here that the remote has never seen, since a refused push is otherwise reported by the run that hit it and nowhere else. `diff` and `view` report all three too — `status` is the one an agent runs by reflex, and a fact that only one of the three carries is a fact nobody finds.
 
 **`dotsync diff`**: Show line-oriented diffs for managed home files with local changes. Read-only, and exits 1 when local changes are present so scripts and agents can distinguish clean from dirty state. A file the repo has moved on from while home stayed put is not a local change, so a machine that is merely behind exits 0 — the same answer `status` and plain `dotsync` give.
 

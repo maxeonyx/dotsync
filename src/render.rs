@@ -117,6 +117,25 @@ pub(crate) fn diverged_scope_notes(scopes: &[String]) -> Vec<String> {
     ]
 }
 
+/// What a read-only command says about scopes this machine holds and the
+/// remote has never seen.
+///
+/// A note for the same reason the other two are: it qualifies the answer
+/// rather than being it. "No changes" is true of home and false of the
+/// machine, because the work is committed here and nowhere else.
+pub(crate) fn unpushed_scope_notes(scopes: &[String]) -> Vec<String> {
+    if scopes.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        format!(
+            "dotsync: {} committed here and not on the remote",
+            quoted_scopes(scopes)
+        ),
+        "dotsync: the next `dotsync` publishes them; until it does, no other machine can see this work.".to_string(),
+    ]
+}
+
 fn quoted_scopes(scopes: &[String]) -> String {
     scopes
         .iter()

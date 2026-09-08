@@ -286,7 +286,7 @@ impl PushReport {
 /// refs (PLAN §2.2). What makes the two the same set now is that scope
 /// membership is structural.
 fn pending_bookmark_updates(
-    repo: &ReadonlyRepo,
+    repo: &dyn Repo,
     graph: &ScopeGraph,
 ) -> Vec<(RefNameBuf, BookmarkPushUpdate)> {
     repo.view()
@@ -313,13 +313,27 @@ fn pending_bookmark_updates(
         .collect()
 }
 
+/// The scopes this machine holds a commit for that the remote has never seen.
+///
+/// The same set the next push would offer, asked as a question rather than
+/// acted on — which is what lets `status` answer it. A refused push used to be
+/// reported by the run that hit it and nowhere else, so once that output
+/// scrolled away a machine holding unpublished commits read as completely
+/// clean; that is how the 2026-07-27 machine sat unnoticed for sixteen days.
+pub(crate) fn unpushed_scopes(repo: &dyn Repo, graph: &ScopeGraph) -> Vec<String> {
+    pending_bookmark_updates(repo, graph)
+        .into_iter()
+        .map(|(name, _)| name.as_str().to_string())
+        .collect()
+}
+
 pub(crate) async fn push_scope_updates(session: &mut Session) -> Result<PushReport, DotsyncError> {
     let repo = session.repo().clone();
     let settings = default_settings()?;
     let subprocess_options = GitSubprocessOptions::from_settings(&settings)
         .map_err(|err| jj_error(format!("load git subprocess settings: {err}")))?;
 
-    let updates = pending_bookmark_updates(&repo, session.graph());
+    let updates = pending_bookmark_updates(repo.as_ref(), session.graph());
 
     if updates.is_empty() {
         return Ok(PushReport::UpToDate);

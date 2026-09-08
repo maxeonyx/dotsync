@@ -4,9 +4,50 @@ use crate::drift::{changed_paths, FileState};
 use crate::error::DotsyncError;
 use crate::home::Home;
 use crate::paths::DotsyncPaths;
-use crate::repo::diverged_scopes;
+use crate::repo::{diverged_scopes, unpushed_scopes};
 use crate::session::{in_session, Run, Session};
 use crate::sync::{classify_home_against_machine_scope, finishing};
+
+/// What is true of the machine, whatever the command was asked.
+///
+/// Three facts that qualify every answer `status`, `diff` and `view` give:
+/// each of them describes a machine that is not doing what an agent reading
+/// "no changes" would assume. They are read in one place and reported in one
+/// place, because a fact carried by two of the three commands and not the
+/// third is the incoherence that made `status` answer "no changes" on a
+/// machine that could not commit at all.
+#[derive(Debug, Clone)]
+pub struct MachineState {
+    /// The scope a cascade is paused at, if one is.
+    ///
+    /// A paused cascade is the one state where a machine that looks completely
+    /// clean cannot commit anything at all, and the message that said so
+    /// scrolled away one command ago.
+    pub paused_cascade: Option<String>,
+    /// The scopes this machine and the remote have each moved. Reported
+    /// because it is the state the next writing run will merge, and this
+    /// answer describes the state before that merge.
+    pub diverged_scopes: Vec<String>,
+    /// The scopes this machine has committed and the remote has never seen.
+    ///
+    /// Under the same name the publishing commands report it, because it is
+    /// the same fact: a refused push is otherwise reported by the run that hit
+    /// it and nowhere else, so once that output has scrolled away a machine
+    /// holding unpublished commits reads as completely clean. That is how the
+    /// 2026-07-27 machine sat unnoticed for sixteen days.
+    pub unpushed_scopes: Vec<String>,
+}
+
+impl MachineState {
+    pub(crate) fn read(session: &Session) -> Result<Self, DotsyncError> {
+        let repo = session.repo().as_ref();
+        Ok(Self {
+            paused_cascade: crate::pause::paused_cascade_scope(session.paths())?,
+            diverged_scopes: diverged_scopes(repo, session.graph()),
+            unpushed_scopes: unpushed_scopes(repo, session.graph()),
+        })
+    }
+}
 
 /// What `status` found, split by whether anyone has to decide anything.
 ///
@@ -17,22 +58,11 @@ use crate::sync::{classify_home_against_machine_scope, finishing};
 #[derive(Debug, Clone)]
 pub struct StatusReport {
     pub machine_scope: String,
-    /// The scope a cascade is paused at, if one is.
-    ///
-    /// Reported by the read-only commands because a paused cascade is the one
-    /// state where a machine that looks completely clean cannot commit
-    /// anything at all, and the message that said so scrolled away one command
-    /// ago. `status` is the reflex diagnostic; answering "no changes" here is
-    /// answering a different question than the one being asked.
-    pub paused_cascade: Option<String>,
+    pub machine: MachineState,
     /// Home holds something dotsync did not put there. Someone has to choose.
     pub changes: Vec<FileChange>,
     /// The repo moved and home did not. Plain `dotsync` applies these.
     pub incoming: Vec<FileChange>,
-    /// The scopes this machine and the remote have each moved. Reported
-    /// because it is the state a plain `dotsync` will stop on, and `status` is
-    /// what gets run to find out why.
-    pub diverged_scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,9 +105,8 @@ async fn status_report(
 
     Ok(StatusReport {
         machine_scope,
-        paused_cascade: crate::pause::paused_cascade_scope(session.paths())?,
+        machine: MachineState::read(session)?,
         changes: file_changes(FileState::is_drift),
         incoming: file_changes(FileState::is_incoming),
-        diverged_scopes: diverged_scopes(session.repo().as_ref(), session.graph()),
     })
 }

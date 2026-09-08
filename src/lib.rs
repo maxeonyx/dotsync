@@ -32,5 +32,5 @@ pub use crate::pause::{
 };
 pub use crate::repo::PushReport;
 pub use crate::session::{Run, UnreachableRemote};
-pub use crate::status::{status, FileChange, StatusReport};
+pub use crate::status::{status, FileChange, MachineState, StatusReport};
 pub use crate::sync::{sync, FileDrift, SyncCommandReport, SyncReport};

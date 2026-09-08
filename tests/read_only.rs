@@ -356,29 +356,6 @@ fn view_says_when_no_scope_holds_a_file() {
 }
 
 #[test]
-fn status_works_while_local_scopes_are_ahead_of_remote() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    interrupt_push_after_cascade(
-        &machine,
-        ".config/fish/dev-certs.fish",
-        "set -gx DEV_CERTS 1\n",
-    );
-
-    let status_output = machine.run("dotsync status");
-    assert_eq!(
-        status_output.status.code(),
-        Some(0),
-        "`dotsync status` must keep working while local scopes are unpushed: {}",
-        render_output(&status_output)
-    );
-    assert_stderr_snapshot(&status_output, "dotsync: no changes for mx-xps-cy\n");
-}
-
-#[test]
 fn view_works_while_local_scopes_are_ahead_of_remote() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");

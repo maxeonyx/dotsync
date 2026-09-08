@@ -520,7 +520,7 @@ One machine scope under one name: `scope` used to repeat `machine_scope` here an
 ### `status` and `diff`
 
 ```json
-{"changes":[{"path":".apprc","reason":"edited here since the last sync","state":"modified"}],"command":"status","incoming":[],"machine_scope":"a","status":"ok"}
+{"changes":[{"path":".apprc","reason":"edited here since the last sync","state":"modified"}],"command":"status","diverged_scopes":[],"incoming":[],"machine_scope":"a","status":"ok","unpushed_scopes":[]}
 ```
 
 ```json
@@ -529,7 +529,7 @@ One machine scope under one name: `scope` used to repeat `machine_scope` here an
 
 The same population, the same objects, the same names: `diff` is `status`'s `changes` with the diff attached. `status` adds `incoming`, the files another machine changed that home has not caught up to. Neither carries a count — the arrays have lengths.
 
-Both also carry `diverged_scopes`, always present and usually empty: the scopes whose head this machine and the remote have each moved. `view` carries it too, in all four of its shapes. Empty is the ordinary answer; a non-empty one is the state the next plain `dotsync` will stop on, which is why the commands an agent runs to look at a machine are the ones that report it.
+Both also carry `diverged_scopes` and `unpushed_scopes`, always present and usually empty, and `view` carries them too in all four of its shapes: the scopes whose head this machine and the remote have each moved, and the scopes this machine has committed and the remote has never seen. Empty is the ordinary answer for both. They are facts about the machine rather than about the question asked, which is why one function adds them to all three commands — a fact carried by two of the three is how `status` came to answer "no changes" on a machine that could not commit at all.
 
 Both also carry `paused_cascade` when a cascade is paused, naming the scope it stopped at:
 
