@@ -86,8 +86,13 @@ fn view_still_answers_on_every_machine_after_a_scope_joins_the_graph() {
             "`view` is how a machine finds out what the scopes hold, and {whose} no longer has it\n{}",
             render_output(&view)
         );
+        // Named by field rather than as a bare string: the overview's
+        // `scopes` carries each scope's parents beside its name, which
+        // `view_summarizes_checked_in_scopes_and_files` pins and the human
+        // rendering of the DAG needs. This asserts that the answer is there,
+        // which is what the test is about.
         assert_eq!(
-            parse_stdout_json(&view)["scopes"][0],
+            parse_stdout_json(&view)["scopes"][0]["name"],
             "all",
             "and it has to answer with the scopes, not just exit quietly\n{}",
             render_output(&view)

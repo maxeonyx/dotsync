@@ -307,8 +307,10 @@ pub enum DotsyncError {
     )]
     ScopeDiverged {
         scope: String,
-        local_target: String,
-        remote_target: String,
+        /// Both sides of the contested head, which is what "diverged" is: two
+        /// candidate positions, neither of them "the" head.
+        head: String,
+        published: String,
     },
     /// The scope graph names a scope this machine's repo has no history for.
     /// Says what it means rather than which of jj's objects is missing:
@@ -513,10 +515,10 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Vec<String> {
         DotsyncError::InvalidScope { scope } => vec![format!("requested scope: {scope}")],
         DotsyncError::ScopeDiverged {
             scope,
-            local_target,
-            remote_target,
+            head,
+            published,
         } => vec![format!(
-            "scope: {scope}; local target: {local_target}; remote target: {remote_target}"
+            "scope: {scope}; its head holds: {head}; the remote published: {published}"
         )],
         DotsyncError::CascadePaused { scope, .. } => vec![format!("paused scope: {scope}")],
         DotsyncError::UnusableCommitPaths { scope, rejected } => rejected

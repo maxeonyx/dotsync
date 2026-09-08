@@ -5,10 +5,11 @@ use jj_lib::commit::Commit;
 use jj_lib::object_id::ObjectId;
 use jj_lib::op_store::RefTarget;
 use jj_lib::ref_name::RefNameBuf;
-use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo as _};
+use jj_lib::repo::{MutableRepo, ReadonlyRepo};
 use jj_lib::rewrite::merge_commit_trees;
 
 use crate::error::{jj_error, DotsyncError};
+use crate::repo::scope_head_commit;
 use crate::scope_graph::ScopeGraph;
 
 #[derive(Debug, Clone)]
@@ -42,22 +43,28 @@ pub(crate) struct ScopeHeads {
 }
 
 impl ScopeHeads {
+    /// Every scope this machine has recorded a head for.
+    ///
+    /// A scope the graph names and this machine has no head for is left out
+    /// deliberately: it is not in the cascade, and `build_cascade_plan` skips
+    /// it. That is the answer to *absent* only — a head that is not a single
+    /// commit for any other reason is a state this cascade cannot merge from,
+    /// and `scope_head_commit` says so rather than dropping the scope,
+    /// which is how a scope came to be skipped mid-cascade in silence.
     pub(crate) fn load_existing(
         repo: &ReadonlyRepo,
         graph: &ScopeGraph,
     ) -> Result<Self, DotsyncError> {
         let mut heads = HashMap::new();
         for scope in graph.parents.keys() {
-            let target = repo
+            if repo
                 .view()
-                .get_local_bookmark(RefNameBuf::from(scope.as_str()).as_ref());
-            if let Some(commit_id) = target.as_normal() {
-                let commit = repo
-                    .store()
-                    .get_commit(commit_id)
-                    .map_err(|err| jj_error(format!("load scope head for {scope}: {err}")))?;
-                heads.insert(scope.clone(), commit);
+                .get_local_bookmark(RefNameBuf::from(scope.as_str()).as_ref())
+                .is_absent()
+            {
+                continue;
             }
+            heads.insert(scope.clone(), scope_head_commit(repo, scope)?);
         }
         Ok(Self { heads })
     }

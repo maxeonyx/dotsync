@@ -4,9 +4,8 @@ use crate::config::DotsyncPaths;
 use crate::drift::{changed_paths, FileState};
 use crate::error::DotsyncError;
 use crate::home::Home;
-use crate::repo::load_scope_commit;
 use crate::session::{in_session, Run, Session};
-use crate::sync::{classify_home_against_head, finishing};
+use crate::sync::{classify_home_against_machine_scope, finishing};
 
 /// What `status` found, split by whether anyone has to decide anything.
 ///
@@ -58,8 +57,7 @@ async fn status_report(
 ) -> Result<StatusReport, DotsyncError> {
     session.fetch().await?;
     let machine_scope = home.machine_scope().to_string();
-    let head = load_scope_commit(session.repo().as_ref(), &machine_scope)?;
-    let classified = classify_home_against_head(session, home, &head).await?;
+    let classified = classify_home_against_machine_scope(session, home).await?;
     let file_changes = |include: fn(FileState) -> bool| {
         changed_paths(&classified, include)
             .into_iter()

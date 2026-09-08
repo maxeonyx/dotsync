@@ -312,8 +312,8 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
         DotsyncError::ScopeDiverged { scope, .. } => render_structured_error(
             &format!("scope `{scope}` has diverged from the remote"),
             "Dotsync fetches each scope's published history before syncing or committing, so every machine picks up what the others have recorded.",
-            "This fetch flow fast-forwards a scope when the remote has simply moved ahead, and leaves the scope alone when this machine holds commits it has not published yet.",
-            "It expects the local and remote positions of a scope to be on one line of history, so that one of them is an ancestor of the other.",
+            "That fetch moves a scope's head forward when the remote has simply moved ahead, and leaves it where it is when this machine holds commits it has not published yet.",
+            "It expects a scope's head and the published one to be on one line of history, so that one of them is an ancestor of the other.",
             &current_state_text(&error_report),
             "This machine and the remote both have commits on this scope that the other does not, so neither side can be fast-forwarded onto the other.",
             &[

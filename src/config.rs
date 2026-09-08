@@ -12,7 +12,7 @@ use serde::Deserialize;
 use toml_edit::{DocumentMut, InlineTable, Item, Table, Value};
 
 use crate::error::{jj_error, DotsyncError};
-use crate::repo::{load_scope_commit, read_tree_entry_bytes};
+use crate::repo::{read_tree_entry_bytes, scope_head_tree};
 use crate::scope_graph::ScopeGraph;
 
 pub(crate) const DOTSYNC_CONFIG_RELATIVE_PATH: &str = ".config/dotsync/config.toml";
@@ -220,11 +220,19 @@ pub(crate) async fn load_config_text(
     paths: &DotsyncPaths,
     repo: &dyn jj_lib::repo::Repo,
 ) -> Result<String, DotsyncError> {
-    let all_commit = load_scope_commit(repo, ALL_SCOPE)?;
+    // The converged head of `all`, not this machine's bookmark: the graph a
+    // command answers against is the one the remote and this machine together
+    // have, or a machine that has not synced since a scope was created would
+    // report against a graph it already knows is out of date.
+    let all_tree =
+        scope_head_tree(repo, ALL_SCOPE)
+            .await?
+            .ok_or_else(|| DotsyncError::ScopeNotInRepo {
+                scope: ALL_SCOPE.to_string(),
+            })?;
     let repo_path = jj_lib::repo_path::RepoPath::from_internal_string(DOTSYNC_CONFIG_RELATIVE_PATH)
         .map_err(|err| jj_error(format!("invalid config repo path: {err}")))?;
-    let value = all_commit
-        .tree()
+    let value = all_tree
         .path_value(repo_path)
         .map_err(|err| jj_error(format!("read config tree entry: {err}")))?;
     let value = value

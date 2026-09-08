@@ -32,6 +32,7 @@ use jj_lib::object_id::ObjectId;
 use jj_lib::ref_name::RefNameBuf;
 use jj_lib::repo::{Repo as _, RepoLoader, StoreFactories};
 use jj_lib::repo_path::RepoPath;
+use jj_lib::rewrite::merge_commit_trees;
 use jj_lib::settings::UserSettings;
 use tempfile::TempDir;
 
@@ -548,17 +549,34 @@ pub fn load_repo_direct(repo_dir: &Path) -> Arc<jj_lib::repo::ReadonlyRepo> {
     })
 }
 
-pub fn bookmark_commit(machine: &MachineEnvironment, scope: &str) -> jj_lib::commit::Commit {
+/// What a scope holds on this machine: the tree at its head.
+///
+/// A contested head — this machine and the remote each holding commits the
+/// other does not — is two commits, and what the scope holds is the merge of
+/// them, which is the same reading dotsync itself makes. A helper that could
+/// only read one commit id reported a contested head as a missing bookmark.
+pub fn bookmark_tree(
+    machine: &MachineEnvironment,
+    scope: &str,
+) -> (
+    Arc<jj_lib::repo::ReadonlyRepo>,
+    jj_lib::merged_tree::MergedTree,
+) {
     let repo = load_repo_direct(&machine.repo_dir);
-    let commit_id = repo
+    let commits: Vec<_> = repo
         .view()
         .get_local_bookmark(RefNameBuf::from(scope).as_ref())
-        .as_normal()
-        .cloned()
-        .unwrap_or_else(|| panic!("missing bookmark `{scope}`"));
-    repo.store()
-        .get_commit(&commit_id)
-        .unwrap_or_else(|err| panic!("load bookmark commit `{scope}`: {err}"))
+        .added_ids()
+        .map(|id| {
+            repo.store()
+                .get_commit(id)
+                .unwrap_or_else(|err| panic!("load bookmark commit `{scope}`: {err}"))
+        })
+        .collect();
+    assert!(!commits.is_empty(), "missing bookmark `{scope}`");
+    let tree = block_on(merge_commit_trees(repo.as_ref(), &commits))
+        .unwrap_or_else(|err| panic!("merge the heads of `{scope}`: {err}"));
+    (repo, tree)
 }
 
 pub fn read_bookmark_file_contents(
@@ -566,11 +584,10 @@ pub fn read_bookmark_file_contents(
     scope: &str,
     relative: &str,
 ) -> String {
-    let commit = bookmark_commit(machine, scope);
+    let (repo, tree) = bookmark_tree(machine, scope);
     let path = RepoPath::from_internal_string(relative)
         .unwrap_or_else(|err| panic!("invalid repo path `{relative}`: {err}"));
-    let value = commit
-        .tree()
+    let value = tree
         .path_value(path)
         .unwrap_or_else(|err| panic!("read `{relative}` from `{scope}` tree: {err}"));
     let TreeValue::File { id, .. } = value
@@ -583,7 +600,7 @@ pub fn read_bookmark_file_contents(
 
     let contents = block_on(async {
         use tokio::io::AsyncReadExt;
-        let mut reader = commit
+        let mut reader = repo
             .store()
             .read_file(path, &id)
             .await
@@ -600,21 +617,27 @@ pub fn read_bookmark_file_contents(
     String::from_utf8(contents).expect("bookmark file should be utf-8")
 }
 
+/// Where a scope's head is, as something two readings can be compared for
+/// equality. Every position it can be in has one: a contested head is both of
+/// its sides, and a run that leaves it contested has moved it.
 pub fn bookmark_revision(machine: &MachineEnvironment, scope: &str) -> String {
     let repo = load_repo_direct(&machine.repo_dir);
-    repo.view()
+    let head = repo
+        .view()
         .get_local_bookmark(RefNameBuf::from(scope).as_ref())
-        .as_normal()
-        .unwrap_or_else(|| panic!("missing bookmark `{scope}`"))
-        .hex()
+        .added_ids()
+        .map(|id| id.hex())
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(!head.is_empty(), "missing bookmark `{scope}`");
+    head
 }
 
 pub fn bookmark_has_file(machine: &MachineEnvironment, scope: &str, relative: &str) -> bool {
-    let commit = bookmark_commit(machine, scope);
+    let (_repo, tree) = bookmark_tree(machine, scope);
     let path = RepoPath::from_internal_string(relative)
         .unwrap_or_else(|err| panic!("invalid repo path `{relative}`: {err}"));
-    let value = commit
-        .tree()
+    let value = tree
         .path_value(path)
         .unwrap_or_else(|err| panic!("read `{relative}` from `{scope}` tree: {err}"));
 

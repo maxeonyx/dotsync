@@ -42,7 +42,7 @@
 //! repairs exactly that, and the repair is the subtlest code in this module —
 //! its comments carry the reasoning.
 
-use jj_lib::backend::CommitId;
+use jj_lib::backend::{CommitId, TreeId};
 use jj_lib::commit::Commit;
 use jj_lib::gitignore::GitIgnoreFile;
 use jj_lib::matchers::EverythingMatcher;
@@ -57,7 +57,7 @@ use jj_lib::working_copy::{LockedWorkingCopy as _, SnapshotOptions, WorkingCopyF
 use crate::config::{DotsyncPaths, SHED_SYNC_STATE_RELATIVE_PATH};
 use crate::error::{jj_error, DotsyncError};
 use crate::machine::{detect_machine, machine_signature};
-use crate::repo::load_scope_commit;
+use crate::repo::scope_head_commit;
 use crate::session::Session;
 use crate::working_copy::{HomeLockedWorkingCopy, HomeWorkingCopy};
 
@@ -69,8 +69,8 @@ pub(crate) struct Home {
     wc_commit: Commit,
     machine_scope: String,
     /// The last `merge(snapshot, mark, head)` this handle computed, keyed by
-    /// the wc commit and the head it was computed from. See `merge_with`.
-    merged: Option<(CommitId, CommitId, MergedTree)>,
+    /// the wc commit and the head tree it was computed from. See `merge_with`.
+    merged: Option<(CommitId, Merge<TreeId>, MergedTree)>,
 }
 
 /// What completing a sync conflict came to.
@@ -242,8 +242,12 @@ impl Home {
     /// unobserved head by forgetting to — `status` and `diff` get the widened
     /// snapshot from the merge they classify against. Re-observing the same
     /// head is free: the probe set does not widen twice.
-    async fn observe(&mut self, session: &mut Session, head: &Commit) -> Result<(), DotsyncError> {
-        self.observe_paths(session, tree_paths(&head.tree())?).await
+    async fn observe(
+        &mut self,
+        session: &mut Session,
+        head: &MergedTree,
+    ) -> Result<(), DotsyncError> {
+        self.observe_paths(session, tree_paths(head)?).await
     }
 
     /// Widens home's snapshot to cover paths the run named itself, and re-reads
@@ -279,19 +283,25 @@ impl Home {
     /// second opinion about conflicts is how `status` came to call a file
     /// conflicted that a plain `dotsync` then merged without complaint.
     ///
+    /// A tree rather than a commit, because the head a run is heading for is
+    /// not always a commit that exists: a contested scope head is two commits,
+    /// and what a read-only command has to answer about is the tree a
+    /// convergence would write there. Only the commands that *move* home need
+    /// the head to be a commit, because that commit becomes the mark.
+    ///
     /// Computed once per run and remembered, because the wc commit and the head
-    /// between them fix all three sides: the snapshot is the wc commit's tree,
-    /// the mark is its parent, and every method here that moves either writes a
-    /// new wc commit. A second call with the same pair could only recompute the
-    /// same tree.
+    /// tree between them fix all three sides: the snapshot is the wc commit's
+    /// tree, the mark is its parent, and every method here that moves either
+    /// writes a new wc commit. A second call with the same pair could only
+    /// recompute the same tree.
     pub(crate) async fn merge_with(
         &mut self,
         session: &mut Session,
-        head: &Commit,
+        head: &MergedTree,
     ) -> Result<MergedTree, DotsyncError> {
         self.observe(session, head).await?;
         if let Some((wc_commit, merged_head, merged)) = &self.merged {
-            if wc_commit == self.wc_commit.id() && merged_head == head.id() {
+            if wc_commit == self.wc_commit.id() && merged_head == head.tree_ids() {
                 return Ok(merged.clone());
             }
         }
@@ -299,12 +309,12 @@ impl Home {
         let merged = merge_trees(
             (self.snapshot_tree(), "local changes in home"),
             (mark.tree(), "what this machine last synced"),
-            (head.tree(), &self.machine_scope),
+            (head.clone(), &self.machine_scope),
         )
         .await?;
         self.merged = Some((
             self.wc_commit.id().clone(),
-            head.id().clone(),
+            head.tree_ids().clone(),
             merged.clone(),
         ));
         Ok(merged)
@@ -322,7 +332,7 @@ impl Home {
         if head.id() == mark.id() {
             return Ok(Materialized::AlreadyThere);
         }
-        let merged = self.merge_with(session, head).await?;
+        let merged = self.merge_with(session, &head.tree()).await?;
         if merged.has_conflict() {
             return Ok(Materialized::Conflicted { merged });
         }
@@ -354,7 +364,7 @@ impl Home {
         if head.id() == mark.id() {
             return Ok(Resolved::NothingToResolve);
         }
-        let merged = self.merge_with(session, head).await?;
+        let merged = self.merge_with(session, &head.tree()).await?;
         if !merged.has_conflict() {
             return Ok(Resolved::NothingToResolve);
         }
@@ -408,7 +418,7 @@ impl Home {
         // diffs against the snapshot, so an unobserved path on disk would
         // read as absent and be blindly overwritten instead of counted as a
         // local change this discard is discarding.
-        self.observe(session, head).await?;
+        self.observe(session, &head.tree()).await?;
         let mark = self.mark().await?;
         if head.id() == mark.id() && self.wc_commit.tree_ids() == head.tree().tree_ids() {
             return Ok(Materialized::AlreadyThere);
@@ -698,7 +708,7 @@ async fn ensure_wc_commit(
     }
     let upgrading = paths.home_dir.join(SHED_SYNC_STATE_RELATIVE_PATH).exists();
     let mark = if upgrading {
-        load_scope_commit(session.repo().as_ref(), machine_scope)?
+        scope_head_commit(session.repo().as_ref(), machine_scope)?
     } else {
         let root_id = session.repo().store().root_commit_id().clone();
         session

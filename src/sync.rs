@@ -9,8 +9,8 @@ use crate::drift::{changed_paths, classify_managed_trees, ClassifiedPath, FileSt
 use crate::error::{jj_error, ConflictRole, ConflictedFile, ConflictedVersion, DotsyncError};
 use crate::home::{repo_path_of, Home, Materialized};
 use crate::repo::{
-    collect_managed_tree_entries, load_scope_commit, pending_push_scopes, push_scope_updates,
-    read_entry_bytes, PushReport,
+    collect_managed_tree_entries, pending_push_scopes, push_scope_updates, read_entry_bytes,
+    scope_head_commit, scope_head_tree, PushReport,
 };
 use crate::session::{in_session, Run, Session};
 use crate::status::FileChange;
@@ -106,7 +106,7 @@ async fn sync_home(
     home: &mut Home,
     discard_local: bool,
 ) -> Result<SyncCommandReport, DotsyncError> {
-    session.fetch().await?;
+    session.converge().await?;
     // Publish before touching home: scope commits left behind by an
     // interrupted run must reach the remote even if the home sync stops.
     // The exception is a paused cascade, whose scopes are only half
@@ -139,8 +139,8 @@ pub(crate) async fn sync_home_to_machine_scope(
     discard_local: bool,
 ) -> Result<SyncReport, DotsyncError> {
     let machine_scope = home.machine_scope().to_string();
-    let head = load_scope_commit(session.repo().as_ref(), &machine_scope)?;
-    let classified = classify_home_against_head(session, home, &head).await?;
+    let head = scope_head_commit(session.repo().as_ref(), &machine_scope)?;
+    let classified = classify_home_against_head(session, home, &head.tree()).await?;
     let local_changes = changed_paths(&classified, FileState::is_drift);
     let head_paths = collect_managed_tree_entries(&head.tree())?;
 
@@ -189,11 +189,30 @@ pub(crate) async fn sync_home_to_machine_scope(
 pub(crate) async fn classify_home_against_head(
     session: &mut Session,
     home: &mut Home,
-    head: &jj_lib::commit::Commit,
+    head: &jj_lib::merged_tree::MergedTree,
 ) -> Result<BTreeMap<PathBuf, ClassifiedPath>, DotsyncError> {
     let merged = home.merge_with(session, head).await?;
     let mark = home.mark().await?;
-    classify_managed_trees(&mark.tree(), &home.snapshot_tree(), &head.tree(), &merged)
+    classify_managed_trees(&mark.tree(), &home.snapshot_tree(), head, &merged)
+}
+
+/// Home against this machine's scope, for the commands that only report.
+///
+/// The head is the tree the scope head holds — the merge of both sides when it
+/// is contested, which is the tree a convergence would write there. So a
+/// contested scope changes what `status` and `diff` answer and not whether
+/// they answer: there is no repo state in which the question has no answer.
+pub(crate) async fn classify_home_against_machine_scope(
+    session: &mut Session,
+    home: &mut Home,
+) -> Result<BTreeMap<PathBuf, ClassifiedPath>, DotsyncError> {
+    let machine_scope = home.machine_scope().to_string();
+    let head = scope_head_tree(session.repo().as_ref(), &machine_scope)
+        .await?
+        .ok_or(DotsyncError::ScopeNotInRepo {
+            scope: machine_scope,
+        })?;
+    classify_home_against_head(session, home, &head).await
 }
 
 /// Reads a conflicted merge out into the stop that presents it: every

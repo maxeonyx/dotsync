@@ -150,7 +150,7 @@ async fn commit_in_session(
     home: &mut Home,
     options: CommitOptions,
 ) -> Result<CommitReport, CommitFailure> {
-    session.fetch().await?;
+    session.converge().await?;
     // Publish what earlier runs left behind before looking at this commit at
     // all: this commit may turn out to add nothing, and a machine with an
     // interrupted push behind it must still heal. Anything this run goes on to

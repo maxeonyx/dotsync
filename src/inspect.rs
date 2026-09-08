@@ -1,16 +1,17 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
+use jj_lib::merge::Merge;
 use jj_lib::repo::Repo as _;
 
 use crate::config::DotsyncPaths;
 use crate::drift::{changed_paths, FileState};
 use crate::error::{jj_error, DotsyncError};
 use crate::home::Home;
-use crate::repo::{collect_managed_tree_entries, load_scope_commit, read_tree_entry_bytes};
+use crate::repo::{collect_managed_tree_entries, read_tree_entry_bytes, scope_head_tree};
 use crate::scope_graph::scope_depth;
 use crate::session::{in_session, Run, Session};
-use crate::sync::{classify_home_against_head, file_drift, finishing, FileDrift};
+use crate::sync::{classify_home_against_machine_scope, file_drift, finishing, FileDrift};
 
 #[derive(Debug, Clone)]
 pub struct ScopeInfo {
@@ -90,12 +91,13 @@ pub async fn view(
             },
             (Some(scope), None) => ViewAnswer::Scope {
                 scope: scope.to_string(),
-                files: scope_files(session, scope)?,
+                files: scope_files(session, scope).await?,
             },
             (None, Some(file)) => {
                 let mut scopes = Vec::new();
                 for scope in scope_list(session)? {
-                    if scope_files(session, &scope.name)?
+                    if scope_files(session, &scope.name)
+                        .await?
                         .iter()
                         .any(|path| path == file)
                     {
@@ -111,7 +113,7 @@ pub async fn view(
                 let scopes = scope_list(session)?;
                 let mut files = BTreeSet::new();
                 for scope in &scopes {
-                    files.extend(scope_files(session, &scope.name)?);
+                    files.extend(scope_files(session, &scope.name).await?);
                 }
                 ViewAnswer::Overview {
                     scopes,
@@ -155,9 +157,14 @@ fn scope_list(session: &Session) -> Result<Vec<ScopeInfo>, DotsyncError> {
     Ok(scopes.into_iter().map(|(_, scope)| scope).collect())
 }
 
-fn scope_files(session: &Session, scope: &str) -> Result<Vec<PathBuf>, DotsyncError> {
-    let commit = load_scope_commit(session.repo().as_ref(), scope)?;
-    let entries = collect_managed_tree_entries(&commit.tree())?;
+/// The files one scope holds. A scope the graph names and the repo has no head
+/// for holds none — `view` describes the state it is in rather than refusing
+/// to describe it, which is the whole of what it is for.
+async fn scope_files(session: &Session, scope: &str) -> Result<Vec<PathBuf>, DotsyncError> {
+    let Some(tree) = scope_head_tree(session.repo().as_ref(), scope).await? else {
+        return Ok(Vec::new());
+    };
+    let entries = collect_managed_tree_entries(&tree)?;
     Ok(entries.into_keys().collect())
 }
 
@@ -166,16 +173,18 @@ async fn scope_file_contents(
     scope: &str,
     relative: &Path,
 ) -> Result<Vec<u8>, DotsyncError> {
-    let commit = load_scope_commit(session.repo().as_ref(), scope)?;
     let relative_str = relative.to_str().ok_or_else(|| DotsyncError::NonUtf8Path {
         path: relative.to_path_buf(),
     })?;
     let repo_path = jj_lib::repo_path::RepoPath::from_internal_string(relative_str)
         .map_err(|err| jj_error(format!("invalid repo path {}: {err}", relative.display())))?;
-    let value = commit
-        .tree()
-        .path_value(repo_path)
-        .map_err(|err| jj_error(format!("read {} from {scope}: {err}", relative.display())))?;
+    let value = match scope_head_tree(session.repo().as_ref(), scope).await? {
+        Some(tree) => tree.path_value(repo_path),
+        // A scope with no head holds no files, so the answer is the same one a
+        // scope that simply does not hold this file gives.
+        None => Ok(Merge::absent()),
+    }
+    .map_err(|err| jj_error(format!("read {} from {scope}: {err}", relative.display())))?;
     let value = value
         .into_resolved()
         .map_err(|conflict| {
@@ -203,12 +212,11 @@ pub async fn diff_home(paths: &DotsyncPaths) -> Run<Result<DiffReport, DotsyncEr
 async fn diff_report(session: &mut Session, home: &mut Home) -> Result<DiffReport, DotsyncError> {
     session.fetch().await?;
     let machine_scope = home.machine_scope().to_string();
-    let head = load_scope_commit(session.repo().as_ref(), &machine_scope)?;
 
     // The same changes `status` reports, with the two sides shown. A remote
     // advance this machine has not applied yet is not one of them, so `diff`
     // neither reports it nor exits non-zero for it.
-    let classified = classify_home_against_head(session, home, &head).await?;
+    let classified = classify_home_against_machine_scope(session, home).await?;
     let mut drifts = Vec::new();
     for (relative, classified) in changed_paths(&classified, FileState::is_drift) {
         drifts.push(file_drift(session, &relative, &classified).await?);

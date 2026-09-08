@@ -4,23 +4,32 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gix::remote::fetch::Tags;
-use jj_lib::backend::{CommitId, TreeValue};
+use jj_lib::backend::TreeValue;
+use jj_lib::commit::Commit;
 use jj_lib::config::StackedConfig;
 use jj_lib::git::{
     self, GitBranchPushTargets, GitFetch, GitFetchRefExpression, GitImportOptions, GitProgress,
     GitPushOptions, GitSidebandLineTerminator, GitSubprocessCallback, GitSubprocessOptions,
 };
+use jj_lib::merged_tree::MergedTree;
 use jj_lib::object_id::ObjectId;
 use jj_lib::op_store::RefTarget;
-use jj_lib::ref_name::RefNameBuf;
+use jj_lib::ref_name::{RefNameBuf, RemoteRefSymbol};
 use jj_lib::refs::BookmarkPushUpdate;
-use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo as _, RepoLoader, StoreFactories};
+use jj_lib::repo::{ReadonlyRepo, Repo, RepoLoader, StoreFactories};
+use jj_lib::rewrite::merge_commit_trees;
 use jj_lib::settings::UserSettings;
 use jj_lib::str_util::StringExpression;
+use jj_lib::view::View;
 
 use crate::config::DotsyncPaths;
 use crate::error::{jj_error, DotsyncError};
+use crate::scope_graph::ScopeGraph;
 use crate::session::Session;
+
+/// The one remote dotsync has. Named here because "origin" is spelled at every
+/// site that asks the view a question about the remote.
+const ORIGIN: &str = "origin";
 
 pub(crate) fn default_settings() -> Result<UserSettings, DotsyncError> {
     let config = StackedConfig::with_defaults();
@@ -101,7 +110,6 @@ pub(crate) async fn fetch_origin(
     fetch
         .import_refs()
         .map_err(|err| jj_error(format!("import fetched refs: {err}")))?;
-    sync_local_bookmarks_from_remote(tx.repo_mut(), "origin".as_ref())?;
     tx.commit("dotsync: fetch origin")
         .await
         .map_err(|err| jj_error(format!("commit fetch operation: {err}")))
@@ -123,93 +131,114 @@ fn remote_failure_reason(error: &dyn std::fmt::Display) -> String {
         .to_string()
 }
 
-/// Reconciles every local scope bookmark against the remote bookmark it
-/// tracks. DESIGN.md "The convergence model" describes four cases; this loop
-/// decides six things per scope, because two of them are about the local
-/// bookmark existing at all, and divergence is detected in two different
-/// places:
+/// Where a scope's head stands on this machine.
 ///
-/// - no local bookmark: a scope another machine published — create it
-/// - conflicted local bookmark: jj's import already tried to reconcile this
-///   scope and could not, which *is* divergence — error (never reset it, or
-///   the local commits are orphaned and the home files that came with them are
-///   deleted by the following sync)
-/// - local == remote: nothing to do
-/// - local behind remote: fast-forward the local bookmark
-/// - local ahead of remote: unpushed local work — keep it, the caller publishes
-///   it when it pushes
-/// - neither is an ancestor of the other: divergence that the import did not
-///   turn into a conflicted bookmark — for example when the remote bookmark is
-///   not tracked, so the import left the local one alone — error
+/// A `RefTarget` rather than a commit id, because a head is in one of three
+/// states and only one of them is a commit id (DESIGN, "A scope head has three
+/// states"): absent, exactly one commit, or contested — this machine and the
+/// remote each holding commits the other does not, with no single answer to
+/// which is the head.
 ///
-/// Erroring leaves the whole fetch transaction uncommitted, so a diverged
-/// repo is unchanged by the attempt and reports the same thing next run.
-pub(crate) fn sync_local_bookmarks_from_remote(
-    mut_repo: &mut MutableRepo,
-    remote_name: &jj_lib::ref_name::RemoteName,
-) -> Result<(), DotsyncError> {
-    let updates: Vec<(RefNameBuf, CommitId)> = mut_repo
-        .view()
-        .remote_bookmarks(remote_name)
-        .filter_map(|(name, remote_ref)| {
-            remote_ref
-                .target
-                .as_normal()
-                .map(|id| (RefNameBuf::from(name.as_str()), id.clone()))
-        })
-        .collect();
+/// The fetch is what puts it in one of them. jj's import merges each scope the
+/// remote published into the head this machine holds, using the position the
+/// remote was last seen at: caught up either way resolves to one commit, and
+/// only two sides that moved apart stay both. Dotsync used to redo that merge
+/// by hand afterwards, from six cases and without the last-seen position, and
+/// stopped the whole fetch on the two it could not name.
+pub(crate) fn scope_head<'a>(repo: &'a dyn Repo, scope: &str) -> &'a RefTarget {
+    repo.view()
+        .get_local_bookmark(RefNameBuf::from(scope).as_ref())
+}
 
-    for (name, remote_id) in updates {
-        let local_target = mut_repo.view().get_local_bookmark(name.as_ref()).clone();
-        if local_target.is_absent() {
-            // A scope this machine does not have yet, published by another
-            // machine.
-            mut_repo.set_local_bookmark_target(name.as_ref(), RefTarget::normal(remote_id));
-            continue;
-        }
-        let Some(local_id) = local_target.as_normal().cloned() else {
-            // A conflicted bookmark is jj's own record that the fetched remote
-            // position could not be reconciled with the local one. Its sides
-            // are the local and the remote head; report only the local one.
-            return Err(DotsyncError::ScopeDiverged {
-                scope: name.as_str().to_string(),
-                local_target: local_target
-                    .added_ids()
-                    .filter(|id| **id != remote_id)
-                    .map(|id| id.hex())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                remote_target: remote_id.hex(),
-            });
-        };
-        if local_id == remote_id {
-            continue;
-        }
-
-        let ancestry = |from: &CommitId, to: &CommitId| {
-            mut_repo.index().is_ancestor(from, to).map_err(|err| {
-                jj_error(format!(
-                    "compare local and published history for scope {}: {err}",
-                    name.as_str()
-                ))
-            })
-        };
-        if ancestry(&local_id, &remote_id)? {
-            mut_repo.set_local_bookmark_target(name.as_ref(), RefTarget::normal(remote_id));
-            continue;
-        }
-        if ancestry(&remote_id, &local_id)? {
-            continue;
-        }
-
-        return Err(DotsyncError::ScopeDiverged {
-            scope: name.as_str().to_string(),
-            local_target: local_id.hex(),
-            remote_target: remote_id.hex(),
-        });
+/// The tree a scope's head holds — what a command that only reads the repo
+/// answers about.
+///
+/// `None` when the scope has no head at all, which is a state to report rather
+/// than a failure: a read-only command answers on any repo state. A contested
+/// head answers with the merge of its sides, which is the tree a convergence
+/// would write onto it, so reading and converging cannot disagree about what
+/// the scope holds.
+pub(crate) async fn scope_head_tree(
+    repo: &dyn Repo,
+    scope: &str,
+) -> Result<Option<MergedTree>, DotsyncError> {
+    let mut commits = Vec::new();
+    for id in scope_head(repo, scope).added_ids() {
+        commits.push(
+            repo.store()
+                .get_commit(id)
+                .map_err(|err| jj_error(format!("load scope head for {scope}: {err}")))?,
+        );
     }
+    if commits.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(merge_commit_trees(repo, &commits).await.map_err(
+        |err| jj_error(format!("merge the two heads of scope {scope}: {err}")),
+    )?))
+}
 
-    Ok(())
+/// The one commit a scope's head is, for the commands that write history onto
+/// it.
+///
+/// A commit is written onto a parent rather than onto possibilities, so the two
+/// states that are not a single commit are refusals here, and each says which
+/// one it met: a scope with no head has nothing to build on, and a contested
+/// one has to be merged before anything can be written on it.
+pub(crate) fn scope_head_commit(repo: &dyn Repo, scope: &str) -> Result<Commit, DotsyncError> {
+    let target = scope_head(repo, scope);
+    if target.has_conflict() {
+        return Err(scope_diverged(repo.view(), scope));
+    }
+    let commit_id = target
+        .as_normal()
+        .ok_or_else(|| DotsyncError::ScopeNotInRepo {
+            scope: scope.to_string(),
+        })?;
+    repo.store()
+        .get_commit(commit_id)
+        .map_err(|err| jj_error(format!("load scope commit for {scope}: {err}")))
+}
+
+/// The scopes whose head is contested.
+///
+/// Read-only commands report this and writing commands stop on it, from one
+/// reading of one state — so a `status` that says nothing about a scope cannot
+/// be followed by a `dotsync` that stops on it.
+pub(crate) fn diverged_scopes(repo: &dyn Repo, graph: &ScopeGraph) -> Vec<String> {
+    graph
+        .parents
+        .keys()
+        .filter(|scope| scope_head(repo, scope).has_conflict())
+        .cloned()
+        .collect()
+}
+
+/// The stop a run that writes makes when a scope's head is contested.
+///
+/// Named for the state rather than for the command, because every command that
+/// writes meets it the same way and none of them can merge it.
+pub(crate) fn scope_diverged(view: &View, scope: &str) -> DotsyncError {
+    let name = RefNameBuf::from(scope);
+    let hexes = |target: &RefTarget| {
+        target
+            .added_ids()
+            .map(|id| id.hex())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    DotsyncError::ScopeDiverged {
+        scope: scope.to_string(),
+        head: hexes(view.get_local_bookmark(name.as_ref())),
+        published: hexes(
+            &view
+                .get_remote_bookmark(RemoteRefSymbol {
+                    name: name.as_ref(),
+                    remote: ORIGIN.as_ref(),
+                })
+                .target,
+        ),
+    }
 }
 
 /// What a run did about publishing local scope commits. Any scope named by
@@ -257,8 +286,12 @@ impl PushReport {
 /// Scopes whose local bookmark is not where the remote has it.
 fn pending_bookmark_updates(repo: &ReadonlyRepo) -> Vec<(RefNameBuf, BookmarkPushUpdate)> {
     repo.view()
-        .local_remote_bookmarks("origin".as_ref())
+        .local_remote_bookmarks(ORIGIN.as_ref())
         .filter_map(|(name, targets)| {
+            // Skipping a head that is not one commit: absent means the remote
+            // holds a scope this machine does not, which is nothing to
+            // publish, and every command that pushes has already stopped on a
+            // contested scope of its own before reaching here.
             let local = targets.local_target.as_normal()?.clone();
             let remote = targets.remote_ref.target.as_normal().cloned();
             if remote.as_ref() == Some(&local) {
@@ -349,23 +382,6 @@ pub(crate) async fn push_scope_updates(session: &mut Session) -> Result<PushRepo
     })
 }
 
-pub(crate) fn load_scope_commit(
-    repo: &dyn jj_lib::repo::Repo,
-    scope: &str,
-) -> Result<jj_lib::commit::Commit, DotsyncError> {
-    let commit_id = repo
-        .view()
-        .get_local_bookmark(RefNameBuf::from(scope).as_ref())
-        .as_normal()
-        .cloned()
-        .ok_or_else(|| DotsyncError::ScopeNotInRepo {
-            scope: scope.to_string(),
-        })?;
-    repo.store()
-        .get_commit(&commit_id)
-        .map_err(|err| jj_error(format!("load scope commit for {scope}: {err}")))
-}
-
 pub(crate) fn collect_managed_tree_entries(
     tree: &jj_lib::merged_tree::MergedTree,
 ) -> Result<BTreeMap<PathBuf, TreeValue>, DotsyncError> {
@@ -447,9 +463,14 @@ pub(crate) async fn read_tree_entry_bytes(
     }
 }
 
+/// Every scope the remote publishes is one this machine follows, which is what
+/// makes jj's import the whole of dotsync's reconciliation: a scope another
+/// machine created arrives as a head this machine holds, and a scope both have
+/// moved arrives contested rather than as two positions dotsync has to compare
+/// itself.
 pub(crate) fn default_import_options() -> GitImportOptions {
     GitImportOptions {
-        auto_local_bookmark: false,
+        auto_local_bookmark: true,
         abandon_unreachable_commits: true,
         remote_auto_track_bookmarks: HashMap::new(),
     }
