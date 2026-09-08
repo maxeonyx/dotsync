@@ -101,9 +101,9 @@ pub(crate) fn paused_cascade_notes(paused_cascade: Option<&String>) -> Vec<Strin
 /// What a read-only command says about a scope it found contested.
 ///
 /// A note for the same reason a paused cascade is one: it qualifies the answer
-/// rather than being it, and it is the reason the next plain `dotsync` will
-/// stop — which is the question `status` is being run to answer by the time
-/// anyone reads this.
+/// rather than being it. What the reader has to know is that the answer
+/// describes a state the next writing run will change — a contested head is an
+/// input to a merge that has not happened yet.
 pub(crate) fn diverged_scope_notes(scopes: &[String]) -> Vec<String> {
     if scopes.is_empty() {
         return Vec::new();
@@ -113,7 +113,7 @@ pub(crate) fn diverged_scope_notes(scopes: &[String]) -> Vec<String> {
             "dotsync: {} diverged: this machine and the remote each hold commits the other does not",
             quoted_scopes(scopes)
         ),
-        "dotsync: a sync cannot merge that yet (https://github.com/maxeonyx/dotsync/issues/17), so it stops instead and nothing is published.".to_string(),
+        "dotsync: the next `dotsync`, `dotsync commit` or `dotsync continue` merges them, and this answer describes the state before that merge.".to_string(),
     ]
 }
 
@@ -199,7 +199,7 @@ fn change_marker(state: FileState) -> &'static str {
 }
 
 pub(crate) fn render_error_json(error: &ErrorReport) -> serde_json::Value {
-    json!({
+    let mut json = json!({
         "status": "error",
         "error": error.code,
         "message": error.message,
@@ -207,7 +207,14 @@ pub(crate) fn render_error_json(error: &ErrorReport) -> serde_json::Value {
         "conflicts": error.conflicts.iter().map(render_conflict_json).collect::<Vec<_>>(),
         "forced_overwrites": error.forced_overwrites.iter().map(|path| display_path(path)).collect::<Vec<_>>(),
         "current_state": error.current_state,
-    })
+    });
+    // Present only when the run met the state, under the name `status`, `diff`
+    // and `view` already answer with — an agent that reads it off a successful
+    // report reads it off a stop the same way.
+    if let Some(scope) = &error.paused_cascade {
+        json["paused_cascade"] = json!(scope);
+    }
+    json
 }
 
 /// One file a merge could not resolve, with every version of it: the version
@@ -240,7 +247,12 @@ pub(crate) fn render_conflicts_human(files: &[ConflictedFile]) -> Vec<String> {
     let mut lines = Vec::new();
     for file in files {
         let path = display_path(&file.path);
-        lines.push(render_change_line(&file.path, file.state));
+        lines.push(match file.state {
+            Some(state) => render_change_line(&file.path, state),
+            // A merge home is not part of: there is nothing to say about the
+            // file beyond which one it is, and every version of it follows.
+            None => format!("  C {path}"),
+        });
         for version in &file.versions {
             lines.push(format!(
                 "--- {path} | {}: {} ---",
@@ -336,18 +348,6 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
     let error_report = error.to_error_report();
 
     match error {
-        DotsyncError::ScopeDiverged { scope, .. } => render_structured_error(
-            &format!("scope `{scope}` has diverged from the remote"),
-            "Dotsync fetches each scope's published history before syncing or committing, so every machine picks up what the others have recorded.",
-            "That fetch moves a scope's head forward when the remote has simply moved ahead, and leaves it where it is when this machine holds commits it has not published yet.",
-            "It expects a scope's head and the published one to be on one line of history, so that one of them is an ancestor of the other.",
-            &current_state_text(&error_report),
-            "This machine and the remote both have commits on this scope that the other does not, so neither side can be fast-forwarded onto the other.",
-            &[
-                "Nothing has been lost or changed: your local commits are intact and still unpushed.",
-                "Dotsync cannot merge diverged scopes yet — that is https://github.com/maxeonyx/dotsync/issues/17. Report this state rather than repairing the repo by hand.",
-            ],
-        ),
         DotsyncError::SyncConflict { scope, files } => render_structured_error(
             if files.len() == 1 {
                 "home and this machine's scope both changed the same file"
@@ -367,18 +367,20 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
                 "or, if the version the scope already holds is the one you want, rerun with `dotsync --force`; that discards what is in home for every changed file, so check `dotsync status` first.",
             ],
         ),
-        DotsyncError::CascadePaused { .. } => render_structured_error(
-            "cascade paused",
-            "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config.",
-            "This commit flow was merging the scoped change through the scope DAG and reached a branch where the same file had incompatible edits.",
-            "It expects you to edit the conflicted file in home to the merged contents you want, then run `dotsync continue` to create the merge commit and resume the cascade.",
+        DotsyncError::CascadePaused { scope, files } => render_structured_error(
+            &format!(
+                "paused at scope `{scope}`: two histories changed the same {} differently",
+                if files.len() == 1 { "file" } else { "files" }
+            ),
+            "Dotsync layers scopes down to each machine: a change recorded on one scope is merged into the scopes below it, and a change another machine published is merged into what this one holds. Both of those are the same merge, and it runs over the whole scope graph on every command that writes.",
+            &format!("This run was merging everything that reaches `{scope}` — what this machine has, what other machines have published, and what its parent scopes now hold — into one new version of it."),
+            "It expects at most one of those histories to have changed each file, or, where more than one did, to have changed different lines of it.",
             &current_state_text(&error_report),
-            &error_report.message,
+            "More than one of them changed the same part of the same file, so there is no merged version dotsync can work out on its own. Nothing was written: the scope's head has not moved and no other machine can see this state.",
             &[
-                "edit each conflicted file at its real path in home so it holds the merged contents you want; the file has to change, because dotsync reads the resolution back out of it.",
-                "run `dotsync continue` from the same machine to finish cascading and syncing.",
-                "or run `dotsync abort` from the same machine to discard the paused cascade; that reverts the conflicted files in home to this machine's scope state.",
-                "do not run another dotsync commit while the cascade is paused.",
+                "read the versions of each file below, decide what it should hold, and write that into the file at its real path in home; the file has to change, because dotsync reads the resolution back out of it.",
+                "run `dotsync continue` from the same machine to record your decision and finish converging.",
+                "or run `dotsync abort` from the same machine to discard it; that reverts the conflicted files in home to this machine's scope state, so save anything you want to keep outside home first.",
             ],
         ),
         DotsyncError::PausePredatesResolutionCheck { .. } => render_structured_error(
@@ -847,18 +849,14 @@ pub(crate) fn success_notes(drifts: &[FileDrift], push: Option<&PushReport>) -> 
 pub(crate) fn push_notes(push: &PushReport) -> Vec<String> {
     match push {
         PushReport::UpToDate => Vec::new(),
-        PushReport::Refused {
-            scopes,
-            rejection_reason,
-        } => {
-            let reason = rejection_reason
-                .clone()
-                .unwrap_or_else(|| "no reason reported by the remote".to_string());
-            vec![
-                format!("dotsync: the remote refused {} ({reason})", scopes.join(", ")),
-                "dotsync: those scopes are committed here but not published, so the remote does not have this change yet. The next run will try again.".to_string(),
-            ]
-        }
+        PushReport::Refused { scopes, rejection } => vec![
+            format!(
+                "dotsync: the remote refused {} ({})",
+                scopes.join(", "),
+                rejection.reason()
+            ),
+            "dotsync: those scopes are committed here but not published, so the remote does not have this change yet. The next run will try again.".to_string(),
+        ],
         PushReport::Unreachable { scopes, reason } => vec![
             format!(
                 "dotsync: could not publish {} ({reason})",
@@ -866,21 +864,6 @@ pub(crate) fn push_notes(push: &PushReport) -> Vec<String> {
             ),
             "dotsync: those scopes are committed here and will be published by the next run that reaches the remote.".to_string(),
         ],
-        PushReport::WithheldPausedCascade {
-            scopes,
-            paused_scope,
-        } => {
-            if scopes.is_empty() {
-                return Vec::new();
-            }
-            vec![
-                format!(
-                    "dotsync: not publishing {} while the cascade paused at `{paused_scope}` is unresolved",
-                    scopes.join(", ")
-                ),
-                "dotsync: run `dotsync continue` to finish the cascade, or `dotsync abort` to discard it; publishing resumes after that.".to_string(),
-            ]
-        }
     }
 }
 

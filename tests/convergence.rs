@@ -261,50 +261,6 @@ fn diverged_leaf_scope_keeps_the_local_commit_and_the_home_file() {
     );
 }
 
-#[test]
-fn diverged_scope_bookmark_is_reported_as_divergence_not_as_overwrite() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    interrupt_push_after_cascade(
-        &machine,
-        ".config/fish/dev-certs.fish",
-        "set -gx DEV_CERTS 1\n",
-    );
-    // Another machine pushes to `all` while this machine holds unpushed work on
-    // it, so `all` genuinely diverges while `linux` and `mx-xps-cy` are merely
-    // local-ahead.
-    seed_remote_scope_file(
-        &machine,
-        "all",
-        ".config/other-machine.conf",
-        "from another machine\n",
-    );
-
-    let sync_output = machine.run("dotsync");
-    assert_eq!(
-        sync_output.status.code(),
-        Some(1),
-        "true divergence is still an error until the convergence pass lands: {}",
-        render_output(&sync_output)
-    );
-
-    // The exact wording is the implementer's choice, but the error must name
-    // divergence and the diverged scope, and must not reuse the phrasing that
-    // misdescribed ordinary unpushed work as a fetch conflict.
-    let rendered = render_output(&sync_output);
-    assert!(
-        rendered.to_lowercase().contains("diverge"),
-        "a diverged scope must be described as divergence: {rendered}"
-    );
-    assert!(
-        rendered.contains("`all`"),
-        "the diverged scope must be named: {rendered}"
-    );
-}
-
 /// DESIGN, "The convergence model": bookmark divergence is "a **routine
 /// event, not an edge case**", and the convergence pass answers it — "diverged
 /// → a real merge commit".

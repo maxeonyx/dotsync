@@ -692,7 +692,7 @@ async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
             "continue",
             match &report.resumed {
                 Resumed::Cascade { scope } => format!(
-                    "dotsync: resumed the cascade paused at {scope} and synced {synced} file(s)"
+                    "dotsync: recorded your version on `{scope}` and synced {synced} file(s)"
                 ),
                 Resumed::SyncConflict => format!(
                     "dotsync: took your version of the conflicted file(s) and synced {synced} file(s)"
@@ -714,7 +714,7 @@ async fn run_abort() -> Result<CliOutput, DotsyncError> {
         let mut output = render::synced_output(
             "abort",
             format!(
-                "dotsync: aborted the cascade paused at {} and synced {} file(s)",
+                "dotsync: discarded the merge paused at `{}` and synced {} file(s)",
                 report.paused_scope,
                 report.sync.synced_paths.len()
             ),
@@ -1123,7 +1123,7 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
             error,
             forced_overwrites,
         }) => {
-            let exit_code = if error.is_paused_cascade() { 3 } else { 1 };
+            let exit_code = if error.paused_scope().is_some() { 3 } else { 1 };
             for note in render::forced_overwrite_notes(&forced_overwrites) {
                 eprintln!("{note}");
             }

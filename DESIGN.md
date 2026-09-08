@@ -255,7 +255,9 @@ Every state a machine can be in — mid-crash, post-failed-push, freshly offline
 
 **Push is a loop, not a step.** A rejected push isn't an error; it means another machine pushed first. Fetch, converge, push again. Push happens immediately after history is created — before the home sync — so a sync-side stop (a conflict with home) never strands committed history unpushed.
 
-**Read-only commands never mutate.** `status`, `diff`, and `view` don't move bookmarks, create commits, or touch home. They fetch (when online) and _report_ what convergence would do — including "pulling would conflict on these files in scope X" — computed as in-memory merges via jj-lib. Only `dotsync` (sync), `commit`, and `continue` actually converge.
+**Read-only commands report; they never decide.** `status`, `diff`, and `view` create no commits, publish nothing, and never write to home. They fetch (when online) and _report_ what convergence would do — including "pulling would conflict on these files in scope X" — computed as in-memory merges via jj-lib. Only `dotsync` (sync), `commit`, and `continue` converge.
+
+One thing they do change, and it is worth writing down rather than claiming otherwise: importing what the fetch brought fast-forwards a scope's local bookmark onto a position the remote already published. That is the one case of convergence that creates nothing — the merge is trivially the remote's head — so it takes no decision away from the next run, and there is no state a read-only command can leave behind that a plain `dotsync` would not have reached anyway. It is still a write where none was wanted. Not doing it needs the run to answer from a fetched view it never records, which is a change to how a run holds the repo rather than to what convergence is.
 
 **Offline is just deferred convergence.** If fetch fails due to network, dotsync skips it and proceeds against last-known remote state. Local history builds up ahead of the remote — which is a normal convergence input, handled the next time the machine is online. There is no offline mode and no queue.
 

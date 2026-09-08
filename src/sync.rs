@@ -4,13 +4,15 @@ use std::sync::Arc;
 
 use jj_lib::repo::Repo as _;
 
+use crate::converge;
 use crate::drift::{changed_paths, classify_managed_trees, ClassifiedPath, FileState};
 use crate::error::{jj_error, ConflictRole, ConflictedFile, ConflictedVersion, DotsyncError};
 use crate::home::{repo_path_of, Home, Materialized};
 use crate::paths::DotsyncPaths;
+use crate::pause::{converge_or_pause, publish_or_pause};
 use crate::repo::{
-    collect_managed_tree_entries, pending_push_scopes, push_scope_updates, read_entry_bytes,
-    scope_head, scope_head_commit, scope_head_tree, PushReport,
+    collect_managed_tree_entries, read_entry_bytes, scope_head, scope_head_commit, scope_head_tree,
+    PushReport,
 };
 use crate::session::{in_session, Run, Session};
 use crate::status::FileChange;
@@ -106,18 +108,12 @@ async fn sync_home(
     home: &mut Home,
     discard_local: bool,
 ) -> Result<SyncCommandReport, DotsyncError> {
-    session.converge().await?;
+    session.fetch().await?;
+    let checkpoint = converge::checkpoint(session.repo().as_ref(), session.graph());
+    converge_or_pause(session, home, &checkpoint).await?;
     // Publish before touching home: scope commits left behind by an
     // interrupted run must reach the remote even if the home sync stops.
-    // The exception is a paused cascade, whose scopes are only half
-    // cascaded.
-    let push = match crate::pause::paused_cascade_scope(session.paths())? {
-        Some(paused_scope) => PushReport::WithheldPausedCascade {
-            scopes: pending_push_scopes(session),
-            paused_scope,
-        },
-        None => push_scope_updates(session).await?,
-    };
+    let push = publish_or_pause(session, home, &checkpoint).await?;
     let sync = sync_home_to_machine_scope(session, home, discard_local).await?;
     Ok(SyncCommandReport { sync, push })
 }
@@ -243,34 +239,18 @@ async fn sync_conflict(
     classified: &BTreeMap<PathBuf, ClassifiedPath>,
     merged: &jj_lib::merged_tree::MergedTree,
 ) -> Result<DotsyncError, DotsyncError> {
-    let store = session.repo().store();
-    let labels = merged.labels_by_term(machine_scope);
     let mut files = Vec::new();
     // The classification is the domain rather than the merged tree, because
     // every path the merge could touch is in it — it was built from the same
     // three trees — and it is what says where each file stands.
     for (relative, path) in classified {
-        let repo_path = repo_path_of(relative)?;
-        let value = merged
-            .path_value(&repo_path)
-            .map_err(|err| jj_error(format!("read merged {}: {err}", relative.display())))?;
-        if value.is_resolved() {
+        let Some(versions) = conflicted_versions(session, merged, relative, machine_scope).await?
+        else {
             continue;
-        }
-        let mut versions = Vec::new();
-        // Base first: it is the version the reader needs to make sense of the
-        // other two, and jj holds the bases and the sides interleaved.
-        for (label, term) in labels.removes().zip(value.removes()) {
-            versions
-                .push(conflicted_version(store, relative, ConflictRole::Base, label, term).await?);
-        }
-        for (label, term) in labels.adds().zip(value.adds()) {
-            versions
-                .push(conflicted_version(store, relative, ConflictRole::Side, label, term).await?);
-        }
+        };
         files.push(ConflictedFile {
             path: relative.clone(),
-            state: path.state,
+            state: Some(path.state),
             versions,
         });
     }
@@ -278,6 +258,37 @@ async fn sync_conflict(
         scope: machine_scope.to_string(),
         files,
     })
+}
+
+/// Every version of one path in a merge that did not resolve — the base and
+/// both sides, each labeled with what it is.
+///
+/// `None` when the merge resolved this path, which is most of them: a stop
+/// presents the files it could not merge, not the whole tree.
+pub(crate) async fn conflicted_versions(
+    session: &Session,
+    merged: &jj_lib::merged_tree::MergedTree,
+    relative: &Path,
+    fallback_label: &str,
+) -> Result<Option<Vec<ConflictedVersion>>, DotsyncError> {
+    let store = session.repo().store();
+    let value = merged
+        .path_value(&repo_path_of(relative)?)
+        .map_err(|err| jj_error(format!("read merged {}: {err}", relative.display())))?;
+    if value.is_resolved() {
+        return Ok(None);
+    }
+    let labels = merged.labels_by_term(fallback_label);
+    let mut versions = Vec::new();
+    // Base first: it is the version the reader needs to make sense of the
+    // other two, and jj holds the bases and the sides interleaved.
+    for (label, term) in labels.removes().zip(value.removes()) {
+        versions.push(conflicted_version(store, relative, ConflictRole::Base, label, term).await?);
+    }
+    for (label, term) in labels.adds().zip(value.adds()) {
+        versions.push(conflicted_version(store, relative, ConflictRole::Side, label, term).await?);
+    }
+    Ok(Some(versions))
 }
 
 async fn conflicted_version(

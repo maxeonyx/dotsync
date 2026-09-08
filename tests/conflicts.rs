@@ -83,28 +83,36 @@ fn concurrent_same_scope_file_edits_require_resolution() {
     );
     assert_stderr_snapshot(
         &conflict,
-        r#"dotsync: cascade paused
+        r#"dotsync: paused at scope `all`: two histories changed the same file differently
 
 What dotsync does:
-Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config.
+Dotsync layers scopes down to each machine: a change recorded on one scope is merged into the scopes below it, and a change another machine published is merged into what this one holds. Both of those are the same merge, and it runs over the whole scope graph on every command that writes.
 
 This flow:
-This commit flow was merging the scoped change through the scope DAG and reached a branch where the same file had incompatible edits.
+This run was merging everything that reaches `all` — what this machine has, what other machines have published, and what its parent scopes now hold — into one new version of it.
 
 Expected:
-It expects you to edit the conflicted file in home to the merged contents you want, then run `dotsync continue` to create the merge commit and resume the cascade.
+It expects at most one of those histories to have changed each file, or, where more than one did, to have changed different lines of it.
 
 Current state found:
-paused scope: all
+`.config/shared.conf` was changed differently by two of the histories merging into `all`
 
 Why dotsync stopped:
-cascade paused at scope `all` with conflicts in .config/shared.conf
+More than one of them changed the same part of the same file, so there is no merged version dotsync can work out on its own. Nothing was written: the scope's head has not moved and no other machine can see this state.
 
 Correct flow:
-- edit each conflicted file at its real path in home so it holds the merged contents you want; the file has to change, because dotsync reads the resolution back out of it.
-- run `dotsync continue` from the same machine to finish cascading and syncing.
-- or run `dotsync abort` from the same machine to discard the paused cascade; that reverts the conflicted files in home to this machine's scope state.
-- do not run another dotsync commit while the cascade is paused.
+- read the versions of each file below, decide what it should hold, and write that into the file at its real path in home; the file has to change, because dotsync reads the resolution back out of it.
+- run `dotsync continue` from the same machine to record your decision and finish converging.
+- or run `dotsync abort` from the same machine to discard it; that reverts the conflicted files in home to this machine's scope state, so save anything you want to keep outside home first.
+
+Conflicted files:
+  C .config/shared.conf
+--- .config/shared.conf | base: the state this machine last synced ---
+setting = "base"
+--- .config/shared.conf | side: scope `all` ---
+setting = "all-a"
+--- .config/shared.conf | side: your home edit ---
+setting = "all-b"
 "#,
     );
     assert_eq!(
@@ -215,28 +223,36 @@ fn shared_scope_conflict_pauses_and_continue_applies_resolution_to_machine_homes
     assert_stderr_snapshot(
         &conflict,
         "\
-dotsync: cascade paused
+dotsync: paused at scope `linux`: two histories changed the same file differently
 
 What dotsync does:
-Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config.
+Dotsync layers scopes down to each machine: a change recorded on one scope is merged into the scopes below it, and a change another machine published is merged into what this one holds. Both of those are the same merge, and it runs over the whole scope graph on every command that writes.
 
 This flow:
-This commit flow was merging the scoped change through the scope DAG and reached a branch where the same file had incompatible edits.
+This run was merging everything that reaches `linux` — what this machine has, what other machines have published, and what its parent scopes now hold — into one new version of it.
 
 Expected:
-It expects you to edit the conflicted file in home to the merged contents you want, then run `dotsync continue` to create the merge commit and resume the cascade.
+It expects at most one of those histories to have changed each file, or, where more than one did, to have changed different lines of it.
 
 Current state found:
-paused scope: linux
+`.config/app.conf` was changed differently by two of the histories merging into `linux`
 
 Why dotsync stopped:
-cascade paused at scope `linux` with conflicts in .config/app.conf
+More than one of them changed the same part of the same file, so there is no merged version dotsync can work out on its own. Nothing was written: the scope's head has not moved and no other machine can see this state.
 
 Correct flow:
-- edit each conflicted file at its real path in home so it holds the merged contents you want; the file has to change, because dotsync reads the resolution back out of it.
-- run `dotsync continue` from the same machine to finish cascading and syncing.
-- or run `dotsync abort` from the same machine to discard the paused cascade; that reverts the conflicted files in home to this machine's scope state.
-- do not run another dotsync commit while the cascade is paused.
+- read the versions of each file below, decide what it should hold, and write that into the file at its real path in home; the file has to change, because dotsync reads the resolution back out of it.
+- run `dotsync continue` from the same machine to record your decision and finish converging.
+- or run `dotsync abort` from the same machine to discard it; that reverts the conflicted files in home to this machine's scope state, so save anything you want to keep outside home first.
+
+Conflicted files:
+  C .config/app.conf
+--- .config/app.conf | base: the version they last agreed on ---
+setting = \"base\"
+--- .config/app.conf | side: scope `linux` ---
+setting = \"linux\"
+--- .config/app.conf | side: scope `all` ---
+setting = \"all\"
 "
     );
 
@@ -651,11 +667,6 @@ fn paused_cascade_withholds_publishing_until_it_is_resolved() {
         ["all", "linux", "goof-a", "goof-b"].map(|scope| remote_branch_revision(&machine_b, scope));
 
     let sync_output = machine_b.run("dotsync --output json");
-    assert!(
-        sync_output.status.success(),
-        "a paused cascade must not stop dotsync from running: {}",
-        render_output(&sync_output)
-    );
 
     for (scope, before) in ["all", "linux", "goof-a", "goof-b"]
         .iter()
@@ -664,34 +675,29 @@ fn paused_cascade_withholds_publishing_until_it_is_resolved() {
         assert_eq!(
             remote_branch_revision(&machine_b, scope),
             before,
-            "a half-cascaded `{scope}` must not be published while the cascade is paused — `dotsync abort` could not take it back"
+            "a half-converged `{scope}` must not be published while the conflict is unresolved — `dotsync abort` could not take it back"
         );
     }
 
-    let json = parse_stdout_json(&sync_output);
-    let unpushed = json["unpushed_scopes"]
-        .as_array()
-        .expect("unpushed_scopes should be an array")
-        .iter()
-        .map(|scope| {
-            scope
-                .as_str()
-                .expect("scope should be a string")
-                .to_string()
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        unpushed.contains(&"all".to_string()),
-        "the withheld scopes must be reported: {}",
+    // The convergence pass is what decides this now, and it decides it by
+    // arriving at the same conflict: the merge is recomputed from the same
+    // commits, so the run stops before it has any history to publish. There
+    // is no separate rule saying "do not push while paused" to get wrong, and
+    // no state to consult in order to apply it.
+    assert_eq!(
+        sync_output.status.code(),
+        Some(3),
+        "the conflict is still there, so the run that meets it stops at it\n{}",
+        render_output(&sync_output)
+    );
+    assert_eq!(
+        parse_stdout_json(&sync_output)["paused_cascade"],
+        "linux",
+        "and says where, under the name every other command uses\n{}",
         render_output(&sync_output)
     );
 
     let stderr = String::from_utf8_lossy(&sync_output.stderr);
-    assert!(
-        stderr.to_lowercase().contains("paused"),
-        "the run must say why it did not publish: {}",
-        render_output(&sync_output)
-    );
     assert!(
         stderr.contains("dotsync continue") && stderr.contains("dotsync abort"),
         "the run must say how to unblock publishing: {}",
@@ -743,7 +749,7 @@ dotsync: overwrote 1 drifted file(s)
 @@ -1 +1 @@
 -setting = \"linux\"
 +setting = \"all\"
-dotsync: aborted the cascade paused at linux and synced 1 file(s)
+dotsync: discarded the merge paused at `linux` and synced 1 file(s)
 ",
     );
 
