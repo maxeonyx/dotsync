@@ -264,7 +264,6 @@ async fn commit_in_session(
             &PausedRun {
                 checkpoint: checkpoint.clone(),
                 paused_commit: Some(PausedCommit {
-                    machine_scope: machine_scope.clone(),
                     scope: options.scope.clone(),
                     message: options.message.clone(),
                     parent_commit_id: base_commit.id().hex(),

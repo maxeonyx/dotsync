@@ -78,7 +78,6 @@ pub(crate) struct PausedRun {
 /// command line, which no amount of reading the repo will recover.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) struct PausedCommit {
-    pub(crate) machine_scope: String,
     pub(crate) scope: String,
     pub(crate) message: String,
     pub(crate) parent_commit_id: String,
@@ -441,7 +440,7 @@ async fn finish_the_paused_commit(
         .repo_mut()
         .new_commit(vec![parent.id().clone()], resolved_tree)
         .set_description(&paused.message)
-        .set_author(machine_signature(&paused.machine_scope))
+        .set_author(machine_signature(session.machine_scope()))
         .write()
         .await
         .map_err(|err| DotsyncError::Jj {
