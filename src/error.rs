@@ -586,15 +586,19 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Vec<String> {
             path.display()
         )],
         DotsyncError::NoSuchParentScope { parent, scopes }
-        | DotsyncError::ParentScopeRequired {
-            scope: parent,
-            scopes,
-        }
         | DotsyncError::MachineScopeMissing {
             scope: parent,
             scopes,
             ..
         } => vec![scopes_in_the_repo(parent, scopes)],
+        DotsyncError::ParentScopeRequired { scope, scopes } => vec![format!(
+            "creating scope: {scope}; {}",
+            if scopes.is_empty() {
+                "this remote has no scopes yet".to_string()
+            } else {
+                format!("scopes in the repo: {}", scopes.join(", "))
+            }
+        )],
         DotsyncError::MachineScopeIsShared { scope, children } => vec![format!(
             "scope: {scope}; scopes hanging off it: {}",
             children.join(", ")

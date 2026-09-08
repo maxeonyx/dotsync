@@ -582,24 +582,33 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
                 "to point this machine at a different remote, move the existing repo aside by hand first — dotsync has no command for that yet.",
             ],
         ),
-        // Every stop about where a scope hangs teaches the same thing, because
-        // it is the same question asked at three moments: joining a fleet,
-        // adding a scope, and finding out this machine has none.
-        DotsyncError::NoSuchParentScope { .. } | DotsyncError::ParentScopeRequired { .. } => {
-            render_structured_error(
-                "that scope is not in the repo",
-                THE_SCOPE_GRAPH,
-                "This flow was about to create a scope, hanging it off the scopes you named.",
-                "It expects every parent you name to be a scope this repo already has, because a scope is created where its parents are and cannot be moved afterwards.",
-                &current_state_text(&error_report),
-                "A scope hung off a name nothing answers to would receive nothing and reach nothing.",
-                &[
-                    "run `dotsync view` to see the scopes there are.",
-                    "then name the one this config should come from: the root-est scope whose machines should all share it.",
-                    "to create the parent itself first, run `dotsync create-scope <name> --parent <scope>`.",
-                ],
-            )
-        }
+        DotsyncError::NoSuchParentScope { .. } => render_structured_error(
+            "that scope is not in the repo",
+            THE_SCOPE_GRAPH,
+            "This flow was about to create a scope, hanging it off the scopes you named.",
+            "It expects every parent you name to be a scope this repo already has, because a scope is created where its parents are and cannot be moved afterwards.",
+            &current_state_text(&error_report),
+            "A scope hung off a name nothing answers to would receive nothing and reach nothing.",
+            &[
+                "run `dotsync view` to see the scopes there are.",
+                "then name the one this config should come from: the root-est scope whose machines should all share it.",
+                "to create the parent itself first, run `dotsync create-scope <name> --parent <scope>`.",
+            ],
+        ),
+        DotsyncError::ParentScopeRequired { scope, .. } => render_structured_error(
+            "say where this scope hangs",
+            THE_SCOPE_GRAPH,
+            "This flow was about to create a scope, and a scope is created where its parents are.",
+            "It expects at least one `--parent`, because that is what decides which config this scope receives and which machines a change on it reaches.",
+            &current_state_text(&error_report),
+            "Nothing else says it. A hostname cannot tell a `home-linux` from a `work-linux`, and the graph is append-only, so a scope put in the wrong place cannot be moved afterwards — this is the only moment the answer can be given.",
+            &[
+                "run `dotsync view` on a machine that is already set up to see the scopes there are.",
+                &format!(
+                    "then name the one this config should come from: `--parent <scope>`, or several for a `{scope}` that inherits from more than one."
+                ),
+            ],
+        ),
         DotsyncError::MachineScopeIsShared { scope, children } => render_structured_error(
             "that scope is shared with other machines",
             THE_SCOPE_GRAPH,
