@@ -38,7 +38,6 @@
     "dotsync::commit_selection$commit_with_no_paths_ignores_unmanaged_home_files": "passing",
     "dotsync::commit_selection$commit_without_paths_imports_all_diffs": "passing",
     "dotsync::commit_selection$committing_a_path_another_machine_deleted_is_refused": "passing",
-    "dotsync::commit_selection$committing_the_scope_graph_outside_all_is_an_error": "passing",
     "dotsync::commit_selection$forcing_a_stale_commit_records_what_it_overwrote": "passing",
     "dotsync::commit_selection$naming_one_unusable_path_reads_as_one_path": "passing",
     "dotsync::commit_selection$selected_add_modify_and_delete_are_applied_without_touching_unselected_changes": "passing",
@@ -100,19 +99,17 @@
     "dotsync::help_text$init_help_explains_remote_url_and_setup": "passing",
     "dotsync::help_text$top_level_help_documents_the_exit_codes": "passing",
     "dotsync::help_text$top_level_help_explains_scope_and_basic_workflow": "passing",
-    "dotsync::hostile_inputs$a_branch_deleted_from_the_remote_does_not_stop_this_machine": "pending",
-    "dotsync::hostile_inputs$a_branch_rewound_on_the_remote_is_not_pushed_back": "pending",
+    "dotsync::hostile_inputs$a_branch_deleted_from_the_remote_does_not_stop_this_machine": "passing",
+    "dotsync::hostile_inputs$a_branch_rewound_on_the_remote_is_not_pushed_back": "passing",
     "dotsync::hostile_inputs$a_machine_named_after_a_shared_scope_does_not_publish_its_private_config": "passing",
     "dotsync::hostile_inputs$a_machine_whose_scope_the_fleet_renamed_has_a_route_back": "passing",
     "dotsync::hostile_inputs$view_still_answers_on_every_machine_after_a_scope_joins_the_graph": "passing",
-    "dotsync::init_and_config$a_machine_joining_keeps_the_comments_already_in_the_config": "passing",
     "dotsync::init_and_config$a_scope_created_on_one_machine_is_usable_from_another": "passing",
     "dotsync::init_and_config$init_creates_no_visible_git_directory": "passing",
     "dotsync::init_and_config$init_on_an_initialized_machine_says_what_to_run_instead": "passing",
     "dotsync::init_and_config$init_refuses_a_parent_scope_that_does_not_exist": "passing",
     "dotsync::init_and_config$init_reports_no_drift": "passing",
     "dotsync::init_and_config$init_without_remote_noninteractive_matches_full_recovery_message": "passing",
-    "dotsync::init_and_config$init_writes_a_config_whose_comments_teach_scope_choice": "passing",
     "dotsync::init_and_config$missing_home_is_reported_as_an_environment_error": "passing",
     "dotsync::init_and_config$status_before_init_json_matches_recovery_message": "passing",
     "dotsync::init_and_config$status_before_init_matches_full_recovery_message": "passing",
@@ -160,10 +157,5 @@
     "dotsync::sync_and_drift$the_conflict_stop_lists_files_the_way_status_does_and_apart_from_its_instructions": "passing",
     "dotsync::sync_and_drift$v03_plain_sync_ignores_unrelated_home_changes": "passing",
     "dotsync::version_json$version_json_flag_prints_machine_readable_version": "passing"
-  },
-  "removals": [
-    "dotsync::init_and_config$init_writes_a_config_whose_comments_teach_scope_choice",
-    "dotsync::init_and_config$a_machine_joining_keeps_the_comments_already_in_the_config",
-    "dotsync::commit_selection$committing_the_scope_graph_outside_all_is_an_error"
-  ]
+  }
 }
