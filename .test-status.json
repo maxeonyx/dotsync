@@ -84,6 +84,7 @@
     "dotsync::convergence$overlapping_runs_leave_the_machine_working": "passing",
     "dotsync::convergence$plain_sync_pushes_scopes_left_unpushed_by_an_interrupted_commit": "passing",
     "dotsync::convergence$two_machines_that_both_moved_a_scope_converge_into_a_merge": "pending",
+    "dotsync::dotsync$scope_graph::tests::a_scope_creation_is_read_however_the_release_that_wrote_it_worded_it": "pending",
     "dotsync::dotsync$tests::tdd_ratchet_gatekeeper": "passing",
     "dotsync::file_kinds$a_named_path_that_is_not_a_regular_file_is_refused_rather_than_read": "passing",
     "dotsync::file_kinds$a_path_that_reaches_its_file_through_a_symlink_is_refused": "passing",

@@ -178,6 +178,38 @@ fn description_body(description: &str) -> Option<String> {
     (!body.is_empty()).then(|| body.to_string())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::scope_created_by;
+
+    /// Every description dotsync has ever written when it created a scope.
+    /// Repos in the field hold all three, and the fleet migrates by upgrading
+    /// the binary — so a rule that only reads the newest wording takes the
+    /// root scope away from every machine that joined before it.
+    #[test]
+    fn a_scope_creation_is_read_however_the_release_that_wrote_it_worded_it() {
+        for (description, created) in [
+            ("dotsync: create linux scope", Some("linux")),
+            ("dotsync: rebuild work-linux scope", Some("work-linux")),
+            ("dotsync: initialize all scope", Some("all")),
+            (
+                "dotsync: create hyprland scope\n\nwayland compositor config",
+                Some("hyprland"),
+            ),
+            ("dotsync: cascade from all", None),
+            ("dotsync: working copy", None),
+            ("dotsync: update scope config", None),
+            ("Add usage function for subscription limits", None),
+        ] {
+            assert_eq!(
+                scope_created_by(description),
+                created,
+                "read the wrong scope out of {description:?}"
+            );
+        }
+    }
+}
+
 /// Where a scope was created, and what its creator said it was for.
 struct Creation {
     commits: Vec<CommitId>,
