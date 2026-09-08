@@ -126,7 +126,7 @@ pub async fn view(
         };
 
         Ok(ViewReport {
-            machine: MachineState::read(session)?,
+            machine: MachineState::read(session).await?,
             found,
         })
     })
@@ -226,7 +226,7 @@ async fn diff_report(session: &mut Session, home: &mut Home) -> Result<DiffRepor
 
     Ok(DiffReport {
         machine_scope,
-        machine: MachineState::read(session)?,
+        machine: MachineState::read(session).await?,
         drifts,
     })
 }

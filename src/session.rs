@@ -21,6 +21,13 @@ pub(crate) struct Session {
     paths: DotsyncPaths,
     repo: Arc<ReadonlyRepo>,
     graph: ScopeGraph,
+    /// Which machine this is, read from the hostname once per run.
+    ///
+    /// Held here because every command needs it and none of them can work it
+    /// out from the repo: `view` has no working copy to ask, and the pass
+    /// stamps it on every merge it writes. Detecting it per helper is the
+    /// pattern this type exists to remove.
+    machine_scope: String,
     unreachable_remote: Option<UnreachableRemote>,
 }
 
@@ -41,12 +48,20 @@ impl Session {
             paths: paths.clone(),
             repo,
             graph,
+            machine_scope: crate::machine::detect_machine()?.machine_scope,
             unreachable_remote: None,
         })
     }
 
     pub(crate) fn paths(&self) -> &DotsyncPaths {
         &self.paths
+    }
+
+    /// The scope this machine's hostname names, whether or not the repo has
+    /// one by that name. A machine whose scope has been taken away is a state
+    /// dotsync has to be able to describe.
+    pub(crate) fn machine_scope(&self) -> &str {
+        &self.machine_scope
     }
 
     pub(crate) fn graph(&self) -> &ScopeGraph {

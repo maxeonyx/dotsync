@@ -725,17 +725,38 @@ async fn run_abort() -> Result<CliOutput, DotsyncError> {
         // `abort` publishes nothing, so it has no push to report — and the one
         // thing it knows that the other syncing commands do not is where the
         // cascade it discarded had stopped.
+        let synced = report.sync.synced_paths.len();
         let mut output = render::synced_output(
             "abort",
-            format!(
-                "dotsync: discarded the merge paused at `{}` and synced {} file(s)",
-                report.paused_scope,
-                report.sync.synced_paths.len()
-            ),
+            match &report.still_paused {
+                None => format!(
+                    "dotsync: discarded the merge paused at `{}` and synced {synced} file(s)",
+                    report.paused_scope
+                ),
+                // Home went back, and that is all that happened: saying the
+                // merge was discarded would be describing the pause as over.
+                Some(scope) => format!(
+                    "dotsync: put home back and synced {synced} file(s); the merge at `{scope}` is still waiting"
+                ),
+            },
             &report.sync,
             None,
         );
         output.json["paused_scope"] = json!(report.paused_scope);
+        // Abort discards what this machine committed, so a conflict that came
+        // from the remote is still there afterwards. Reported under the name
+        // every other command uses, with the code that means a pause is
+        // waiting: a run that says it succeeded and leaves the next command
+        // stopping on the same merge is the disagreement worth avoiding.
+        let Some(scope) = &report.still_paused else {
+            return output;
+        };
+        output.json["paused_cascade"] = json!(scope);
+        output.exit_code = 3;
+        output.notes.extend([
+            format!("dotsync: the conflict at `{scope}` came from the remote rather than from anything this machine committed, so there was nothing to take back and it is still waiting"),
+            "dotsync: aborting again will not clear it — edit the conflicted file(s) in home to the merged contents you want and run `dotsync continue`.".to_string(),
+        ]);
         output
     }))
 }

@@ -794,6 +794,28 @@ pub fn push_a_branch_with_a_plain_git_client(
     remote_branch_revision(machine, branch)
 }
 
+/// Commits a change straight onto a scope branch with a plain git client.
+/// Setup, not subject: this is how a conflict arrives from the remote instead
+/// of from this machine's own commit, and one machine cannot reach that state
+/// on its own — a machine that commits to `all` meets the collision itself and
+/// pauses before publishing anything.
+pub fn commit_to_a_scope_with_a_plain_git_client(
+    machine: &MachineEnvironment,
+    scope: &str,
+    relative: &str,
+    contents: &str,
+) -> String {
+    let clone_dir = machine.home_dir.join(format!("remote-{scope}.ignore"));
+    if clone_dir.exists() {
+        fs::remove_dir_all(&clone_dir).expect("remove old remote clone dir");
+    }
+    clone_remote_branch_to(&clone_dir, &machine.remote_dir, scope);
+    write_file_at(&clone_dir.join(relative), contents);
+    git_commit_all(&clone_dir, &format!("test: {scope} {relative}"));
+    git_push(&clone_dir, scope);
+    remote_branch_revision(machine, scope)
+}
+
 /// Moves a branch back one commit and force-pushes it, which is the other
 /// half of what a person does with a branch of their own.
 pub fn rewind_a_branch_with_a_plain_git_client(

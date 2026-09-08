@@ -240,11 +240,11 @@ pub async fn create_scope(
     parents: &[String],
     description: Option<&str>,
 ) -> Run<Result<CreatedScope, DotsyncError>> {
-    in_session(paths, async |session, paths| {
+    in_session(paths, async |session, _paths| {
         // A paused cascade has scopes half cascaded, and this run ends by
         // publishing every scope commit the machine holds — so the pause has
         // to be resolved first, for the reason a commit does.
-        crate::pause::reject_commit_if_cascade_paused(paths)?;
+        crate::pause::reject_commit_if_paused(session, session.machine_scope()).await?;
         session.fetch().await?;
         let graph = session.graph().clone();
         if graph.contains(scope) || !scope_head(session.repo().as_ref(), scope).is_absent() {

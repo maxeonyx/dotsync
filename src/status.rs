@@ -39,12 +39,17 @@ pub struct MachineState {
 }
 
 impl MachineState {
-    pub(crate) fn read(session: &Session) -> Result<Self, DotsyncError> {
-        let repo = session.repo().as_ref();
+    pub(crate) async fn read(session: &Session) -> Result<Self, DotsyncError> {
+        let recorded = crate::pause::load_paused_run(session.paths())?;
         Ok(Self {
-            paused_cascade: crate::pause::paused_cascade_scope(session.paths())?,
-            diverged_scopes: diverged_scopes(repo, session.graph()),
-            unpushed_scopes: unpushed_scopes(repo, session.graph()),
+            paused_cascade: crate::pause::paused_scope(
+                session,
+                session.machine_scope(),
+                recorded.as_ref(),
+            )
+            .await?,
+            diverged_scopes: diverged_scopes(session.repo().as_ref(), session.graph()),
+            unpushed_scopes: unpushed_scopes(session.repo().as_ref(), session.graph()),
         })
     }
 }
@@ -105,7 +110,7 @@ async fn status_report(
 
     Ok(StatusReport {
         machine_scope,
-        machine: MachineState::read(session)?,
+        machine: MachineState::read(session).await?,
         changes: file_changes(FileState::is_drift),
         incoming: file_changes(FileState::is_incoming),
     })
