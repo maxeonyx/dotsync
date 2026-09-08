@@ -46,15 +46,17 @@ pub(crate) struct PausedCascadeState {
     pub(crate) description: String,
     #[serde(default)]
     pub(crate) original_scope_commit_ids: BTreeMap<String, String>,
-    /// The conflicted files, and what each held in home when the conflict
-    /// first appeared. `continue` resolves exactly these paths, and refuses
-    /// when they have not changed — see `unresolved_conflicted_files`.
-    /// Defaulted rather than required so that a pause file written before this
-    /// field existed still loads and can still be aborted; `continue` refuses
-    /// such a pause outright. Deleted with this whole file when conflicts
-    /// become commits (PLAN §2.3 step 6).
+    /// The paths the merge could not resolve — what `continue` reads back out
+    /// of home.
+    ///
+    /// Recorded rather than recomputed, and only because of `commit`: a
+    /// convergence merge is entirely repo-side, so recomputing it from the
+    /// same commits gives the same conflicts, but `commit`'s merge has home
+    /// itself as one of its two sides — and home is exactly what a resolution
+    /// changes. Recomputing that one after the agent has written the answer
+    /// finds nothing conflicted at all.
     #[serde(default)]
-    pub(crate) paused_home_contents: BTreeMap<PathBuf, Option<Vec<u8>>>,
+    pub(crate) conflicted_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -121,16 +123,11 @@ pub(crate) async fn publish_or_pause(
 /// Records the pause and builds the stop that presents it.
 ///
 /// The merge itself is not recorded — it is recomputed from the same commits
-/// on every run, so a resolution shows up the moment it is written. What is
-/// recorded is what only this moment knows: what home held when the conflict
-/// first appeared, which is what tells a resolution from an untouched file,
-/// and where the scopes stood before this run wrote anything, which is where
-/// `abort` goes back to.
-///
-/// "When the conflict first appeared" is why an existing pause at the same
-/// scope keeps its own record. A rerun meets the same conflict and would
-/// otherwise write down whatever the agent had typed so far as the baseline,
-/// which makes a half-written resolution read as no resolution at all.
+/// on every run, so a resolution shows up the moment it is written, and which
+/// paths conflicted comes back out of that recomputed merge rather than out of
+/// a list. What is recorded is the commits the merge was of and where the
+/// scopes stood before this run wrote anything, which is where `abort` goes
+/// back to.
 pub(crate) async fn pause_at(
     session: &mut Session,
     home: &mut Home,
@@ -148,14 +145,17 @@ pub(crate) async fn pause_at(
         })
         .collect::<Result<Vec<_>, DotsyncError>>()?;
 
-    let mut paused_home_contents = home_contents(session, home, &conflicted).await?;
-    if let Ok(existing) = load_paused_cascade_state(session.paths()) {
-        if existing.paused_scope == pause.scope {
-            for (path, contents) in existing.paused_home_contents {
-                paused_home_contents.insert(path, contents);
-            }
-        }
-    }
+    // Home has to cover the conflicted paths before the run ends, because
+    // `continue` reads the resolution back out of them and a conflict can be
+    // about a file this machine has never held.
+    home.observe_paths(
+        session,
+        conflicted
+            .iter()
+            .map(|relative| repo_path_of(relative))
+            .collect::<Result<Vec<_>, DotsyncError>>()?,
+    )
+    .await?;
 
     let machine_scope = home.machine_scope().to_string();
     save_paused_cascade_state(
@@ -166,7 +166,7 @@ pub(crate) async fn pause_at(
             parent_commit_ids: pause.parents.iter().map(|id| id.hex()).collect(),
             description: pause.description,
             original_scope_commit_ids: checkpoint.clone(),
-            paused_home_contents,
+            conflicted_paths: conflicted.clone(),
         },
     )?;
 
@@ -189,51 +189,55 @@ pub(crate) async fn pause_at(
     })
 }
 
-/// Home contents of the conflicted files, recorded when a cascade pauses so
-/// `continue` can tell a resolution from an untouched file.
+/// Conflicted files whose home content is not a resolution, because it still
+/// holds conflict markers.
 ///
-/// A conflict can be about a file this machine has never held, so home is
-/// widened to cover these paths before they are read.
-pub(crate) async fn home_contents(
-    session: &mut Session,
-    home: &mut Home,
+/// "Resolved" is a property of the content, and this is the whole of it.
+/// Nothing else can be: an unchanged file is a legitimate resolution — the
+/// agent read both sides and kept this one — and treating it as unresolved is
+/// silently wrong for exactly the agent that did the work properly (DESIGN,
+/// "Whether `continue` survives"). What is never a resolution is a file with
+/// markers in it: recorded as the merged contents, they cascade into every
+/// descendant and every other machine then syncs `<<<<<<<` into its live
+/// config.
+async fn files_that_still_hold_markers(
+    session: &Session,
+    home: &Home,
     relatives: &[PathBuf],
-) -> Result<BTreeMap<PathBuf, Option<Vec<u8>>>, DotsyncError> {
-    let repo_paths = relatives
-        .iter()
-        .map(|relative| repo_path_of(relative))
-        .collect::<Result<Vec<_>, DotsyncError>>()?;
-    home.observe_paths(session, repo_paths).await?;
-    let mut contents = BTreeMap::new();
+) -> Result<Vec<PathBuf>, DotsyncError> {
+    let mut unresolved = Vec::new();
     for relative in relatives {
         let value = home.entry(relative)?.as_resolved().cloned().flatten();
-        contents.insert(
-            relative.clone(),
-            read_entry_bytes(session.repo().store(), relative, value.as_ref()).await?,
-        );
+        let Some(bytes) =
+            read_entry_bytes(session.repo().store(), relative, value.as_ref()).await?
+        else {
+            continue;
+        };
+        if holds_conflict_markers(&bytes) {
+            unresolved.push(relative.clone());
+        }
     }
-    Ok(contents)
+    Ok(unresolved)
 }
 
-/// Conflicted files that hold exactly what they held when the cascade paused.
+/// Whether these bytes are a conflict somebody stopped half way through
+/// resolving.
 ///
-/// Today's pause never materializes conflict markers into home, so DESIGN's
-/// "`continue` verifies the markers are gone" is vacuously true and `continue`
-/// takes home's untouched content as the resolution — silently deleting the
-/// losing side and reporting success. Until conflicts become commits and the
-/// two sides really are written into home (PLAN item 3), an unchanged file is
-/// proof that no resolution was made. Deleted with the pause file.
-async fn unresolved_conflicted_files(
-    session: &mut Session,
-    home: &mut Home,
-    state: &PausedCascadeState,
-) -> Result<Vec<PathBuf>, DotsyncError> {
-    let paused: Vec<PathBuf> = state.paused_home_contents.keys().cloned().collect();
-    let now = home_contents(session, home, &paused).await?;
-    Ok(paused
-        .into_iter()
-        .filter(|relative| now.get(relative) == state.paused_home_contents.get(relative))
-        .collect())
+/// Both ends, deliberately. jj parses six marker characters and a file that
+/// starts a line with seven of any of them is a marker to it — which makes
+/// `=======` under a heading, and a markdown rule of seven dashes, conflict
+/// markers. Requiring a start line *and* an end line is what no config file
+/// holds by accident, and it is what jj's own materialization always writes.
+/// The length comes from jj so the number is not invented here; jj picks a
+/// longer one when the content already contains markers, so this is a floor.
+fn holds_conflict_markers(bytes: &[u8]) -> bool {
+    let marker_line = |byte: u8| {
+        bytes.split(|&b| b == b'\n').any(|line| {
+            line.iter().take_while(|&&b| b == byte).count()
+                >= jj_lib::conflicts::MIN_CONFLICT_MARKER_LEN
+        })
+    };
+    marker_line(b'<') && marker_line(b'>')
 }
 
 pub async fn continue_after_conflict(
@@ -265,36 +269,18 @@ async fn continue_in_session(
         Err(DotsyncError::NoPausedCascade) => return complete_a_sync_conflict(session, home).await,
         Err(error) => return Err(error),
     };
-    // A cascade pauses because at least one file conflicted, so an empty
-    // record means the pause was written before this check existed rather than
-    // that nothing conflicted. Skipping the check there would reopen the
-    // silent discard exactly when a machine upgrades mid-pause; `abort` reads
-    // nothing this pause lacks, so refusing does not wedge it.
-    if state.paused_home_contents.is_empty() {
-        return Err(DotsyncError::PausePredatesResolutionCheck {
-            scope: state.paused_scope,
-        });
-    }
-    let unresolved = unresolved_conflicted_files(session, home, &state).await?;
-    if !unresolved.is_empty() {
-        return Err(DotsyncError::UnresolvedConflict {
-            scope: state.paused_scope,
-            paths: unresolved,
-        });
-    }
     let repo = session.repo().clone();
-    let mut tx = repo.start_transaction();
     let parent_commits = state
         .parent_commit_ids
         .iter()
-        .map(|id| load_commit_by_hex(tx.repo_mut(), id))
+        .map(|id| load_commit_by_hex(repo.as_ref(), id))
         .collect::<Result<Vec<_>, DotsyncError>>()?;
     if parent_commits.is_empty() {
         return Err(DotsyncError::Jj {
             message: "paused cascade has no parent commits".to_string(),
         });
     }
-    let merged_tree = merge_commit_trees(tx.repo_mut(), &parent_commits)
+    let merged_tree = merge_commit_trees(repo.as_ref(), &parent_commits)
         .await
         .map_err(|err| DotsyncError::Jj {
             message: format!(
@@ -302,13 +288,37 @@ async fn continue_in_session(
                 state.paused_scope
             ),
         })?;
+    let conflicted = &state.conflicted_paths;
+
+    // Home's side of every conflicted path has to be read before it is taken
+    // as the resolution — a conflict can be about a file this machine has
+    // never held, and an unobserved path reads as absent, which would record a
+    // deletion as the answer.
+    home.observe_paths(
+        session,
+        conflicted
+            .iter()
+            .map(|relative| repo_path_of(relative))
+            .collect::<Result<Vec<_>, DotsyncError>>()?,
+    )
+    .await?;
+
+    let unresolved = files_that_still_hold_markers(session, home, conflicted).await?;
+    if !unresolved.is_empty() {
+        return Err(DotsyncError::UnresolvedConflict {
+            scope: state.paused_scope.clone(),
+            paths: unresolved,
+        });
+    }
+
     let mut builder = MergedTreeBuilder::new(merged_tree);
-    for relative in state.paused_home_contents.keys() {
+    for relative in conflicted {
         builder.set_or_remove(repo_path_of(relative)?, home.entry(relative)?);
     }
     let resolved_tree = builder.write_tree().await.map_err(|err| DotsyncError::Jj {
         message: format!("write resolved tree for {}: {err}", state.paused_scope),
     })?;
+    let mut tx = session.repo().start_transaction();
     let resolved_commit = tx
         .repo_mut()
         .new_commit(

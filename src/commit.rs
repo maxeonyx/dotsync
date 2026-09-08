@@ -22,7 +22,7 @@ use crate::home::{repo_path_of, Home};
 use crate::machine::machine_signature;
 use crate::paths::DotsyncPaths;
 use crate::pause::{
-    converge_or_pause, home_contents, publish_or_pause, reject_commit_if_cascade_paused,
+    converge_or_pause, publish_or_pause, reject_commit_if_cascade_paused,
     save_paused_cascade_state, PausedCascadeState,
 };
 use crate::repo::{scope_head_commit, PushReport};
@@ -258,11 +258,8 @@ async fn commit_in_session(
     if new_tree.has_conflict() {
         let conflicted_paths = conflicted_paths_of(&new_tree, &options.scope)?;
         // Nothing was written, so there is no transaction to keep: the pause
-        // resolves against the scope head that is already there. Dropped
-        // before reading home, because reading home can amend the working copy
-        // commit and two open transactions on one repo is not a state to be in.
+        // resolves against the scope head that is already there.
         drop(tx);
-        let paused_home_contents = home_contents(session, home, &conflicted_paths).await?;
         save_paused_cascade_state(
             session.paths(),
             &PausedCascadeState {
@@ -271,7 +268,7 @@ async fn commit_in_session(
                 parent_commit_ids: vec![base_commit.id().hex()],
                 description: options.message.clone(),
                 original_scope_commit_ids: checkpoint.clone(),
-                paused_home_contents,
+                conflicted_paths: conflicted_paths.clone(),
             },
         )?;
         let mut files = Vec::new();

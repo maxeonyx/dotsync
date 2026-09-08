@@ -101,8 +101,8 @@ Why dotsync stopped:
 More than one of them changed the same part of the same file, so there is no merged version dotsync can work out on its own. Nothing was written: the scope's head has not moved and no other machine can see this state.
 
 Correct flow:
-- read the versions of each file below, decide what it should hold, and write that into the file at its real path in home; the file has to change, because dotsync reads the resolution back out of it.
-- run `dotsync continue` from the same machine to record your decision and finish converging.
+- read the versions of each file below, decide what it should hold, and write that into the file at its real path in home; take out any marker lines you paste in.
+- run `dotsync continue` from the same machine to record your decision and finish converging. Leaving a file exactly as it is says you decided on the version already there.
 - or run `dotsync abort` from the same machine to discard it; that reverts the conflicted files in home to this machine's scope state, so save anything you want to keep outside home first.
 
 Conflicted files:
@@ -241,8 +241,8 @@ Why dotsync stopped:
 More than one of them changed the same part of the same file, so there is no merged version dotsync can work out on its own. Nothing was written: the scope's head has not moved and no other machine can see this state.
 
 Correct flow:
-- read the versions of each file below, decide what it should hold, and write that into the file at its real path in home; the file has to change, because dotsync reads the resolution back out of it.
-- run `dotsync continue` from the same machine to record your decision and finish converging.
+- read the versions of each file below, decide what it should hold, and write that into the file at its real path in home; take out any marker lines you paste in.
+- run `dotsync continue` from the same machine to record your decision and finish converging. Leaving a file exactly as it is says you decided on the version already there.
 - or run `dotsync abort` from the same machine to discard it; that reverts the conflicted files in home to this machine's scope state, so save anything you want to keep outside home first.
 
 Conflicted files:
@@ -291,146 +291,45 @@ fn conflict_messages_agree_that_resolving_means_editing_home() {
     let harness = TestHarness::new();
     let (machine, pause) = pause_a_conflict_on_linux(&harness);
 
-    // The pause used to say "keep the desired final contents", which reads as
-    // "leaving the file alone is a valid resolution". `continue` refuses that,
-    // so the pause has to ask for an edit.
+    // Leaving the file alone *is* a decision — the agent read both versions
+    // and kept the one already there — so the pause has to say so. Treating an
+    // unchanged file as unresolved is silently wrong for exactly the agent
+    // that did the work properly, which is why the pause used to demand an
+    // edit and no longer does.
     let pause_stderr = String::from_utf8_lossy(&pause.stderr).into_owned();
     assert!(
         pause_stderr.contains(
-            "the file has to change, because dotsync reads the resolution back out of it"
+            "Leaving a file exactly as it is says you decided on the version already there"
         ),
-        "the pause must say the conflicted file has to change\n{}",
+        "the pause must say that keeping the version already there is a decision\n{}",
         render_output(&pause)
     );
 
+    // `dotsync abort` syncs home back to the machine scope, so a message that
+    // says "abort, then commit the contents you want" hands the agent the
+    // contents abort just destroyed. Both messages have to say the same thing
+    // about that, because an agent acts on whichever one it is looking at.
+    machine.write_file(
+        ".config/app.conf",
+        "<<<<<<< all\nsetting = \"all\"\n=======\nsetting = \"linux\"\n>>>>>>> linux\n",
+    );
     let refusal = machine.run("dotsync continue");
     let refusal_stderr = String::from_utf8_lossy(&refusal.stderr).into_owned();
-    // `dotsync abort` syncs home back to the machine scope, so telling an agent
-    // to abort and then commit "the contents you want" hands it the contents
-    // abort just destroyed.
-    assert!(
-        refusal_stderr
-            .contains("reverts the conflicted files in home to this machine's scope state"),
-        "the refusal must say that abort reverts home\n{}",
-        render_output(&refusal)
-    );
-    assert!(
-        refusal_stderr.contains("save them outside home"),
-        "the refusal must say to save wanted contents outside home before aborting\n{}",
-        render_output(&refusal)
-    );
-}
-
-#[test]
-fn continue_refuses_a_pause_that_predates_the_resolution_check() {
-    let harness = TestHarness::new();
-    let (machine, _pause) = pause_a_conflict_on_linux(&harness);
-
-    // A machine that upgrades while a cascade is paused holds a pause file
-    // written by the older binary, which recorded no pre-pause contents. The
-    // resolution check has nothing to compare against there, and skipping it
-    // silently reopens the data loss it exists to prevent.
-    let pause_path = machine.repo_dir.join(".dotsync-paused-cascade.json");
-    let mut pause_state: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&pause_path).expect("read pause state"))
-            .expect("pause state is JSON");
-    let pause_object = pause_state
-        .as_object_mut()
-        .expect("pause state is an object");
-    let recorded = pause_object
-        .remove("paused_home_contents")
-        .expect("this dotsync records pre-pause contents");
-    assert!(
-        recorded.as_object().is_some_and(|map| !map.is_empty()),
-        "the pause should have recorded contents to remove"
-    );
-    fs::write(
-        &pause_path,
-        serde_json::to_string_pretty(&pause_state).expect("serialize pause state"),
-    )
-    .expect("write pause state");
-
-    let continued = machine.run("dotsync continue");
-    assert_eq!(
-        continued.status.code(),
-        Some(3),
-        "continue must refuse a pause it cannot verify, and the cascade is still paused\n{}",
-        render_output(&continued)
-    );
-    let stderr = String::from_utf8_lossy(&continued.stderr).into_owned();
-    assert!(
-        stderr.contains("run `dotsync abort`"),
-        "the refusal must point at the way out\n{}",
-        render_output(&continued)
-    );
-
-    // The way out has to actually work: abort reads nothing the old pause file
-    // lacks.
-    machine.run_ok("dotsync abort");
-    assert_eq!(
-        machine.read_file(".config/app.conf"),
-        "setting = \"linux\"\n",
-        "abort should have reverted home to this machine's scope state"
-    );
-}
-
-#[test]
-fn continue_refuses_a_conflicted_file_that_was_never_resolved() {
-    let harness = TestHarness::new();
-    let (machine_b, _pause) = pause_a_conflict_on_linux(&harness);
-
-    // The pause tells the agent to resolve the conflicted file in home, but
-    // dotsync never wrote the two conflicting versions there, so the file is
-    // exactly as the agent left it. Taking that as the resolution silently
-    // deletes the `linux` version, and reports success doing it.
-    let continued = machine_b.run("dotsync continue");
-    assert_eq!(
-        continued.status.code(),
-        Some(3),
-        "continue must refuse an unresolved conflict, and the cascade is still paused\n{}",
-        render_output(&continued)
-    );
-    assert_stderr_snapshot(
-        &continued,
-        "\
-dotsync: conflict not resolved
-
-What dotsync does:
-Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config. Where two branches changed one file differently, the cascade pauses and asks you for the merged contents.
-
-This flow:
-This continue flow reads each conflicted file back out of your home directory and records what it finds there as the resolution.
-
-Expected:
-It expects those files to have changed since the cascade paused, because the resolution is the contents you write into them.
-
-Current state found:
-unchanged since the cascade paused at scope `linux`: .config/app.conf
-
-Why dotsync stopped:
-Dotsync does not yet write the two conflicting versions into home, so an unchanged file is not a resolution - it is only the version that happened to already be there. Recording it would silently discard the other scope's version.
-
-Correct flow:
-- read the version dotsync would discard with `dotsync view --scope linux --file .config/app.conf`, and compare it against the file in home.
-- write the merged contents into the file in home, then run `dotsync continue`.
-- `dotsync abort` discards the paused cascade, and reverts the conflicted files in home to this machine's scope state - so anything in home you want to keep must be saved outside home first.
-- if home already holds exactly the contents you want: save them outside home, run `dotsync abort`, put them back, commit them to `linux` directly, then redo the original commit.
-",
-    );
-
-    assert_eq!(
-        read_bookmark_file_contents(&machine_b, "linux", ".config/app.conf"),
-        "setting = \"linux\"\n",
-        "the refused continue must not have discarded the linux version"
-    );
-
-    // The guard is not a wedge: a real resolution still finishes the cascade.
-    machine_b.write_file(".config/app.conf", "setting = \"all+linux\"\n");
-    machine_b.run_ok("dotsync continue");
-    assert_eq!(
-        read_bookmark_file_contents(&machine_b, "linux", ".config/app.conf"),
-        "setting = \"all+linux\"\n"
-    );
+    for said in [
+        "reverts the conflicted files in home to this machine's scope state",
+        "save anything you want to keep outside home first",
+    ] {
+        assert!(
+            pause_stderr.contains(said),
+            "the pause must say `{said}`\n{}",
+            render_output(&pause)
+        );
+        assert!(
+            refusal_stderr.contains(said),
+            "and so must the refusal, word for word\n{}",
+            render_output(&refusal)
+        );
+    }
 }
 
 #[test]
@@ -621,7 +520,7 @@ Why dotsync stopped:
 Dotsync stopped before fetching, committing, or syncing because starting another commit would hide the real paused-cascade task and may mutate unrelated scope state.
 
 Correct flow:
-- edit each conflicted file at its real path in home so it holds the merged contents you want; the file has to change, because dotsync reads the resolution back out of it.
+- edit each conflicted file at its real path in home so it holds the merged contents you want; take out any marker lines you paste in.
 - run `dotsync continue` to finish the paused cascade.
 - or run `dotsync abort` to discard the paused cascade; that reverts the conflicted files in home to this machine's scope state.
 - after `dotsync continue` succeeds, rerun the new commit if it is still needed.
@@ -893,11 +792,15 @@ fn a_paused_cascade_is_the_same_answer_whichever_command_meets_it() {
         render_output(&blocked)
     );
 
+    machine_b.write_file(
+        ".config/app.conf",
+        "<<<<<<< all\nsetting = \"all\"\n=======\nsetting = \"linux\"\n>>>>>>> linux\n",
+    );
     let unresolved = machine_b.run("dotsync continue");
     assert_eq!(
         unresolved.status.code(),
         Some(3),
-        "a continue that finds nothing resolved is still the same paused cascade\n{}",
+        "a continue that finds a half-done resolution is still the same paused cascade\n{}",
         render_output(&unresolved)
     );
 

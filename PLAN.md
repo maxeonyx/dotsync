@@ -551,7 +551,7 @@ Four shapes under one command name, one per question asked: `{scope, files}`, `{
 
 `current_state` is a list of facts, one per thing the run found, so a caller never has to split a rendering apart on newlines; the human rendering joins them. `drifts` carries the same change objects `status` and `diff` report, with the diff, and is populated for `drift_detected`. `forced_overwrites` is what the run had already recorded over an incoming change before it stopped. All three are always present, so error handling has one shape.
 
-Error codes in use: `not_initialized`, `repo_exists`, `invalid_scope`, `file_not_on_scope`, `scope_not_in_repo`, `scope_diverged`, `no_current_scope`, `missing_parent`, `scope_cycle`, `config_parse`, `config_edit`, `sync_state`, `drift_detected`, `unusable_commit_paths`, `stale_commit_paths`, `not_a_regular_file`, `cascade_paused`, `paused_cascade_in_progress`, `unresolved_conflict`, `pause_predates_resolution_check`, `no_paused_cascade`, `missing_hostname`, `remote_unreachable`, `home_not_set`, `non_utf8_path`, `git_submodule`, `io`, `internal`. Plus `usage` on exit 2.
+Error codes in use: `not_initialized`, `repo_exists`, `invalid_scope`, `file_not_on_scope`, `scope_not_in_repo`, `scope_diverged`, `no_current_scope`, `missing_parent`, `scope_cycle`, `config_parse`, `config_edit`, `sync_state`, `drift_detected`, `unusable_commit_paths`, `stale_commit_paths`, `not_a_regular_file`, `cascade_paused`, `paused_cascade_in_progress`, `unresolved_conflict`, `no_paused_cascade`, `missing_hostname`, `remote_unreachable`, `home_not_set`, `non_utf8_path`, `git_submodule`, `io`, `internal`. Plus `usage` on exit 2.
 
 ### Usage errors (exit code 2)
 

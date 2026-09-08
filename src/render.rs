@@ -397,43 +397,31 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
             &current_state_text(&error_report),
             "More than one of them changed the same part of the same file, so there is no merged version dotsync can work out on its own. Nothing was written: the scope's head has not moved and no other machine can see this state.",
             &[
-                "read the versions of each file below, decide what it should hold, and write that into the file at its real path in home; the file has to change, because dotsync reads the resolution back out of it.",
-                "run `dotsync continue` from the same machine to record your decision and finish converging.",
+                "read the versions of each file below, decide what it should hold, and write that into the file at its real path in home; take out any marker lines you paste in.",
+                "run `dotsync continue` from the same machine to record your decision and finish converging. Leaving a file exactly as it is says you decided on the version already there.",
                 "or run `dotsync abort` from the same machine to discard it; that reverts the conflicted files in home to this machine's scope state, so save anything you want to keep outside home first.",
             ],
         ),
-        DotsyncError::PausePredatesResolutionCheck { .. } => render_structured_error(
-            "cannot check this conflict resolution",
-            "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config. Where two branches changed one file differently, the cascade pauses and asks you for the merged contents.",
-            "This continue flow reads each conflicted file back out of your home directory and records what it finds there as the resolution. To tell a resolution from an untouched file, it compares them against what they held when the cascade paused.",
-            "It expects the paused cascade to have recorded those contents.",
-            &current_state_text(&error_report),
-            "This cascade was paused by an older dotsync, which recorded nothing to compare against. Continuing would record whatever is in home as the resolution without being able to tell whether anything was resolved, and that silently discards the other scope's version.",
-            &[
-                "run `dotsync abort` to discard the paused cascade; it reverts the conflicted files in home to this machine's scope state.",
-                "then redo the commit that started the cascade; the pause it creates records what this check needs.",
-            ],
-        ),
         DotsyncError::UnresolvedConflict { scope, paths } => render_structured_error(
-            "conflict not resolved",
+            "conflict markers left in the resolution",
             "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config. Where two branches changed one file differently, the cascade pauses and asks you for the merged contents.",
             "This continue flow reads each conflicted file back out of your home directory and records what it finds there as the resolution.",
-            "It expects those files to have changed since the cascade paused, because the resolution is the contents you write into them.",
+            "It expects to find config: whatever you decided the file should hold.",
             &current_state_text(&error_report),
-            "Dotsync does not yet write the two conflicting versions into home, so an unchanged file is not a resolution - it is only the version that happened to already be there. Recording it would silently discard the other scope's version.",
+            &format!(
+                "The file below still has conflict markers in it, so it is a resolution somebody stopped half way through. Recorded as the merged contents they would cascade into every scope below `{scope}` and every other machine would then sync `<<<<<<<` into its live config."
+            ),
             &[
                 &format!(
-                    "read the version dotsync would discard with `dotsync view --scope {scope} --file {}`, and compare it against the file in home.",
+                    "the versions to choose between are the ones the pause printed; `dotsync view --scope {scope} --file {}` prints the one on the scope again.",
                     paths
                         .first()
                         .map(|path| display_path(path))
                         .unwrap_or_default()
                 ),
-                "write the merged contents into the file in home, then run `dotsync continue`.",
-                "`dotsync abort` discards the paused cascade, and reverts the conflicted files in home to this machine's scope state - so anything in home you want to keep must be saved outside home first.",
-                &format!(
-                    "if home already holds exactly the contents you want: save them outside home, run `dotsync abort`, put them back, commit them to `{scope}` directly, then redo the original commit."
-                ),
+                "take the marker lines out, leave the contents you want, then run `dotsync continue`.",
+                "or run `dotsync abort` to discard the merge; that reverts the conflicted files in home to this machine's scope state, so save anything you want to keep outside home first.",
+                "if the file is genuinely meant to contain lines of `<<<<<<<` and `>>>>>>>`, `continue` cannot record it: abort, and commit it to the scope directly instead.",
             ],
         ),
         DotsyncError::PausedCascadeInProgress { .. } => render_structured_error(
@@ -444,7 +432,7 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
             &current_state_text(&error_report),
             "Dotsync stopped before fetching, committing, or syncing because starting another commit would hide the real paused-cascade task and may mutate unrelated scope state.",
             &[
-                "edit each conflicted file at its real path in home so it holds the merged contents you want; the file has to change, because dotsync reads the resolution back out of it.",
+                "edit each conflicted file at its real path in home so it holds the merged contents you want; take out any marker lines you paste in.",
                 "run `dotsync continue` to finish the paused cascade.",
                 "or run `dotsync abort` to discard the paused cascade; that reverts the conflicted files in home to this machine's scope state.",
                 "after `dotsync continue` succeeds, rerun the new commit if it is still needed.",
