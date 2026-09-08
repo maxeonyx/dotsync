@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
     abort_paused_cascade, commit_and_sync, continue_after_conflict, create_scope, diff_home, init,
     status, sync, view, CommitFailure, CommitOptions, DiffReport, DotsyncError, DotsyncPaths,
-    Resumed, Run, UnreachableRemote, ViewAnswer,
+    MachineState, Resumed, Run, UnreachableRemote, ViewAnswer,
 };
 mod render;
 use serde_json::json;
@@ -688,10 +688,10 @@ async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
     let run = continue_after_conflict(&paths, force).await;
     Ok(output_of("dotsync continue", run, |report| {
         let synced = report.sync.synced_paths.len();
-        render::synced_output(
+        let output = render::synced_output(
             "continue",
             match &report.resumed {
-                Resumed::Cascade { scope } => format!(
+                Resumed::Cascade { scope, .. } => format!(
                     "dotsync: recorded your version on `{scope}` and synced {synced} file(s)"
                 ),
                 Resumed::SyncConflict => format!(
@@ -700,7 +700,21 @@ async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
             },
             &report.sync,
             Some(&report.push),
-        )
+        );
+        // The sync reports discarding the resolution out of home, which is
+        // correct and reads exactly like losing work. What makes it not that
+        // is the scope it went to, so the run says so here rather than leaving
+        // the reader to reconcile two of its own lines.
+        let Resumed::Cascade {
+            scope,
+            borrowed_from: Some(machine_scope),
+        } = &report.resumed
+        else {
+            return output;
+        };
+        output.with_notes(vec![format!(
+            "dotsync: the conflicted file(s) held `{scope}`'s merge while you resolved it; `{machine_scope}`'s own version is back in home now, and `{scope}` has your resolution."
+        )])
     }))
 }
 
@@ -747,24 +761,19 @@ async fn run_status() -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     let run = status(&paths).await;
     Ok(output_of("dotsync status", run, |report| {
-        SuccessOutput::message(
-            with_paused_cascade(
+        with_machine_state(
+            SuccessOutput::message(
                 json!({
                     "status": "ok",
                     "command": "status",
                     "machine_scope": report.machine_scope,
                     "changes": render::changes_json(&report.changes),
                     "incoming": render::changes_json(&report.incoming),
-                    "diverged_scopes": report.diverged_scopes,
                 }),
-                report.paused_cascade.as_ref(),
+                render_status_human(&report),
             ),
-            render_status_human(&report),
+            &report.machine,
         )
-        .with_notes(state_notes(
-            report.paused_cascade.as_ref(),
-            &report.diverged_scopes,
-        ))
     }))
 }
 
@@ -777,8 +786,8 @@ async fn run_diff() -> Result<CliOutput, DotsyncError> {
         exit_code: if report.drifts.is_empty() { 0 } else { 1 },
         // The same changes `status` lists, under the same name, with the diffs
         // shown. That is the whole difference between the two commands.
-        ..SuccessOutput::message(
-            with_paused_cascade(
+        ..with_machine_state(
+            SuccessOutput::message(
                 json!({
                     "status": "ok",
                     "command": "diff",
@@ -788,16 +797,11 @@ async fn run_diff() -> Result<CliOutput, DotsyncError> {
                         .iter()
                         .map(render::render_drift_json)
                         .collect::<Vec<_>>(),
-                    "diverged_scopes": report.diverged_scopes,
                 }),
-                report.paused_cascade.as_ref(),
+                render_diff_human(&report),
             ),
-            render_diff_human(&report),
+            &report.machine,
         )
-        .with_notes(state_notes(
-            report.paused_cascade.as_ref(),
-            &report.diverged_scopes,
-        ))
     }))
 }
 
@@ -805,11 +809,9 @@ async fn run_view(scope: Option<String>, file: Option<PathBuf>) -> Result<CliOut
     let paths = discover_paths()?;
     let run = view(&paths, scope.as_deref(), file.as_deref()).await;
     Ok(output_of("dotsync view", run, |report| {
-        // The pause and the divergence are true of the machine, not of the
-        // question asked, so they are added once here rather than in each of
-        // the four shapes.
-        let paused_cascade = report.paused_cascade;
-        let diverged = report.diverged_scopes;
+        // What is true of the machine is not true of the question asked, so it
+        // is added once here rather than in each of the four shapes.
+        let machine = report.machine;
         let answer = match report.found {
             ViewAnswer::FileContents {
                 scope,
@@ -858,9 +860,7 @@ async fn run_view(scope: Option<String>, file: Option<PathBuf>) -> Result<CliOut
             ),
         };
 
-        let mut json = with_paused_cascade(answer.json, paused_cascade.as_ref());
-        json["diverged_scopes"] = json!(diverged);
-        SuccessOutput { json, ..answer }.with_notes(state_notes(paused_cascade.as_ref(), &diverged))
+        with_machine_state(answer, &machine)
     }))
 }
 
@@ -939,28 +939,30 @@ fn render_commit_success(report: dotsync::CommitReport) -> SuccessOutput {
     )
 }
 
-/// Adds the pause to a read-only command's payload, and only when there is
-/// one — the same shape as `remote_unreachable`, and for the same reason: a
-/// run with nothing to say about a pause and a run on a machine with no pause
-/// are the same answer to whoever reads this field.
 /// What `status`, `diff` and `view` say about the machine, whatever they were
-/// asked. Both facts qualify every answer any of them gives, so they are added
-/// in one place for all three rather than per command per shape.
-fn state_notes(paused_cascade: Option<&String>, diverged_scopes: &[String]) -> Vec<String> {
-    render::paused_cascade_notes(paused_cascade)
-        .into_iter()
-        .chain(render::diverged_scope_notes(diverged_scopes))
-        .collect()
-}
-
-fn with_paused_cascade(
-    mut json: serde_json::Value,
-    paused_cascade: Option<&String>,
-) -> serde_json::Value {
-    if let Some(scope) = paused_cascade {
+/// asked, in both channels.
+///
+/// One function for all three commands and all four of `view`'s shapes,
+/// because these facts are true of the machine rather than of the question:
+/// adding them per command per shape is how one of them came to carry a fact
+/// the other two did not. `paused_cascade` is present only when there is one,
+/// the same shape as `remote_unreachable` and for the same reason — a machine
+/// with no pause and a run with nothing to say about one are the same answer
+/// to whoever reads that field.
+fn with_machine_state(answer: SuccessOutput, machine: &MachineState) -> SuccessOutput {
+    let mut json = answer.json;
+    if let Some(scope) = &machine.paused_cascade {
         json["paused_cascade"] = json!(scope);
     }
-    json
+    json["diverged_scopes"] = json!(machine.diverged_scopes);
+    json["unpushed_scopes"] = json!(machine.unpushed_scopes);
+    SuccessOutput { json, ..answer }.with_notes(
+        render::paused_cascade_notes(machine.paused_cascade.as_ref())
+            .into_iter()
+            .chain(render::diverged_scope_notes(&machine.diverged_scopes))
+            .chain(render::unpushed_scope_notes(&machine.unpushed_scopes))
+            .collect(),
+    )
 }
 
 fn discover_paths() -> Result<DotsyncPaths, DotsyncError> {

@@ -400,6 +400,53 @@ impl Home {
         Ok(Resolved::Applied)
     }
 
+    /// Moves home to `head`, letting the head win at the named paths and
+    /// carrying local changes everywhere else.
+    ///
+    /// This is what ends a resolution: the conflicted paths were borrowed to
+    /// write the answer into, and once the answer is recorded the scope decides
+    /// what home holds there again. One rule covers both shapes of pause,
+    /// which is why there is no mode to switch. When the merge was on this
+    /// machine's own path the resolution has just cascaded into its scope, so
+    /// the head's side *is* what the agent typed and this changes nothing. When
+    /// it was on another machine's scope the head has never held the answer, so
+    /// this hands the file back — without which the resolution stays a local
+    /// change that no scope this machine syncs from can ever settle.
+    ///
+    /// A conflict at any path the head does not win stops the sync as usual:
+    /// the overrides are applied first and the merge is asked afterwards.
+    pub(crate) async fn materialize_taking_head_at(
+        &mut self,
+        session: &mut Session,
+        head: &Commit,
+        paths: &[std::path::PathBuf],
+    ) -> Result<Materialized, DotsyncError> {
+        let mark = self.mark().await?;
+        let merged = self.merge_with(session, &head.tree()).await?;
+        let head_tree = head.tree();
+        let mut builder = MergedTreeBuilder::new(merged);
+        for relative in paths {
+            let path = repo_path_of(relative)?;
+            let value = head_tree.path_value(path.as_ref()).map_err(|err| {
+                jj_error(format!("read the head's {}: {err}", relative.display()))
+            })?;
+            builder.set_or_remove(path, value);
+        }
+        let tree = builder
+            .write_tree()
+            .await
+            .map_err(|err| jj_error(format!("write the resolved sync tree: {err}")))?;
+        if tree.has_conflict() {
+            return Ok(Materialized::Conflicted { merged: tree });
+        }
+        if head.id() == mark.id() && tree.tree_ids() == self.wc_commit.tree_ids() {
+            return Ok(Materialized::AlreadyThere);
+        }
+        self.switch_and_check_out(session, head.id().clone(), tree)
+            .await?;
+        Ok(Materialized::Applied)
+    }
+
     /// Moves home to `head` with home's side of the merge dropped: the head's
     /// tree is materialized whole and every local change at a managed path is
     /// gone.

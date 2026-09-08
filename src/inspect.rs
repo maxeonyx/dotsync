@@ -8,10 +8,9 @@ use crate::drift::{changed_paths, FileState};
 use crate::error::{jj_error, DotsyncError};
 use crate::home::Home;
 use crate::paths::DotsyncPaths;
-use crate::repo::{
-    collect_managed_tree_entries, diverged_scopes, read_tree_entry_bytes, scope_head_tree,
-};
+use crate::repo::{collect_managed_tree_entries, read_tree_entry_bytes, scope_head_tree};
 use crate::session::{in_session, Run, Session};
+use crate::status::MachineState;
 use crate::sync::{classify_home_against_machine_scope, file_drift, finishing, FileDrift};
 
 #[derive(Debug, Clone)]
@@ -23,17 +22,14 @@ pub struct ScopeInfo {
     pub description: Option<String>,
 }
 
-/// What `view` found, and the one thing it has to say whatever it was asked.
+/// What `view` found, and what it has to say whatever it was asked.
 #[derive(Debug, Clone)]
 pub struct ViewReport {
-    /// See `StatusReport::paused_cascade`. True of the machine rather than of
-    /// the question, so every shape below carries it — `view` is the command
-    /// an agent reaches for to get its bearings, and "this machine cannot
-    /// commit anything" is the most important bearing there is.
-    pub paused_cascade: Option<String>,
-    /// See `StatusReport::diverged_scopes`. Also true of the machine rather
-    /// than of the question.
-    pub diverged_scopes: Vec<String>,
+    /// True of the machine rather than of the question, so every shape below
+    /// carries it — `view` is the command an agent reaches for to get its
+    /// bearings, and "this machine cannot commit anything" is the most
+    /// important bearing there is.
+    pub machine: MachineState,
     pub found: ViewAnswer,
 }
 
@@ -65,11 +61,9 @@ pub enum ViewAnswer {
 #[derive(Debug, Clone)]
 pub struct DiffReport {
     pub machine_scope: String,
-    /// See `StatusReport::paused_cascade`: `diff` answers the same question in
-    /// more detail, so it owes the same warning.
-    pub paused_cascade: Option<String>,
-    /// See `StatusReport::diverged_scopes`.
-    pub diverged_scopes: Vec<String>,
+    /// `diff` answers `status`'s question in more detail, so it owes the same
+    /// qualifications.
+    pub machine: MachineState,
     pub drifts: Vec<FileDrift>,
 }
 
@@ -132,8 +126,7 @@ pub async fn view(
         };
 
         Ok(ViewReport {
-            paused_cascade: crate::pause::paused_cascade_scope(session.paths())?,
-            diverged_scopes: diverged_scopes(session.repo().as_ref(), session.graph()),
+            machine: MachineState::read(session)?,
             found,
         })
     })
@@ -233,8 +226,7 @@ async fn diff_report(session: &mut Session, home: &mut Home) -> Result<DiffRepor
 
     Ok(DiffReport {
         machine_scope,
-        paused_cascade: crate::pause::paused_cascade_scope(session.paths())?,
-        diverged_scopes: diverged_scopes(session.repo().as_ref(), session.graph()),
+        machine: MachineState::read(session)?,
         drifts,
     })
 }

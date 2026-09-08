@@ -114,25 +114,53 @@ async fn sync_home(
     // Publish before touching home: scope commits left behind by an
     // interrupted run must reach the remote even if the home sync stops.
     let push = publish_or_pause(session, home, &checkpoint).await?;
-    let sync = sync_home_to_machine_scope(session, home, discard_local).await?;
+    let sync = sync_home_to_machine_scope(session, home, LocalChanges::of(discard_local)).await?;
     Ok(SyncCommandReport { sync, push })
+}
+
+/// What a sync does with the changes home is holding.
+///
+/// A three-way choice rather than a flag, because the third is not "force" in
+/// a smaller size: `Carry` and `Discard` are moods a whole run is in, and
+/// `DiscardAt` is a decision about named files. It is also the shape
+/// `discard <paths>` needs when `--force` becomes a command (PLAN §2.3 step 7).
+pub(crate) enum LocalChanges {
+    /// Merged in: the ordinary sync, and the reason a local edit is an input
+    /// rather than a wall.
+    Carry,
+    /// Dropped whole: `--force`, and `init` and `abort`, which exist to take
+    /// the head's side.
+    Discard,
+    /// Dropped at these paths, carried everywhere else: the end of a
+    /// resolution, where the conflicted files go back to being whatever this
+    /// machine's scope says they are.
+    DiscardAt(Vec<PathBuf>),
+}
+
+impl LocalChanges {
+    /// What `--force` means, for the two commands that still take it.
+    pub(crate) fn of(discard_local: bool) -> Self {
+        match discard_local {
+            true => LocalChanges::Discard,
+            false => LocalChanges::Carry,
+        }
+    }
 }
 
 /// The home sync itself: `merge(home, mark, head)` and what it came to.
 ///
 /// Every command that writes home ends here — plain `dotsync`, `commit`,
 /// `continue`, `abort` and `init` — because moving home is one operation
-/// whatever moved the head first. What differs between them is only
-/// `discard_local`: `init` and `abort` exist to take the head's side, and the
-/// rest carry a local change across.
+/// whatever moved the head first. What differs between them is only what they
+/// do with home's own changes.
 ///
 /// The classification is read before the merge moves anything, because two of
 /// its three sides are the working copy's own and the merge replaces them —
-/// and it is what says which home files a forced sync discarded.
+/// and it is what says which home files the sync discarded.
 pub(crate) async fn sync_home_to_machine_scope(
     session: &mut Session,
     home: &mut Home,
-    discard_local: bool,
+    local: LocalChanges,
 ) -> Result<SyncReport, DotsyncError> {
     let machine_scope = home.machine_scope().to_string();
     let head = match scope_head(session.repo().as_ref(), &machine_scope).is_absent() {
@@ -143,37 +171,38 @@ pub(crate) async fn sync_home_to_machine_scope(
     let local_changes = changed_paths(&classified, FileState::is_drift);
     let head_paths = collect_managed_tree_entries(&head.tree())?;
 
-    let materialized = if discard_local {
-        home.materialize_discarding_local(session, &head).await?
-    } else {
-        home.materialize(session, &head).await?
+    let materialized = match &local {
+        LocalChanges::Carry => home.materialize(session, &head).await?,
+        LocalChanges::Discard => home.materialize_discarding_local(session, &head).await?,
+        LocalChanges::DiscardAt(paths) => {
+            home.materialize_taking_head_at(session, &head, paths)
+                .await?
+        }
     };
     if let Materialized::Conflicted { merged } = materialized {
         return Err(sync_conflict(session, &machine_scope, &classified, &merged).await?);
     }
 
-    // Every local change went one way or the other: a forced sync discarded all
-    // of them, a merged one carried all of them. Only the discarded ones are
-    // rendered as a two-sided diff, so only those pay for their content — the
-    // classification carried tree entries, not bytes.
-    let (drifts, carried_changes) = if discard_local {
-        let mut drifts = Vec::new();
-        for (relative, path) in &local_changes {
-            drifts.push(file_drift(session, relative, path).await?);
-        }
-        (drifts, Vec::new())
-    } else {
-        (
-            Vec::new(),
-            local_changes
-                .iter()
-                .map(|(relative, path)| FileChange {
-                    path: relative.clone(),
-                    state: path.state,
-                })
-                .collect(),
-        )
+    // Which local changes this run destroyed and which it kept. Only the
+    // destroyed ones are rendered as a two-sided diff, so only those pay for
+    // their content — the classification carried tree entries, not bytes.
+    let discarded = |relative: &PathBuf| match &local {
+        LocalChanges::Carry => false,
+        LocalChanges::Discard => true,
+        LocalChanges::DiscardAt(paths) => paths.contains(relative),
     };
+    let mut drifts = Vec::new();
+    let mut carried_changes = Vec::new();
+    for (relative, path) in &local_changes {
+        if discarded(relative) {
+            drifts.push(file_drift(session, relative, path).await?);
+        } else {
+            carried_changes.push(FileChange {
+                path: relative.clone(),
+                state: path.state,
+            });
+        }
+    }
 
     Ok(SyncReport {
         current_scope: machine_scope,

@@ -261,12 +261,8 @@ pub enum DotsyncError {
         scope: String,
         refused: Vec<RefusedCommitPath>,
     },
-    #[error("{} conflicted file(s) are unchanged since the cascade paused at scope `{scope}`", paths.len())]
+    #[error("{} conflicted file(s) still hold conflict markers", paths.len())]
     UnresolvedConflict { scope: String, paths: Vec<PathBuf> },
-    #[error(
-        "the cascade paused at scope `{scope}` recorded no contents to check a resolution against"
-    )]
-    PausePredatesResolutionCheck { scope: String },
     #[error("failed to read {path}: {source}")]
     Io {
         path: PathBuf,
@@ -345,6 +341,16 @@ pub enum DotsyncError {
     #[error("converging scope `{scope}` stopped on {} conflicted file(s)", files.len())]
     CascadePaused {
         scope: String,
+        /// This machine's own scope, when `scope` is neither it nor above it.
+        ///
+        /// A cascade from a shared ancestor merges into scopes this machine is
+        /// not on, so the merge waiting for a decision can be another
+        /// machine's. The file in home is then a resolution buffer holding
+        /// somebody else's config, and that has to be said out loud: without
+        /// it the agent reads another machine's settings as its own. `None`
+        /// when the merge is on this machine's own path, where the resolution
+        /// *is* its config and there is nothing to warn about.
+        borrowed_from: Option<String>,
         files: Vec<ConflictedFile>,
     },
     #[error("paused cascade at scope `{scope}` must be resolved before starting another commit")]
@@ -402,8 +408,7 @@ impl DotsyncError {
         match self {
             DotsyncError::CascadePaused { scope, .. }
             | DotsyncError::PausedCascadeInProgress { scope }
-            | DotsyncError::UnresolvedConflict { scope, .. }
-            | DotsyncError::PausePredatesResolutionCheck { scope } => Some(scope),
+            | DotsyncError::UnresolvedConflict { scope, .. } => Some(scope),
             DotsyncError::HomeNotSet
             | DotsyncError::NonUtf8Path { .. }
             | DotsyncError::GitSubmodule { .. }
@@ -523,9 +528,6 @@ impl DotsyncError {
             DotsyncError::UnresolvedConflict { .. } => {
                 basic_error_report("unresolved_conflict", self)
             }
-            DotsyncError::PausePredatesResolutionCheck { .. } => {
-                basic_error_report("pause_predates_resolution_check", self)
-            }
         }
     }
 }
@@ -557,7 +559,7 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Vec<String> {
         DotsyncError::InvalidScope { scope } => vec![format!("requested scope: {scope}")],
         // One entry per file, for the reason `SyncConflict` has one: one file
         // is one decision to make, and every version of it is printed below.
-        DotsyncError::CascadePaused { scope, files } => files
+        DotsyncError::CascadePaused { scope, files, .. } => files
             .iter()
             .map(|file| {
                 format!(
@@ -573,11 +575,8 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Vec<String> {
         DotsyncError::StaleCommitPaths { refused, .. } => {
             refused.iter().map(RefusedCommitPath::explain).collect()
         }
-        DotsyncError::PausePredatesResolutionCheck { scope } => vec![format!(
-            "paused scope: {scope}; the pause holds no record of what the conflicted files contained when it paused."
-        )],
         DotsyncError::UnresolvedConflict { scope, paths } => vec![format!(
-            "unchanged since the cascade paused at scope `{scope}`: {}",
+            "still holding conflict markers, for the merge paused at scope `{scope}`: {}",
             paths
                 .iter()
                 .map(|path| path.display().to_string())

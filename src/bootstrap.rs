@@ -126,7 +126,12 @@ async fn create_repo_and_join(
     // side, because `init` is the one command with nothing of yours to carry —
     // whatever home holds at a managed path predates dotsync managing it.
     let mut home = Home::acquire(&mut session, paths).await?;
-    let outcome = crate::sync::sync_home_to_machine_scope(&mut session, &mut home, true).await;
+    let outcome = crate::sync::sync_home_to_machine_scope(
+        &mut session,
+        &mut home,
+        crate::sync::LocalChanges::Discard,
+    )
+    .await;
     let sync = finishing(home, &session, outcome).await?;
 
     Ok(InitReport { sync, push })
