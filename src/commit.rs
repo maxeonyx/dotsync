@@ -285,6 +285,9 @@ async fn commit_in_session(
             });
         }
         return Err(DotsyncError::CascadePaused {
+            // Always `None`: a commit can only target this machine's own scope
+            // or one above it, so its merge is never another machine's.
+            borrowed_from: None,
             scope: options.scope,
             files,
         }
@@ -349,9 +352,10 @@ async fn commit_in_session(
     // home, so the merge that moves home onto the new head finds home's side
     // and the head's side agreeing, and a local change the commit did not name
     // is carried across rather than stopped on.
-    let sync = crate::sync::sync_home_to_machine_scope(session, home, false)
-        .await
-        .map_err(stopped)?;
+    let sync =
+        crate::sync::sync_home_to_machine_scope(session, home, crate::sync::LocalChanges::Carry)
+            .await
+            .map_err(stopped)?;
 
     Ok(CommitReport {
         committed_scope: options.scope,

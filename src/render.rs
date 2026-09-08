@@ -386,7 +386,11 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
                 "or, if the version the scope already holds is the one you want, rerun with `dotsync --force`; that discards what is in home for every changed file, so check `dotsync status` first.",
             ],
         ),
-        DotsyncError::CascadePaused { scope, files } => render_structured_error(
+        DotsyncError::CascadePaused {
+            scope,
+            borrowed_from,
+            files,
+        } => render_structured_error(
             &format!(
                 "paused at scope `{scope}`: two histories changed the same {} differently",
                 if files.len() == 1 { "file" } else { "files" }
@@ -395,7 +399,13 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
             &format!("This run was merging everything that reaches `{scope}` — what this machine has, what other machines have published, and what its parent scopes now hold — into one new version of it."),
             "It expects at most one of those histories to have changed each file, or, where more than one did, to have changed different lines of it.",
             &current_state_text(&error_report),
-            "More than one of them changed the same part of the same file, so there is no merged version dotsync can work out on its own. Nothing was written: the scope's head has not moved and no other machine can see this state.",
+            &match borrowed_from {
+                None => "More than one of them changed the same part of the same file, so there is no merged version dotsync can work out on its own. Nothing was written: the scope's head has not moved and no other machine can see this state.".to_string(),
+                // The mode switch, stated where the reader cannot miss it and
+                // before it starts editing: the file in home is about to stop
+                // being this machine's config.
+                Some(machine_scope) => format!("More than one of them changed the same part of the same file, so there is no merged version dotsync can work out on its own. Nothing was written: the scope's head has not moved and no other machine can see this state.\n\nThis machine is `{machine_scope}`, which does not descend from `{scope}`, so what you are resolving is not this machine's config — the file in home is a scratch buffer for `{scope}`'s merge. `{machine_scope}`'s own version comes back after `dotsync continue` or `dotsync abort`."),
+            },
             &[
                 "read the versions of each file below, decide what it should hold, and write that into the file at its real path in home; take out any marker lines you paste in.",
                 "run `dotsync continue` from the same machine to record your decision and finish converging. Leaving a file exactly as it is says you decided on the version already there.",

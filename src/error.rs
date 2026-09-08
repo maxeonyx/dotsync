@@ -341,6 +341,16 @@ pub enum DotsyncError {
     #[error("converging scope `{scope}` stopped on {} conflicted file(s)", files.len())]
     CascadePaused {
         scope: String,
+        /// This machine's own scope, when `scope` is neither it nor above it.
+        ///
+        /// A cascade from a shared ancestor merges into scopes this machine is
+        /// not on, so the merge waiting for a decision can be another
+        /// machine's. The file in home is then a resolution buffer holding
+        /// somebody else's config, and that has to be said out loud: without
+        /// it the agent reads another machine's settings as its own. `None`
+        /// when the merge is on this machine's own path, where the resolution
+        /// *is* its config and there is nothing to warn about.
+        borrowed_from: Option<String>,
         files: Vec<ConflictedFile>,
     },
     #[error("paused cascade at scope `{scope}` must be resolved before starting another commit")]
@@ -549,7 +559,7 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Vec<String> {
         DotsyncError::InvalidScope { scope } => vec![format!("requested scope: {scope}")],
         // One entry per file, for the reason `SyncConflict` has one: one file
         // is one decision to make, and every version of it is printed below.
-        DotsyncError::CascadePaused { scope, files } => files
+        DotsyncError::CascadePaused { scope, files, .. } => files
             .iter()
             .map(|file| {
                 format!(

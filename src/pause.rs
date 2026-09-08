@@ -36,7 +36,9 @@ use crate::paths::DotsyncPaths;
 use crate::repo::{collect_managed_tree_entries, read_entry_bytes, scope_head_commit, PushReport};
 use crate::session::{in_session, Run, Session};
 use crate::status::FileChange;
-use crate::sync::{classify_home_against_head, conflicted_versions, finishing, SyncReport};
+use crate::sync::{
+    classify_home_against_head, conflicted_versions, finishing, LocalChanges, SyncReport,
+};
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) struct PausedCascadeState {
@@ -73,7 +75,15 @@ pub struct ContinueReport {
 #[derive(Debug, Clone)]
 pub enum Resumed {
     /// A cascade, stopped part-way down the graph at this scope.
-    Cascade { scope: String },
+    Cascade {
+        scope: String,
+        /// This machine's own scope, when `scope` is neither it nor above it —
+        /// so the conflicted files in home were another machine's config for
+        /// the length of the pause, and this run handed them back. Said out
+        /// loud because the sync reports discarding them, and a run that
+        /// destroys home content without saying why reads as a bug.
+        borrowed_from: Option<String>,
+    },
     /// Home against this machine's own scope head. It has no name of its own
     /// because it is not stored anywhere: it is recomputed from home, the mark
     /// and the head on every run.
@@ -184,9 +194,32 @@ pub(crate) async fn pause_at(
         });
     }
     Ok(DotsyncError::CascadePaused {
+        borrowed_from: borrowed_from(session, home.machine_scope(), &pause.scope),
         scope: pause.scope,
         files,
     })
+}
+
+/// This machine's own scope, when the merge waiting for a decision is not on
+/// it or above it.
+///
+/// `commit` cannot target a scope this machine is not on, but a cascade from a
+/// shared ancestor still merges into scopes it is not on — so this is reached
+/// by the routine event rather than by a mistake.
+pub(crate) fn borrowed_from(
+    session: &Session,
+    machine_scope: &str,
+    paused_scope: &str,
+) -> Option<String> {
+    let in_ancestry = session
+        .graph()
+        .ancestors_and_self(machine_scope)
+        .iter()
+        .any(|scope| scope.name == paused_scope);
+    match in_ancestry {
+        true => None,
+        false => Some(machine_scope.to_string()),
+    }
 }
 
 /// Conflicted files whose home content is not a resolution, because it still
@@ -362,9 +395,21 @@ async fn continue_in_session(
     let checkpoint = state.original_scope_commit_ids;
     converge_or_pause(session, home, &checkpoint).await?;
     let push = publish_or_pause(session, home, &checkpoint).await?;
-    let sync = crate::sync::sync_home_to_machine_scope(session, home, discard_local).await?;
+    let borrowed_from = borrowed_from(session, home.machine_scope(), &state.paused_scope);
+    // The conflicted paths were borrowed to write the resolution into, and it
+    // is recorded now, so this machine's own scope decides what home holds
+    // there again. In-ancestry that is the resolution itself — it has just
+    // cascaded down — and out of ancestry it is this machine's own config
+    // coming back, which is the whole of DESIGN's mode switch and needs no
+    // branch to say which case this is.
+    let local = match discard_local {
+        true => LocalChanges::Discard,
+        false => LocalChanges::DiscardAt(state.conflicted_paths.clone()),
+    };
+    let sync = crate::sync::sync_home_to_machine_scope(session, home, local).await?;
     Ok(ContinueReport {
         resumed: Resumed::Cascade {
+            borrowed_from,
             scope: state.paused_scope,
         },
         sync,
@@ -464,7 +509,8 @@ async fn abort_in_session(
     // selective restore quietly did not do. That is the same discarding sync
     // `dotsync --force` runs, which is why `abort` refuses the flag: it has
     // already made that choice.
-    let sync = crate::sync::sync_home_to_machine_scope(session, home, true).await?;
+    let sync =
+        crate::sync::sync_home_to_machine_scope(session, home, LocalChanges::Discard).await?;
 
     Ok(AbortReport {
         paused_scope: state.paused_scope,

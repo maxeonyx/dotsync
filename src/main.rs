@@ -688,10 +688,10 @@ async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
     let run = continue_after_conflict(&paths, force).await;
     Ok(output_of("dotsync continue", run, |report| {
         let synced = report.sync.synced_paths.len();
-        render::synced_output(
+        let output = render::synced_output(
             "continue",
             match &report.resumed {
-                Resumed::Cascade { scope } => format!(
+                Resumed::Cascade { scope, .. } => format!(
                     "dotsync: recorded your version on `{scope}` and synced {synced} file(s)"
                 ),
                 Resumed::SyncConflict => format!(
@@ -700,7 +700,21 @@ async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
             },
             &report.sync,
             Some(&report.push),
-        )
+        );
+        // The sync reports discarding the resolution out of home, which is
+        // correct and reads exactly like losing work. What makes it not that
+        // is the scope it went to, so the run says so here rather than leaving
+        // the reader to reconcile two of its own lines.
+        let Resumed::Cascade {
+            scope,
+            borrowed_from: Some(machine_scope),
+        } = &report.resumed
+        else {
+            return output;
+        };
+        output.with_notes(vec![format!(
+            "dotsync: the conflicted file(s) held `{scope}`'s merge while you resolved it; `{machine_scope}`'s own version is back in home now, and `{scope}` has your resolution."
+        )])
     }))
 }
 
