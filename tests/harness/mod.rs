@@ -117,8 +117,15 @@ impl MachineEnvironment {
     }
 
     pub fn init(&self) -> Output {
+        self.init_with("")
+    }
+
+    /// `init` with whatever else the test is about on the end of it — where
+    /// this machine's scope hangs, which is the one thing a hostname cannot
+    /// say.
+    pub fn init_with(&self, extra: &str) -> Output {
         self.run(&format!(
-            "dotsync init {}",
+            "dotsync init {} {extra}",
             self.remote_dir
                 .to_str()
                 .expect("remote path should be valid UTF-8")
@@ -776,6 +783,62 @@ pub fn add_hyprland_scope(machine: &MachineEnvironment) {
     clone_remote_branch_to(&hyprland_clone_dir, &machine.remote_dir, "linux");
     git_checkout_new_branch(&hyprland_clone_dir, "hyprland");
     git_push(&hyprland_clone_dir, "hyprland");
+}
+
+/// Pushes a branch that has nothing to do with dotsync, the way anything else
+/// sharing the remote would: a plain git client, one commit, its own name.
+/// Returns where it left it.
+pub fn push_a_branch_with_a_plain_git_client(
+    machine: &MachineEnvironment,
+    branch: &str,
+    relative: &str,
+    contents: &str,
+) -> String {
+    let clone_dir = machine.home_dir.join(format!("remote-{branch}.ignore"));
+    if clone_dir.exists() {
+        fs::remove_dir_all(&clone_dir).expect("remove old remote clone dir");
+    }
+    clone_remote_branch_to(&clone_dir, &machine.remote_dir, "all");
+    git_checkout_new_branch(&clone_dir, branch);
+    write_file_at(&clone_dir.join(relative), contents);
+    git_commit_all(&clone_dir, &format!("test: {branch} {relative}"));
+    git_push(&clone_dir, branch);
+    remote_branch_revision(machine, branch)
+}
+
+/// Moves a branch back one commit and force-pushes it, which is the other
+/// half of what a person does with a branch of their own.
+pub fn rewind_a_branch_with_a_plain_git_client(
+    machine: &MachineEnvironment,
+    branch: &str,
+) -> String {
+    let clone_dir = machine.home_dir.join(format!("remote-{branch}.ignore"));
+    let reset = git_in(&clone_dir, &["reset", "--hard", "HEAD~1"]);
+    assert!(reset.status.success(), "{}", render_output(&reset));
+    let push = git_in(&clone_dir, &["push", "--force", "origin", branch]);
+    assert!(push.status.success(), "{}", render_output(&push));
+    remote_branch_revision(machine, branch)
+}
+
+pub fn delete_a_branch_with_a_plain_git_client(machine: &MachineEnvironment, branch: &str) {
+    let delete = git_in(&machine.remote_dir, &["branch", "-D", branch]);
+    assert!(delete.status.success(), "{}", render_output(&delete));
+}
+
+/// Every branch the shared remote holds. Read from the remote rather than from
+/// this machine's repo, because the remote is the state every other machine
+/// and every other client sees.
+pub fn remote_branches(machine: &MachineEnvironment) -> Vec<String> {
+    let output = git_in(
+        &machine.remote_dir,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+    );
+    assert!(output.status.success(), "{}", render_output(&output));
+    String::from_utf8(output.stdout)
+        .expect("git for-each-ref output should be utf-8")
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 pub fn merge_remote_scope_into(machine: &MachineEnvironment, source: &str, target: &str) {

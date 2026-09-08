@@ -148,6 +148,58 @@ fn a_machine_named_after_a_shared_scope_does_not_publish_its_private_config() {
     );
 }
 
+/// The remote is a git remote, so anything with git can push to it, and a
+/// branch nobody's scope is named after is the commonest thing it will push.
+/// Dotsync follows every ref the remote has while modelling only scopes
+/// (PLAN §2.2), and the branch's own owner deleting it is what that costs:
+/// jj abandons the commits nothing reaches any more, and the fetch
+/// transaction that abandoned them is committed without rebasing the
+/// descendants jj recorded — every command that fetches panics from then on,
+/// `status` included, and the machine stays that way until somebody puts the
+/// branch back.
+#[test]
+fn a_branch_deleted_from_the_remote_does_not_stop_this_machine() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    machine.init_ok();
+
+    push_a_branch_with_a_plain_git_client(&machine, "someones-experiment", "NOTES.md", "wip\n");
+    machine.run_ok("dotsync");
+    delete_a_branch_with_a_plain_git_client(&machine, "someones-experiment");
+
+    machine.run_ok("dotsync status");
+    machine.run_ok("dotsync");
+    assert!(
+        !remote_branches(&machine).contains(&"someones-experiment".to_string()),
+        "and dotsync must not put a branch back that its owner deleted: {:?}",
+        remote_branches(&machine)
+    );
+}
+
+/// The same ref, moved rather than removed. Dotsync offers every bookmark it
+/// holds to the remote, so a branch that is nobody's scope is a branch dotsync
+/// will happily push its own idea of — undoing a rewind the branch's owner
+/// meant.
+#[test]
+fn a_branch_rewound_on_the_remote_is_not_pushed_back() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+    machine.init_ok();
+
+    let ahead =
+        push_a_branch_with_a_plain_git_client(&machine, "someones-experiment", "NOTES.md", "wip\n");
+    machine.run_ok("dotsync");
+    let rewound = rewind_a_branch_with_a_plain_git_client(&machine, "someones-experiment");
+    assert_ne!(ahead, rewound, "the fixture did not rewind anything");
+
+    machine.run_ok("dotsync");
+    assert_eq!(
+        remote_branch_revision(&machine, "someones-experiment"),
+        rewound,
+        "dotsync moved a branch that is not one of its scopes"
+    );
+}
+
 /// Renames a scope in this machine's home `config.toml`, the way an agent
 /// editing the file would. Setup, not subject: PLAN §2.3 step 4 cuts this file
 /// and step 8 brings it back with a reconciler behind it, so this helper is

@@ -238,6 +238,28 @@ fn status_and_diff_describe_the_same_change_with_the_same_words() {
     );
 }
 
+/// Choosing a scope is the one decision dotsync cannot make for an agent, and
+/// what a scope is for is the only thing its name does not always say. That
+/// used to be a comment in `config.toml` — a file an agent had to know to
+/// open, kept in step with the graph by hand. It belongs to the scope's own
+/// creation commit now, which cannot drift from the scope it describes, and
+/// `view` is where an agent getting its bearings reads it.
+#[test]
+fn view_says_what_each_scope_is_for() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    machine.init_ok();
+    machine.run_ok("dotsync create-scope hyprland --parent linux -m 'wayland compositor config'");
+
+    let view = machine.run_ok("dotsync view");
+    let said = String::from_utf8_lossy(&view.stdout).into_owned();
+    assert!(
+        said.contains("wayland compositor config"),
+        "`view` has to say what a scope is for, not just that it exists\n{said}"
+    );
+}
+
 #[test]
 fn view_summarizes_checked_in_scopes_and_files() {
     let harness = TestHarness::new();
