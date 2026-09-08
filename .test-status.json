@@ -44,8 +44,7 @@
     "dotsync::conflicts$a_local_edit_conflicting_with_an_incoming_change_stops_the_sync_whole": "passing",
     "dotsync::conflicts$a_pause_on_another_machines_scope_puts_that_conflict_in_front_of_the_agent": "passing",
     "dotsync::conflicts$a_pause_on_another_machines_scope_says_whose_config_is_in_the_file": "passing",
-    "dotsync::conflicts$a_pause_on_another_machines_scope_still_publishes_this_machines_own": "pending",
-    "dotsync::conflicts$a_pause_publishes_the_scopes_it_did_not_conflict_on": "pending",
+    "dotsync::conflicts$a_pause_on_another_machines_scope_withholds_this_machines_own_too": "passing",
     "dotsync::conflicts$a_pause_puts_the_conflict_in_front_of_the_agent": "passing",
     "dotsync::conflicts$a_pause_survives_losing_every_machine_local_record_of_it": "pending",
     "dotsync::conflicts$a_paused_cascade_is_the_same_answer_whichever_command_meets_it": "passing",
@@ -155,9 +154,6 @@
     "dotsync::sync_and_drift$v03_plain_sync_ignores_unrelated_home_changes": "passing",
     "dotsync::version_json$version_json_flag_prints_machine_readable_version": "passing"
   },
-  "removals": [
-    "dotsync::conflicts$a_pause_publishes_the_scopes_it_did_not_conflict_on"
-  ],
   "renames": {
     "dotsync::conflicts$a_pause_on_another_machines_scope_withholds_this_machines_own_too": "dotsync::conflicts$a_pause_on_another_machines_scope_still_publishes_this_machines_own"
   }
