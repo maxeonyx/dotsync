@@ -160,16 +160,19 @@ pub(crate) fn creation_description(scope: &str, description: Option<&str>) -> St
 
 /// The scope a commit creates, if it is a creation commit.
 ///
-/// `rebuild` is the same statement in the words the v0.3.13 recovery release
-/// used, and the repos in the field hold those commits — the fleet migrates by
-/// upgrading the binary, so what history already says is what dotsync has to
-/// be able to read.
+/// The verb is deliberately not spelled out. Dotsync writes `create` and has
+/// written `rebuild` (the v0.3.13 recovery release) and `initialize` (every
+/// `init` before this one, for the root scope), and those commits are in the
+/// repos this binary is upgrading into: what history says is what dotsync has
+/// to read. So the shape is what identifies one — dotsync said something
+/// about a named scope — and the name is the word before `scope`.
 fn scope_created_by(description: &str) -> Option<&str> {
-    let subject = description.lines().next()?;
-    let named = subject
-        .strip_prefix("dotsync: create ")
-        .or_else(|| subject.strip_prefix("dotsync: rebuild "))?
+    let said = description
+        .lines()
+        .next()?
+        .strip_prefix("dotsync: ")?
         .strip_suffix(" scope")?;
+    let (_verb, named) = said.split_once(' ')?;
     (!named.is_empty() && !named.contains(' ')).then_some(named)
 }
 
