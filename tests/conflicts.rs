@@ -749,7 +749,7 @@ dotsync: overwrote 1 drifted file(s)
 @@ -1 +1 @@
 -setting = \"linux\"
 +setting = \"all\"
-dotsync: aborted the cascade paused at linux and synced 1 file(s)
+dotsync: discarded the merge paused at `linux` and synced 1 file(s)
 ",
     );
 

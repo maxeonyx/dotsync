@@ -714,7 +714,7 @@ async fn run_abort() -> Result<CliOutput, DotsyncError> {
         let mut output = render::synced_output(
             "abort",
             format!(
-                "dotsync: aborted the cascade paused at {} and synced {} file(s)",
+                "dotsync: discarded the merge paused at `{}` and synced {} file(s)",
                 report.paused_scope,
                 report.sync.synced_paths.len()
             ),
