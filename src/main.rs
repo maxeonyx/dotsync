@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
-    abort_paused_cascade, commit_and_sync, continue_after_conflict, diff_home, init, status, sync,
-    view, CommitFailure, CommitOptions, DiffReport, DotsyncError, DotsyncPaths, Resumed, Run,
-    UnreachableRemote, ViewAnswer,
+    abort_paused_cascade, commit_and_sync, continue_after_conflict, create_scope, diff_home, init,
+    status, sync, view, CommitFailure, CommitOptions, DiffReport, DotsyncError, DotsyncPaths,
+    Resumed, Run, UnreachableRemote, ViewAnswer,
 };
 mod render;
 use serde_json::json;
@@ -39,9 +39,23 @@ const INIT_ABOUT: &str = "Clone or join a dotsync remote";
 
 const INIT_LONG_ABOUT: &str = "REMOTE_URL is the git remote that stores your dotsync repo.
 
-`dotsync init` clones the repo into ~/.local/share/dotsync/repo, detects this machine, sets up any missing scope branches for its OS and machine, and syncs the resulting machine scope into home.
+`dotsync init` clones the repo into ~/.local/share/dotsync/repo, creates this machine's own scope, and syncs it into home.
+
+Joining a remote that already has scopes means saying where this machine's config comes from: `--parent work-linux`. A hostname cannot tell a `home-linux` from a `work-linux`, and a scope is created where its parents are and never moved, so this is the one moment that answer can be given. Run `dotsync view` on another machine to see the scopes there are. Give `--parent` more than once for a machine that inherits from several scopes.
+
+A remote with no scopes on it yet has nothing to choose from: this machine gets the root scope `all`, a scope for its OS, and its own scope under that.
 
 If REMOTE_URL is omitted, dotsync asks for it.";
+
+const CREATE_SCOPE_ABOUT: &str = "Create a scope for config that several machines share";
+
+const CREATE_SCOPE_LONG_ABOUT: &str = "NAME is what the new scope is called. `--parent` is where it hangs: config on the parents reaches it, and config committed to it reaches every machine that hangs off it in turn.
+
+Creating a scope is the only thing that can happen to the scope graph. Nothing renames, moves or deletes one, which is what lets dotsync read the graph off its own history instead of a file that can disagree with it.
+
+Machines join a scope with `dotsync init <remote-url> --parent <name>`, so a scope created now is for the machines that join under it.
+
+`-m` says what belongs on the scope, for whoever reads `dotsync view` later. A name that says it already — `hyprland`, `work` — needs nothing.";
 
 const INIT_REMOTE_URL_USAGE: &str = "init needs the repo remote URL
 
@@ -106,6 +120,12 @@ enum Action {
     },
     Init {
         remote_url: InitRemote,
+        parents: Vec<String>,
+    },
+    CreateScope {
+        scope: String,
+        parents: Vec<String>,
+        description: Option<String>,
     },
     Commit {
         scope: String,
@@ -131,6 +151,23 @@ enum Command {
     Init {
         /// Git remote URL or local path for the dotsync repo
         remote_url: Option<String>,
+
+        /// Scope this machine's config comes from; repeat for several
+        #[arg(long = "parent")]
+        parents: Vec<String>,
+    },
+    #[command(name = "create-scope", about = CREATE_SCOPE_ABOUT, long_about = CREATE_SCOPE_LONG_ABOUT)]
+    CreateScope {
+        /// Name for the new scope
+        scope: String,
+
+        /// Scope the new one hangs off; repeat for several
+        #[arg(long = "parent")]
+        parents: Vec<String>,
+
+        /// What belongs on this scope
+        #[arg(short = 'm', long = "message")]
+        description: Option<String>,
     },
     #[command(about = COMMIT_ABOUT, long_about = COMMIT_LONG_ABOUT)]
     Commit {
@@ -449,10 +486,28 @@ fn output_format_from_args() -> OutputFormat {
 impl Action {
     fn try_from_cli(cli: Cli, context: CliContext) -> Result<Self, UsageError> {
         match cli.command {
-            Some(Command::Init { remote_url }) => {
+            Some(Command::Init {
+                remote_url,
+                parents,
+            }) => {
                 reject_force_before(cli.force, "init")?;
                 let remote_url = init_remote_from_args(remote_url, context)?;
-                Ok(Self::Init { remote_url })
+                Ok(Self::Init {
+                    remote_url,
+                    parents,
+                })
+            }
+            Some(Command::CreateScope {
+                scope,
+                parents,
+                description,
+            }) => {
+                reject_force_before(cli.force, "create-scope")?;
+                Ok(Self::CreateScope {
+                    scope,
+                    parents,
+                    description,
+                })
             }
             Some(Command::Continue) => Ok(Self::Continue { force: cli.force }),
             Some(Command::Abort) => {
@@ -518,7 +573,15 @@ async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
             force,
             paths,
         } => run_commit(scope, message, force, paths).await,
-        Action::Init { remote_url } => run_init(remote_url).await,
+        Action::Init {
+            remote_url,
+            parents,
+        } => run_init(remote_url, parents).await,
+        Action::CreateScope {
+            scope,
+            parents,
+            description,
+        } => run_create_scope(scope, parents, description).await,
         Action::Continue { force } => run_continue(force).await,
         Action::Abort => run_abort().await,
         Action::Status => run_status().await,
@@ -552,7 +615,7 @@ fn usage_error(message: &str) -> UsageError {
     }
 }
 
-async fn run_init(remote_url: InitRemote) -> Result<CliOutput, DotsyncError> {
+async fn run_init(remote_url: InitRemote, parents: Vec<String>) -> Result<CliOutput, DotsyncError> {
     let remote_url = match remote_url {
         InitRemote::Provided(remote_url) => remote_url,
         InitRemote::Prompt => match prompt_init_remote_url() {
@@ -561,7 +624,7 @@ async fn run_init(remote_url: InitRemote) -> Result<CliOutput, DotsyncError> {
         },
     };
     let paths = discover_paths()?;
-    let run = init(&paths, &remote_url).await;
+    let run = init(&paths, &remote_url, &parents).await;
     Ok(output_of("dotsync init", run, |report| {
         render::synced_output(
             "init",
@@ -573,6 +636,31 @@ async fn run_init(remote_url: InitRemote) -> Result<CliOutput, DotsyncError> {
             &report.sync,
             Some(&report.push),
         )
+    }))
+}
+
+async fn run_create_scope(
+    scope: String,
+    parents: Vec<String>,
+    description: Option<String>,
+) -> Result<CliOutput, DotsyncError> {
+    let paths = discover_paths()?;
+    let run = create_scope(&paths, &scope, &parents, description.as_deref()).await;
+    Ok(output_of("dotsync create-scope", run, |report| {
+        SuccessOutput::message(
+            json!({
+                "status": "ok",
+                "command": "create-scope",
+                "scope": report.scope,
+                "parents": report.parents,
+            }),
+            format!(
+                "dotsync: created scope {} under {}",
+                report.scope,
+                report.parents.join(", ")
+            ),
+        )
+        .with_notes(render::push_notes(&report.push))
     }))
 }
 
@@ -762,6 +850,7 @@ async fn run_view(scope: Option<String>, file: Option<PathBuf>) -> Result<CliOut
                     "scopes": scopes.iter().map(|scope| json!({
                         "name": scope.name,
                         "parents": scope.parents,
+                        "description": scope.description,
                     })).collect::<Vec<_>>(),
                     "files": files.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
                 }),
@@ -989,11 +1078,16 @@ fn render_lines(lines: impl IntoIterator<Item = String>) -> String {
 }
 
 fn render_scope_line(scope: &dotsync::ScopeInfo) -> String {
-    if scope.parents.is_empty() {
-        scope.name.clone()
-    } else {
-        format!("{} <- {}", scope.name, scope.parents.join(", "))
+    let mut line = match scope.parents.as_slice() {
+        [] => scope.name.clone(),
+        parents => format!("{} <- {}", scope.name, parents.join(", ")),
+    };
+    // Only the scopes whose creator said what they are for carry this, so a
+    // graph of self-evident names reads as a graph and nothing else.
+    if let Some(description) = &scope.description {
+        line.push_str(&format!("  # {description}"));
     }
+    line
 }
 
 fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {

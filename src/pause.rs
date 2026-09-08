@@ -26,11 +26,11 @@ use jj_lib::rewrite::merge_commit_trees;
 use crate::cascade::{
     execute_cascade_steps, CascadeCommand, CascadeOutcome, CascadeStep, ScopeHeads,
 };
-use crate::config::DotsyncPaths;
 use crate::drift::{changed_paths, FileState};
 use crate::error::DotsyncError;
 use crate::home::{repo_path_of, Home, Resolved};
 use crate::machine::machine_signature;
+use crate::paths::DotsyncPaths;
 use crate::repo::{
     collect_managed_tree_entries, push_scope_updates, read_entry_bytes, scope_head_commit,
     PushReport,
@@ -188,7 +188,7 @@ async fn continue_in_session(
             paths: unresolved,
         });
     }
-    let graph = session.config().graph.clone();
+    let graph = session.graph().clone();
     let repo = session.repo().clone();
     let mut tx = repo.start_transaction();
     let mut scope_heads = ScopeHeads::load_existing(tx.repo_mut().base_repo(), &graph)?;

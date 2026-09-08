@@ -9,7 +9,7 @@ Use this skill when editing dotfiles on a machine managed by dotsync.
 3. Run `dotsync status` to see what changed.
 4. Run `dotsync commit <scope> -m "message" -- <paths>` to commit specific files, or `dotsync commit <scope> -m "message"` to commit all changed managed files.
 5. Choose the root-est appropriate scope for the change (the highest scope that still semantically owns the edit).
-6. To discover available scopes, read `~/.config/dotsync/config.toml` — its comments explain what each scope covers, and what belongs on it if anyone has written that down yet. When you learn something about a scope that the file does not say, write it under that scope's `What belongs here:` line and commit the file to `all`; that is how the next agent finds out.
+6. To discover available scopes, run `dotsync view`. It lists every scope with the scopes it inherits from, and what a scope is for where whoever created it said.
 
 ## Choosing a scope
 
@@ -19,6 +19,8 @@ Use this skill when editing dotfiles on a machine managed by dotsync.
 - Machine scopes (e.g. `mx-xps-cy`): config specific to one machine only
 
 Always choose the **highest (most general) scope** that makes sense. If a change applies to all linux machines, use `linux`, not the machine scope.
+
+There may be no scope for what you are holding — config shared by some machines and not others, with nothing in the graph that means "those machines". `dotsync create-scope <name> --parent <scope> -m "what belongs here"` makes one. It only carries config to machines that join under it with `dotsync init --parent <name>`, though: nothing moves an existing machine onto a new scope, so a scope created now is for machines set up later. Prefer an existing scope.
 
 ## When a cascade pauses
 

@@ -34,6 +34,7 @@ fn help_examples() {
             fixture.env("DOTSYNC_HOSTNAME", "mx-help-test");
             fixture.command("git", &["init", "--bare", "<url>"]);
         })
+        .page(&["create-scope"], |_fixture| {})
         .page(&["commit"], |_fixture| {})
         .page(&["continue"], |_fixture| {})
         .page(&["diff"], |_fixture| {})

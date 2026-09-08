@@ -44,7 +44,7 @@ These scopes form a directed acyclic graph (DAG):
 
 Each scope is a branch. A scope branch merges from its parent(s). So `linux` merges from `all`, `hyprland` merges from `linux`, and `mx-xps-cy` (a machine) merges from `hyprland`.
 
-A machine is just a leaf scope — there's nothing structurally special about it. The only difference is that a machine scope is the one whose files get synced to the live system. dotsync knows which scope is this machine's from the hostname, not from a user-visible checkout.
+A machine is just a leaf scope — there's nothing structurally special about it. The only difference is that a machine scope is the one whose files get synced to the live system. dotsync knows which scope is this machine's from the hostname, not from a user-visible checkout, and the scope it names has to be a leaf: config on a scope reaches every machine below it, so a scope something else hangs off cannot be one machine's own.
 
 ### Why not a single branch with directory-based scoping?
 
@@ -82,21 +82,16 @@ Files are implicitly tracked by existing in the repo. There is no whitelist file
 
 **Symlinks are treated as files, and are never followed** (Max, 2026-08-13: "for almost all intents we should treat symlinks as files and not follow them"). A link's content is its target string, so `commit` records a symlink as a symlink and sync writes it back into home as a symlink with the same target. Dotsync never reads the file a link points at, and never writes through a link — a home path that is a link where the repo holds a regular file is a difference in _kind_, reported as a change and replaced by sync rather than written through. This keeps `~/.config/nvim -> ~/src/nvim-config` recordable as what it is, and it keeps `commit -- selflink/` (a link to home) one entry rather than a walk of the whole home directory. Windows probably rejects symlinks on its scopes; that half is undecided in detail.
 
-The only config file is the scope graph:
+There is no config file. The graph is the repo's own structure: a scope is a
+branch, and the commit that created it is written onto the heads of its parents
+— so a scope's ancestors are the scopes whose creation commits its history
+holds, and its parents are the nearest of those. The creation commit's message
+names the scope, and says what belongs on it where the name does not say so
+already.
 
-```toml
-# .config/dotsync/config.toml
-
-[scopes]
-all = {}
-linux = { parents = ["all"] }
-hyprland = { parents = ["linux"] }
-windows = { parents = ["all"] }
-mx-xps-cy = { parents = ["hyprland"] }
-mx-pc-win = { parents = ["windows"] }
-```
-
-This lives on the `all` branch (since every machine needs the full graph).
+Nothing else on the remote is a scope. The remote is a git remote and anything
+with git can push to it; a branch that was not created as a scope is not one,
+and dotsync neither reads, cascades nor publishes it.
 
 ## The state space
 
@@ -118,7 +113,10 @@ The mark is the one people leave out, so here is why it is not optional. Take `.
 
 That is also why the classification of local changes in the next section is a three-way comparison rather than a comparison of home against the repo. The "last-synced tree `L`" in that table is the tree of the commit the mark names.
 
-`config.toml` is not a fourth thing. It is a managed file, living in home and on the `all` scope, which is exactly why editing it and committing it propagates like any other config. Its one genuinely special property is a self-reference: the scope graph is needed in order to compute the layering, and it is stored inside the layered thing. That works only because it lives on `all`, the root, which can be read without knowing the graph first.
+The scope graph is not a fourth thing either. It is (2) read structurally
+rather than from any file's contents, so there is nothing to keep in step with
+it: a scope dotsync can name is a scope the cascade can act on, by
+construction.
 
 Everything in this section is small, and that is the point. The essential complexity of the product is a DAG of config scopes, a rule for which scope a change belongs on, and a cascade that layers them down to each machine. jj has no opinion about any of it. Bookmarks, commits and conflict representation are _not_ fundamental — they are how (2) happens to be stored, and are free to change.
 
@@ -126,7 +124,7 @@ Everything in this section is small, and that is the point. The essential comple
 
 Scopes are branches, so a scope has a head. That head is in exactly one of:
 
-- **absent** — the repo holds no head for this scope. A scope named in `config.toml` that was never created is here.
+- **absent** — the repo holds no head for this scope, which for a machine means its own scope was created and something outside dotsync has since moved or removed the branch.
 - **exactly one commit** — the ordinary state.
 - **contested** — two machines moved it and it currently holds two candidate values at once. Neither is "the" head.
 
@@ -161,6 +159,7 @@ The names below are where these states lived in the code as of v0.4.0. This tabl
 | The repo | the hidden jj repo at `~/.local/share/dotsync/repo/` |
 | The mark | the parent of this machine's working-copy commit, in jj's own view (`wc_commit_ids`, keyed by the machine scope's name) |
 | A scope head, three states | jj's `RefTarget`, which is a merge of optional commit ids — absent, single, or contested |
+| The scope graph | derived in `scope_graph::derive` from the bookmarks and the ancestry of their creation commits |
 | The kind of a managed path | jj's `TreeValue`, whose `File` variant carries the executable bit and whose `Symlink` variant carries a target |
 | A conflict | jj's own conflict representation, which is natively a base plus both sides |
 
@@ -308,7 +307,13 @@ This is mostly a corollary of the convergence model: interrupted work leaves loc
 
 The steady-state command is `dotsync`, and it is the one an agent runs by reflex. The others exist because they answer questions `dotsync` cannot: how to join a remote in the first place, what changed here, and what to do when a cascade pauses. `dotsync` itself never splits into commit/cascade/push steps — see "Why one command?" below.
 
-**`dotsync init <remote-url>`**: Clone the remote into the hidden repo, work out this machine's OS and machine scopes, create them if the remote does not have them yet, and sync the resulting machine scope into home. The only command that requires the remote to be reachable: it is the whole of its job. It writes the scope graph to `.config/dotsync/config.toml`.
+**`dotsync init <remote-url> [--parent <scope>]...`**: Clone the remote into the hidden repo, create this machine's own scope, and sync it into home. The only command that requires the remote to be reachable: it is the whole of its job.
+
+Joining a remote that already has scopes means naming the parents, and naming one that is not there is a stop that lists the ones that are. This is not a convenience: a hostname cannot tell a `home-linux` from a `work-linux`, the graph is append-only, and a scope guessed into the wrong place cannot be moved afterwards. A remote with no scopes on it has nothing to choose from, so that machine gets the root scope `all`, a scope named for its OS, and its own leaf under that — the one shape dotsync can justify without being told.
+
+A machine whose scope already exists adopts it, and refuses `--parent`, because where a scope hangs was decided when it was created.
+
+**`dotsync create-scope <name> --parent <scope>... [-m "what belongs here"]`**: Create a scope holding everything its parents hold. This is the whole of what can happen to the graph: nothing renames, reparents or deletes a scope, which is what lets the graph be structural. Machines join a scope with `init --parent`, so a scope created now is for the machines that join under it. Rearranging a graph is open (PLAN §2.7).
 
 **`dotsync`** (no arguments): Pull and converge scope branches (merging remote changes and cascading, pausing on conflicts), sync repo -> system, push. It does not import home edits; use `dotsync status` and `dotsync commit <scope> -m "message" -- <paths...>` when home changes should be recorded.
 
@@ -351,13 +356,13 @@ dotsync includes an agent skill (`dotfiles`) that triggers whenever any home dir
 
 1. Edit files directly in `~/` at their real locations
 2. Run `dotsync status` to see changed managed files
-3. Read `.config/dotsync/config.toml` from the `all` scope to see available scopes
+3. Run `dotsync view` to see the scopes there are, and what each is for where somebody said
 4. Choose the root-est appropriate scope for the change
 5. Run `dotsync commit <scope> -m "description" -- <paths...>` when done
 
 This is the mechanism that makes the system agent-friendly. The tool itself is simple plumbing — the skill is what makes agents use the plumbing correctly.
 
-An earlier version of this document claimed the comments in `config.toml` are load-bearing — that they are how an agent learns "hyprland stuff goes on `hyprland`, not `linux`". They are not (Max, 2026-08-14: _"I don't think the scope comments are 'load bearing' lol? they're pretty obvious"_). A scope called `hyprland` says what belongs on it by being called `hyprland`, and step 4 above is the actual rule. Comments there are ordinary commentary, useful when a scope's name is not self-evident and carrying nothing when it is. Read as a requirement, that claim is what produced machinery to generate a comment for every scope at `init` and to preserve comments when a joining machine edits the file; nothing else depends on that machinery existing.
+What a scope is for is ordinary commentary, useful when a scope's name is not self-evident and carrying nothing when it is (Max, 2026-08-14: _"I don't think the scope comments are 'load bearing' lol? they're pretty obvious"_). A scope called `hyprland` says what belongs on it by being called `hyprland`, and step 4 above is the actual rule. So whoever creates a scope can say what it is for, in the creation commit, and `dotsync view` shows it — one sentence that cannot drift from the scope it describes, rather than a file to keep in step.
 
 ## What dotsync is NOT
 

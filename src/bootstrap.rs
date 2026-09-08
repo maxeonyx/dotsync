@@ -1,26 +1,23 @@
-use std::collections::HashMap;
+use std::sync::Arc;
 
+use jj_lib::backend::Signature;
+use jj_lib::commit::Commit;
 use jj_lib::op_store::RefTarget;
 use jj_lib::ref_name::RefNameBuf;
-use jj_lib::repo::Repo as _;
+use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo as _};
+use jj_lib::rewrite::merge_commit_trees;
 use jj_lib::workspace::Workspace;
 
-use crate::cascade::{
-    build_cascade_plan, execute_cascade_steps, CascadeCommand, CascadeOutcome, ScopeHeads,
-};
-use crate::config::{
-    config_with_added_scopes, load_config, load_config_text, new_config, repo_config_path,
-    write_config, DotsyncPaths, NewScope, ScopeKind, ALL_SCOPE,
-};
 use crate::error::{jj_error, DotsyncError};
 use crate::home::Home;
 use crate::machine::{detect_machine, machine_signature, MachineIdentity};
+use crate::paths::DotsyncPaths;
 use crate::repo::{
     add_origin_remote, default_settings, fetch_origin, load_repo_direct, push_scope_updates,
-    PushReport,
+    scope_head, scope_head_commit, PushReport,
 };
-use crate::scope_graph::ScopeGraph;
-use crate::session::{Run, Session};
+use crate::scope_graph::{self, creation_description, ScopeGraph, ROOT_SCOPE};
+use crate::session::{in_session, Run, Session};
 use crate::sync::{finishing, SyncReport};
 
 #[derive(Debug, Clone)]
@@ -30,24 +27,41 @@ pub struct InitReport {
     pub push: PushReport,
 }
 
+/// What `create-scope` did. The parents are echoed because they are the whole
+/// of what a scope is beyond its name.
+#[derive(Debug, Clone)]
+pub struct CreatedScope {
+    pub scope: String,
+    pub parents: Vec<String>,
+    pub push: PushReport,
+}
+
 /// Unlike every other command, `init` cannot carry on against a last-fetched
 /// state, because there isn't one yet — so its run never reports an unreachable
 /// remote as an aside. It reports it as the error it is.
-pub async fn init(paths: &DotsyncPaths, remote_url: &str) -> Run<Result<InitReport, DotsyncError>> {
+pub async fn init(
+    paths: &DotsyncPaths,
+    remote_url: &str,
+    parents: &[String],
+) -> Run<Result<InitReport, DotsyncError>> {
     Run {
-        report: init_repo(paths, remote_url).await,
+        report: init_repo(paths, remote_url, parents).await,
         unreachable_remote: None,
     }
 }
 
-async fn init_repo(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport, DotsyncError> {
+async fn init_repo(
+    paths: &DotsyncPaths,
+    remote_url: &str,
+    parents: &[String],
+) -> Result<InitReport, DotsyncError> {
     if paths.repo_root.exists() {
         return Err(DotsyncError::RepoAlreadyExists {
             path: paths.repo_root.clone(),
         });
     }
 
-    match create_repo_and_join(paths, remote_url).await {
+    match create_repo_and_join(paths, remote_url, parents).await {
         Ok(report) => Ok(report),
         // Everything under the repo root was made by this run — init refuses
         // to start when it already exists — so an init that stopped part-way
@@ -73,6 +87,7 @@ async fn init_repo(paths: &DotsyncPaths, remote_url: &str) -> Result<InitReport,
 async fn create_repo_and_join(
     paths: &DotsyncPaths,
     remote_url: &str,
+    parents: &[String],
 ) -> Result<InitReport, DotsyncError> {
     if let Some(parent) = paths.repo_root.parent() {
         std::fs::create_dir_all(parent).map_err(|source| DotsyncError::Io {
@@ -97,14 +112,11 @@ async fn create_repo_and_join(
     let repo = fetch_origin(repo).await?;
     let identity = detect_machine()?;
 
-    // Only after this does the repo hold an `all` scope to read a scope graph
-    // out of, which is what a session is: everything before it works on the
-    // repo handle directly.
-    let remote_empty = repo.view().all_remote_bookmarks().next().is_none();
-    let repo = if remote_empty {
-        bootstrap_empty_remote(repo, &identity).await?
+    let graph = scope_graph::derive(repo.as_ref())?;
+    let repo = if graph.names().next().is_none() {
+        start_a_new_fleet(repo, &identity, parents).await?
     } else {
-        join_existing_remote(paths, repo, &identity).await?
+        join_the_fleet(repo, &graph, &identity, parents).await?
     };
 
     let mut session = Session::from_repo(paths, repo).await?;
@@ -120,200 +132,219 @@ async fn create_repo_and_join(
     Ok(InitReport { sync, push })
 }
 
-/// The scopes this machine needs that the graph does not have yet, parents
-/// first, each with what dotsync can say about what it is for.
-///
-/// One function for both paths into `init`: an empty remote is the case where
-/// every one of them is missing, including `all`.
-fn scopes_to_create(
+/// A remote with no scopes on it: this machine is the first, so there is
+/// nothing to be told and nothing to choose from. It gets the root scope, a
+/// scope for its OS — the one thing dotsync knows about a machine that is
+/// worth sharing — and its own leaf under that.
+async fn start_a_new_fleet(
+    repo: Arc<ReadonlyRepo>,
     identity: &MachineIdentity,
-    existing: &HashMap<String, Vec<String>>,
-) -> Vec<NewScope> {
-    let mut new_scopes = Vec::new();
-    if !existing.contains_key(ALL_SCOPE) {
-        new_scopes.push(NewScope {
-            name: ALL_SCOPE.to_string(),
-            parents: Vec::new(),
-            kind: ScopeKind::Root,
+    parents: &[String],
+) -> Result<Arc<ReadonlyRepo>, DotsyncError> {
+    if let Some(named) = parents.first() {
+        return Err(DotsyncError::NoSuchParentScope {
+            parent: named.clone(),
+            scopes: Vec::new(),
         });
     }
-    if !existing.contains_key(&identity.os_scope) {
-        new_scopes.push(NewScope {
-            name: identity.os_scope.clone(),
-            parents: vec![ALL_SCOPE.to_string()],
-            kind: ScopeKind::Os,
-        });
-    }
-    if !existing.contains_key(&identity.machine_scope) {
-        new_scopes.push(NewScope {
-            name: identity.machine_scope.clone(),
-            parents: vec![identity.os_scope.clone()],
-            kind: ScopeKind::Machine,
-        });
-    }
-    new_scopes
-}
 
-pub(crate) async fn bootstrap_empty_remote(
-    repo: std::sync::Arc<jj_lib::repo::ReadonlyRepo>,
-    identity: &MachineIdentity,
-) -> Result<std::sync::Arc<jj_lib::repo::ReadonlyRepo>, DotsyncError> {
-    let root_commit = repo.store().root_commit();
-    let config_text = new_config(&scopes_to_create(identity, &HashMap::new()));
-
+    let author = machine_signature(&identity.machine_scope);
     let mut tx = repo.start_transaction();
-    let config_tree = write_config(tx.repo_mut(), &root_commit.tree(), &config_text).await?;
-    let all_commit = tx
-        .repo_mut()
-        .new_commit(vec![root_commit.id().clone()], config_tree)
-        .set_description("dotsync: initialize all scope")
-        .set_author(machine_signature(&identity.machine_scope))
-        .write()
-        .await
-        .map_err(|err| jj_error(format!("write all scope commit: {err}")))?;
-    tx.repo_mut()
-        .set_local_bookmark_target("all".as_ref(), RefTarget::normal(all_commit.id().clone()));
-
-    let os_commit = tx
-        .repo_mut()
-        .new_commit(vec![all_commit.id().clone()], all_commit.tree())
-        .set_description(format!("dotsync: create {} scope", identity.os_scope))
-        .set_author(machine_signature(&identity.machine_scope))
-        .write()
-        .await
-        .map_err(|err| jj_error(format!("write os scope commit: {err}")))?;
-    tx.repo_mut().set_local_bookmark_target(
-        RefNameBuf::from(identity.os_scope.as_str()).as_ref(),
-        RefTarget::normal(os_commit.id().clone()),
-    );
-
-    let machine_commit = tx
-        .repo_mut()
-        .new_commit(vec![os_commit.id().clone()], os_commit.tree())
-        .set_description(format!("dotsync: create {} scope", identity.machine_scope))
-        .set_author(machine_signature(&identity.machine_scope))
-        .write()
-        .await
-        .map_err(|err| jj_error(format!("write machine scope commit: {err}")))?;
-    tx.repo_mut().set_local_bookmark_target(
-        RefNameBuf::from(identity.machine_scope.as_str()).as_ref(),
-        RefTarget::normal(machine_commit.id().clone()),
-    );
-    tx.commit("dotsync: initialize scopes")
+    let root = tx.repo_mut().store().root_commit();
+    let all =
+        write_scope_creation(tx.repo_mut(), ROOT_SCOPE, &[root], None, author.clone()).await?;
+    let os = write_scope_creation(
+        tx.repo_mut(),
+        &identity.os_scope,
+        &[all],
+        None,
+        author.clone(),
+    )
+    .await?;
+    write_scope_creation(tx.repo_mut(), &identity.machine_scope, &[os], None, author).await?;
+    tx.commit("dotsync: start a new fleet")
         .await
         .map_err(|err| jj_error(format!("commit init scopes: {err}")))
 }
 
-pub(crate) async fn join_existing_remote(
-    paths: &DotsyncPaths,
-    repo: std::sync::Arc<jj_lib::repo::ReadonlyRepo>,
+/// A remote that already has scopes. Where this machine's config hangs is the
+/// one thing its hostname cannot say — `home-linux` and `work-linux` are both
+/// linux machines — so it has to be told, and the graph is append-only, so it
+/// cannot be moved afterwards.
+async fn join_the_fleet(
+    repo: Arc<ReadonlyRepo>,
+    graph: &ScopeGraph,
     identity: &MachineIdentity,
-) -> Result<std::sync::Arc<jj_lib::repo::ReadonlyRepo>, DotsyncError> {
-    let config = load_config(paths, repo.as_ref()).await?;
-    let new_scopes = scopes_to_create(identity, &config.graph.parents);
-
-    if new_scopes.is_empty() {
+    parents: &[String],
+) -> Result<Arc<ReadonlyRepo>, DotsyncError> {
+    if let Some(existing) = graph.get(&identity.machine_scope) {
+        // Config on a scope reaches every machine below it, so a scope
+        // something else already hangs off cannot be one machine's own. This
+        // is what `DOTSYNC_HOSTNAME=linux` used to do: adopt the shared OS
+        // scope as this machine's private one and publish this machine's
+        // config to every linux machine in the fleet.
+        if !existing.is_leaf() {
+            return Err(DotsyncError::MachineScopeIsShared {
+                scope: existing.name.clone(),
+                children: existing.children.clone(),
+            });
+        }
+        if !parents.is_empty() {
+            return Err(DotsyncError::MachineScopeAlreadyPlaced {
+                scope: existing.name.clone(),
+                parents: existing.parents.clone(),
+            });
+        }
         return Ok(repo);
     }
 
-    // The file this machine adds its scopes to is the file as it is written,
-    // not a re-rendering of the graph parsed out of it: the comments beside
-    // the scopes are what an agent reads to choose one, and they do not
-    // survive a round trip through the graph.
-    let updated_text = config_with_added_scopes(
-        &load_config_text(paths, repo.as_ref()).await?,
-        &new_scopes,
-        &repo_config_path(paths),
-    )?;
-
-    let mut parents = config.graph.parents.clone();
-    for scope in &new_scopes {
-        parents.insert(scope.name.clone(), scope.parents.clone());
+    // A branch of this name that is not a scope belongs to whoever pushed it,
+    // and creating this machine's scope would move it.
+    if !scope_head(repo.as_ref(), &identity.machine_scope).is_absent() {
+        return Err(DotsyncError::ScopeNameTaken {
+            scope: identity.machine_scope.clone(),
+        });
     }
-    let updated_graph = ScopeGraph::new(parents)?;
 
+    let parent_commits =
+        parent_commits_for(repo.as_ref(), graph, &identity.machine_scope, parents)?;
     let mut tx = repo.start_transaction();
-    let mut scope_heads = ScopeHeads::load_existing(tx.repo_mut().base_repo(), &updated_graph)?;
-    let all_head = scope_heads.require("all")?;
-    let config_tree = write_config(tx.repo_mut(), &all_head.tree(), &updated_text).await?;
+    write_scope_creation(
+        tx.repo_mut(),
+        &identity.machine_scope,
+        &parent_commits,
+        None,
+        machine_signature(&identity.machine_scope),
+    )
+    .await?;
+    tx.commit("dotsync: join the fleet")
+        .await
+        .map_err(|err| jj_error(format!("commit machine scope: {err}")))
+}
 
-    let config_commit = tx
-        .repo_mut()
-        .new_commit(vec![all_head.id().clone()], config_tree)
-        .set_description("dotsync: update scope config")
-        .set_author(machine_signature(&identity.machine_scope))
+/// `dotsync create-scope`: the whole of what can be done to the scope graph.
+///
+/// A scope is created once and never renamed, reparented or deleted, which is
+/// what lets the graph be read off the repo's structure — every edge is a
+/// commit's parent, and commits do not change. Rearranging a graph is still an
+/// open question (PLAN §2.7); the shape it replaces reported success for a
+/// scope it had not created.
+pub async fn create_scope(
+    paths: &DotsyncPaths,
+    scope: &str,
+    parents: &[String],
+    description: Option<&str>,
+) -> Run<Result<CreatedScope, DotsyncError>> {
+    in_session(paths, async |session, paths| {
+        // A paused cascade has scopes half cascaded, and this run ends by
+        // publishing every scope commit the machine holds — so the pause has
+        // to be resolved first, for the reason a commit does.
+        crate::pause::reject_commit_if_cascade_paused(paths)?;
+        session.fetch().await?;
+        let graph = session.graph().clone();
+        if graph.contains(scope) || !scope_head(session.repo().as_ref(), scope).is_absent() {
+            return Err(DotsyncError::ScopeNameTaken {
+                scope: scope.to_string(),
+            });
+        }
+        let parent_commits = parent_commits_for(session.repo().as_ref(), &graph, scope, parents)?;
+
+        let repo = session.repo().clone();
+        let mut tx = repo.start_transaction();
+        write_scope_creation(
+            tx.repo_mut(),
+            scope,
+            &parent_commits,
+            description,
+            machine_signature(&detect_machine()?.machine_scope),
+        )
+        .await?;
+        session
+            .advance_to(
+                tx.commit(format!("dotsync: create {scope} scope"))
+                    .await
+                    .map_err(|err| jj_error(format!("commit scope creation: {err}")))?,
+            )
+            .await?;
+
+        Ok(CreatedScope {
+            scope: scope.to_string(),
+            parents: parents.to_vec(),
+            push: push_scope_updates(session).await?,
+        })
+    })
+    .await
+}
+
+/// The heads a new scope hangs off, refusing anything that is not a scope this
+/// repo has.
+fn parent_commits_for(
+    repo: &dyn jj_lib::repo::Repo,
+    graph: &ScopeGraph,
+    scope: &str,
+    parents: &[String],
+) -> Result<Vec<Commit>, DotsyncError> {
+    if parents.is_empty() {
+        return Err(DotsyncError::ParentScopeRequired {
+            scope: scope.to_string(),
+            scopes: graph.names().map(str::to_string).collect(),
+        });
+    }
+    parents
+        .iter()
+        .map(|parent| {
+            if !graph.contains(parent) {
+                return Err(DotsyncError::NoSuchParentScope {
+                    parent: parent.clone(),
+                    scopes: graph.names().map(str::to_string).collect(),
+                });
+            }
+            scope_head_commit(repo, parent)
+        })
+        .collect()
+}
+
+/// Writes the commit that creates a scope and points the scope's bookmark at
+/// it.
+///
+/// The commit's own parents are the heads of the scope's parent scopes, so the
+/// edge in the graph and the history are one fact rather than two that can
+/// disagree — `scope_graph::derive` reads the graph back out of exactly this.
+/// Its description names the scope, which is what makes it findable, and
+/// carries whatever the creator said the scope is for.
+async fn write_scope_creation(
+    mut_repo: &mut MutableRepo,
+    scope: &str,
+    parents: &[Commit],
+    description: Option<&str>,
+    author: Signature,
+) -> Result<Commit, DotsyncError> {
+    let tree = merge_commit_trees(mut_repo, parents)
+        .await
+        .map_err(|err| jj_error(format!("merge the parents of {scope}: {err}")))?;
+    if tree.has_conflict() {
+        return Err(DotsyncError::ScopeCreationConflict {
+            scope: scope.to_string(),
+            files: tree
+                .conflicts()
+                .map(|(path, _)| path.as_internal_file_string().to_string())
+                .collect(),
+        });
+    }
+
+    let commit = mut_repo
+        .new_commit(
+            parents.iter().map(|parent| parent.id().clone()).collect(),
+            tree,
+        )
+        .set_description(creation_description(scope, description))
+        .set_author(author)
         .write()
         .await
-        .map_err(|err| jj_error(format!("write config update commit: {err}")))?;
-    tx.repo_mut().set_local_bookmark_target(
-        "all".as_ref(),
-        RefTarget::normal(config_commit.id().clone()),
+        .map_err(|err| jj_error(format!("write the commit creating {scope}: {err}")))?;
+    mut_repo.set_local_bookmark_target(
+        RefNameBuf::from(scope).as_ref(),
+        RefTarget::normal(commit.id().clone()),
     );
-    scope_heads.update("all".to_string(), config_commit.clone());
-
-    let cascade_command = CascadeCommand {
-        root_scope: "all".to_string(),
-        description: "dotsync: cascade init config".to_string(),
-        author: machine_signature(&identity.machine_scope),
-    };
-    let cascade_plan = build_cascade_plan(&updated_graph, &scope_heads, &cascade_command);
-    match execute_cascade_steps(
-        tx.repo_mut(),
-        &mut scope_heads,
-        &cascade_plan,
-        &cascade_command,
-    )
-    .await?
-    {
-        CascadeOutcome::Completed => {}
-        CascadeOutcome::Paused {
-            scope,
-            conflicted_files,
-        } => {
-            return Err(DotsyncError::Jj {
-                message: format!(
-                    "unexpected conflict while cascading init config at `{scope}`: {}",
-                    conflicted_files.join(", ")
-                ),
-            })
-        }
-    }
-
-    if !scope_heads.contains(&identity.os_scope) {
-        let parent = scope_heads.require("all")?;
-        let commit = tx
-            .repo_mut()
-            .new_commit(vec![parent.id().clone()], parent.tree())
-            .set_description(format!("dotsync: create {} scope", identity.os_scope))
-            .set_author(machine_signature(&identity.machine_scope))
-            .write()
-            .await
-            .map_err(|err| jj_error(format!("write new os scope: {err}")))?;
-        tx.repo_mut().set_local_bookmark_target(
-            RefNameBuf::from(identity.os_scope.as_str()).as_ref(),
-            RefTarget::normal(commit.id().clone()),
-        );
-        scope_heads.update(identity.os_scope.clone(), commit);
-    }
-
-    if !scope_heads.contains(&identity.machine_scope) {
-        let parent = scope_heads.require(&identity.os_scope)?;
-        let commit = tx
-            .repo_mut()
-            .new_commit(vec![parent.id().clone()], parent.tree())
-            .set_description(format!("dotsync: create {} scope", identity.machine_scope))
-            .set_author(machine_signature(&identity.machine_scope))
-            .write()
-            .await
-            .map_err(|err| jj_error(format!("write new machine scope: {err}")))?;
-        tx.repo_mut().set_local_bookmark_target(
-            RefNameBuf::from(identity.machine_scope.as_str()).as_ref(),
-            RefTarget::normal(commit.id().clone()),
-        );
-        scope_heads.update(identity.machine_scope.clone(), commit);
-    }
-
-    tx.commit("dotsync: initialize machine scope")
-        .await
-        .map_err(|err| jj_error(format!("commit join scope changes: {err}")))
+    Ok(commit)
 }

@@ -299,7 +299,7 @@ fn a_symlink_to_a_sibling_script_survives_the_round_trip_to_another_machine() {
 
     machine_a.run_ok("dotsync commit all -m 'ship tool and the current link' -- .local/bin/");
 
-    machine_b.init_ok();
+    machine_b.init_ok_under("linux");
 
     assert_eq!(
         machine_b.read_file(".local/bin/tool-1.2.0"),

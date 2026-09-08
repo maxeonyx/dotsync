@@ -5,7 +5,6 @@
 //! record is `selection`'s question. This module answers the other two: which
 //! tree those entries are written onto, and what the run then says it did.
 
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use jj_lib::merge::Merge;
@@ -20,16 +19,15 @@ use jj_lib::rewrite::merge_commit_trees;
 use crate::cascade::{
     build_cascade_plan, execute_cascade_steps, CascadeCommand, CascadeOutcome, ScopeHeads,
 };
-use crate::config::DotsyncPaths;
 use crate::error::{DotsyncError, SkippedCommitPath};
 use crate::home::{repo_path_of, Home};
 use crate::machine::machine_signature;
+use crate::paths::DotsyncPaths;
 use crate::pause::{
     home_contents, parent_commit_ids_for_step, reject_commit_if_cascade_paused,
     remaining_steps_after_pause, save_paused_cascade_state, PausedCascadeState, PausedCascadeStep,
 };
 use crate::repo::{push_scope_updates, PushReport};
-use crate::scope_graph::ScopeGraph;
 use crate::selection::{load_scope_entries, select_changes_to_record, Selection};
 use crate::session::{in_session, Run, Session};
 use crate::sync::{finishing, SyncReport};
@@ -156,9 +154,9 @@ async fn commit_in_session(
     // interrupted push behind it must still heal. Anything this run goes on to
     // create is published by the push after the cascade.
     let pending_push = push_scope_updates(session).await?;
-    let graph = session.config().graph.clone();
+    let graph = session.graph().clone();
 
-    if !graph.parents.contains_key(&options.scope) {
+    if !graph.contains(&options.scope) {
         return Err(DotsyncError::InvalidScope {
             scope: options.scope.clone(),
         }
@@ -199,7 +197,10 @@ async fn commit_in_session(
     // falls back to the scope's own head. Whether such commits should be
     // allowed without an explicit per-path force is still open (PLAN.md §1.5,
     // D6).
-    let cascades_into_home = scope_is_ancestor_or_self(&graph, &options.scope, &machine_scope);
+    let cascades_into_home = graph
+        .ancestors_and_self(&machine_scope)
+        .iter()
+        .any(|scope| scope.name == options.scope);
 
     let repo = session.repo().clone();
     let mut tx = repo.start_transaction();
@@ -470,23 +471,6 @@ async fn commit_merge_base_tree(
         .map_err(|err| DotsyncError::Jj {
             message: format!("merge the bases of the home edit for {target_scope}: {err}"),
         })
-}
-
-fn scope_is_ancestor_or_self(graph: &ScopeGraph, ancestor: &str, scope: &str) -> bool {
-    let mut stack = vec![scope.to_string()];
-    let mut seen = BTreeSet::new();
-    while let Some(candidate) = stack.pop() {
-        if candidate == ancestor {
-            return true;
-        }
-        if !seen.insert(candidate.clone()) {
-            continue;
-        }
-        if let Some(parents) = graph.parents.get(&candidate) {
-            stack.extend(parents.iter().cloned());
-        }
-    }
-    false
 }
 
 fn conflicted_files_from_tree(

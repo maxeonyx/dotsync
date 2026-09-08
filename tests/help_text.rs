@@ -37,8 +37,8 @@ fn init_help_explains_remote_url_and_setup() {
     for expected in [
         "REMOTE_URL is the git remote that stores your dotsync repo",
         "clones the repo into ~/.local/share/dotsync/repo",
-        "detects this machine",
-        "sets up any missing scope branches",
+        "creates this machine's own scope",
+        "saying where this machine's config comes from",
     ] {
         assert!(
             stdout.contains(expected),

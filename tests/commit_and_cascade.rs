@@ -225,13 +225,13 @@ What dotsync does:
 Dotsync stores dotfiles in a scope DAG so shared config can live on shared ancestor scopes and machine-specific config can stay isolated on leaf scopes.
 
 This flow:
-This flow resolves the scope you named against the scope graph, which dotsync reads from `.config/dotsync/config.toml` on the `all` scope.
+This flow resolves the scope you named against the scope graph, which dotsync reads off its own repo: every scope is a branch, created once and never moved.
 
 Expected:
-It expects the scope you name to exist in that graph.
+It expects the scope you name to be one of them.
 
 Current state found:
-scope `nonexistent` does not exist in config
+scope `nonexistent` does not exist
 
 Why dotsync stopped:
 Dotsync stopped because there is no such scope: it can neither place a change on one nor show you what one holds.
@@ -328,7 +328,7 @@ fn multiple_machines_can_contribute_to_all_without_losing_changes() {
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
     machine_a.init_ok();
-    machine_b.init_ok();
+    machine_b.init_ok_under("linux");
     machine_a.run_ok("dotsync --force");
 
     machine_a.write_file(".config/shared-a.conf", "from machine a\n");

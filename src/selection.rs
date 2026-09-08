@@ -19,19 +19,16 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use jj_lib::backend::TreeValue;
-use jj_lib::repo::Repo as _;
 
 use crate::commit::CommitOptions;
-use crate::config::{DotsyncPaths, ALL_SCOPE, DOTSYNC_CONFIG_RELATIVE_PATH};
 use crate::drift::state_of;
 use crate::error::{
     CommitPathProblem, DotsyncError, RefusedCommitPath, RejectedCommitPath, SkipReason,
     SkippedCommitPath,
 };
 use crate::home::{repo_path_of, Home};
-use crate::repo::{
-    collect_managed_tree_entries, read_entry_bytes, read_tree_entry_bytes, scope_head_commit,
-};
+use crate::paths::DotsyncPaths;
+use crate::repo::{collect_managed_tree_entries, scope_head_commit};
 use crate::session::Session;
 use crate::sync::classify_home_against_head;
 
@@ -131,15 +128,6 @@ pub(crate) async fn select_changes_to_record(
             selected.into_iter().collect()
         }
     };
-    reject_scope_graph_outside_all(
-        session,
-        home,
-        &options.scope,
-        target_entries,
-        &selected_paths,
-    )
-    .await?;
-
     let newly_tracked = selected_paths
         .iter()
         .filter(|relative| !target_entries.contains_key(*relative))
@@ -210,49 +198,6 @@ pub(crate) fn load_scope_entries(
 ) -> Result<BTreeMap<PathBuf, TreeValue>, DotsyncError> {
     let commit = scope_head_commit(repo, scope)?;
     collect_managed_tree_entries(&commit.tree())
-}
-
-/// Refuses a commit that would record a change to the scope graph on a scope
-/// that is not `all`. Dotsync reads the graph only from `all`
-/// (`config::load_config`), so such a commit writes a copy that configures
-/// nothing — while still syncing into home on that scope's machines, where it
-/// overwrites the real one. An unchanged copy records nothing and is left
-/// alone, which is what keeps bulk selections working. Checked against what
-/// the selection expanded to, because a directory selection reaches the scope
-/// graph too.
-async fn reject_scope_graph_outside_all(
-    session: &Session,
-    home: &Home,
-    scope: &str,
-    target_entries: &BTreeMap<PathBuf, TreeValue>,
-    selected_paths: &[PathBuf],
-) -> Result<(), DotsyncError> {
-    if scope == ALL_SCOPE {
-        return Ok(());
-    }
-    let config_path = PathBuf::from(DOTSYNC_CONFIG_RELATIVE_PATH);
-    if !selected_paths.contains(&config_path) {
-        return Ok(());
-    }
-    let repo_bytes = match target_entries.get(&config_path) {
-        Some(value) => {
-            Some(read_tree_entry_bytes(session.repo().store(), &config_path, value).await?)
-        }
-        None => None,
-    };
-    let home_value = home.entry(&config_path)?.as_resolved().cloned().flatten();
-    if read_entry_bytes(session.repo().store(), &config_path, home_value.as_ref()).await?
-        == repo_bytes
-    {
-        return Ok(());
-    }
-    Err(DotsyncError::UnusableCommitPaths {
-        scope: scope.to_string(),
-        rejected: vec![RejectedCommitPath {
-            path: config_path,
-            problem: CommitPathProblem::ScopeGraphOutsideAllScope,
-        }],
-    })
 }
 
 fn expand_selection_paths(

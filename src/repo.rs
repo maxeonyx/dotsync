@@ -22,8 +22,8 @@ use jj_lib::settings::UserSettings;
 use jj_lib::str_util::StringExpression;
 use jj_lib::view::View;
 
-use crate::config::DotsyncPaths;
 use crate::error::{jj_error, DotsyncError};
+use crate::paths::DotsyncPaths;
 use crate::scope_graph::ScopeGraph;
 use crate::session::Session;
 
@@ -207,10 +207,9 @@ pub(crate) fn scope_head_commit(repo: &dyn Repo, scope: &str) -> Result<Commit, 
 /// be followed by a `dotsync` that stops on it.
 pub(crate) fn diverged_scopes(repo: &dyn Repo, graph: &ScopeGraph) -> Vec<String> {
     graph
-        .parents
-        .keys()
+        .names()
         .filter(|scope| scope_head(repo, scope).has_conflict())
-        .cloned()
+        .map(str::to_string)
         .collect()
 }
 
@@ -284,9 +283,21 @@ impl PushReport {
 }
 
 /// Scopes whose local bookmark is not where the remote has it.
-fn pending_bookmark_updates(repo: &ReadonlyRepo) -> Vec<(RefNameBuf, BookmarkPushUpdate)> {
+///
+/// Scopes only. The remote is a git remote and anything with git can push to
+/// it, so it holds refs that are nobody's scope — an experiment, a backup, a
+/// fork of one branch. Dotsync used to offer every bookmark it held, which
+/// meant a run would recreate a branch its owner had deleted and undo a rewind
+/// its owner meant, without saying anything: it modelled scopes and acted on
+/// refs (PLAN §2.2). What makes the two the same set now is that scope
+/// membership is structural.
+fn pending_bookmark_updates(
+    repo: &ReadonlyRepo,
+    graph: &ScopeGraph,
+) -> Vec<(RefNameBuf, BookmarkPushUpdate)> {
     repo.view()
         .local_remote_bookmarks(ORIGIN.as_ref())
+        .filter(|(name, _)| graph.contains(name.as_str()))
         .filter_map(|(name, targets)| {
             // Skipping a head that is not one commit: absent means the remote
             // holds a scope this machine does not, which is nothing to
@@ -310,7 +321,7 @@ fn pending_bookmark_updates(repo: &ReadonlyRepo) -> Vec<(RefNameBuf, BookmarkPus
 
 /// The scopes a push would offer the remote right now.
 pub(crate) fn pending_push_scopes(session: &Session) -> Vec<String> {
-    pending_bookmark_updates(session.repo())
+    pending_bookmark_updates(session.repo(), session.graph())
         .into_iter()
         .map(|(name, _)| name.as_str().to_string())
         .collect()
@@ -322,7 +333,7 @@ pub(crate) async fn push_scope_updates(session: &mut Session) -> Result<PushRepo
     let subprocess_options = GitSubprocessOptions::from_settings(&settings)
         .map_err(|err| jj_error(format!("load git subprocess settings: {err}")))?;
 
-    let updates = pending_bookmark_updates(&repo);
+    let updates = pending_bookmark_updates(&repo, session.graph());
 
     if updates.is_empty() {
         return Ok(PushReport::UpToDate);
@@ -468,10 +479,18 @@ pub(crate) async fn read_tree_entry_bytes(
 /// machine created arrives as a head this machine holds, and a scope both have
 /// moved arrives contested rather than as two positions dotsync has to compare
 /// itself.
+///
+/// Nothing is abandoned. Abandoning a commit the remote no longer reaches
+/// means rewriting whatever sits on top of it, which is jj's answer for a
+/// person's own unpublished work and the wrong one for history several
+/// machines have: dotsync converges by merging and never rewrites. It was also
+/// a stop nothing recovered from — a branch its owner deleted or force-pushed
+/// left the fetch abandoning its commits and jj asserting that the rewrites
+/// had not been rebased, on every command that fetches, `status` included.
 pub(crate) fn default_import_options() -> GitImportOptions {
     GitImportOptions {
         auto_local_bookmark: true,
-        abandon_unreachable_commits: true,
+        abandon_unreachable_commits: false,
         remote_auto_track_bookmarks: HashMap::new(),
     }
 }

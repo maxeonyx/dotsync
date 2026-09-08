@@ -4,13 +4,13 @@ use std::sync::Arc;
 
 use jj_lib::repo::Repo as _;
 
-use crate::config::DotsyncPaths;
 use crate::drift::{changed_paths, classify_managed_trees, ClassifiedPath, FileState};
 use crate::error::{jj_error, ConflictRole, ConflictedFile, ConflictedVersion, DotsyncError};
 use crate::home::{repo_path_of, Home, Materialized};
+use crate::paths::DotsyncPaths;
 use crate::repo::{
     collect_managed_tree_entries, pending_push_scopes, push_scope_updates, read_entry_bytes,
-    scope_head_commit, scope_head_tree, PushReport,
+    scope_head, scope_head_commit, scope_head_tree, PushReport,
 };
 use crate::session::{in_session, Run, Session};
 use crate::status::FileChange;
@@ -139,7 +139,10 @@ pub(crate) async fn sync_home_to_machine_scope(
     discard_local: bool,
 ) -> Result<SyncReport, DotsyncError> {
     let machine_scope = home.machine_scope().to_string();
-    let head = scope_head_commit(session.repo().as_ref(), &machine_scope)?;
+    let head = match scope_head(session.repo().as_ref(), &machine_scope).is_absent() {
+        true => return Err(machine_scope_missing(session, &machine_scope)),
+        false => scope_head_commit(session.repo().as_ref(), &machine_scope)?,
+    };
     let classified = classify_home_against_head(session, home, &head.tree()).await?;
     let local_changes = changed_paths(&classified, FileState::is_drift);
     let head_paths = collect_managed_tree_entries(&head.tree())?;
@@ -207,12 +210,25 @@ pub(crate) async fn classify_home_against_machine_scope(
     home: &mut Home,
 ) -> Result<BTreeMap<PathBuf, ClassifiedPath>, DotsyncError> {
     let machine_scope = home.machine_scope().to_string();
-    let head = scope_head_tree(session.repo().as_ref(), &machine_scope)
-        .await?
-        .ok_or(DotsyncError::ScopeNotInRepo {
-            scope: machine_scope,
-        })?;
+    let head = match scope_head_tree(session.repo().as_ref(), &machine_scope).await? {
+        Some(head) => head,
+        None => return Err(machine_scope_missing(session, &machine_scope)),
+    };
     classify_home_against_head(session, home, &head).await
+}
+
+/// The stop for a machine whose own scope the repo does not have.
+///
+/// Raised where the head is read rather than when the run starts, because the
+/// fetch in between is what takes a scope away: the reachable way to lose one
+/// is something that is not dotsync renaming or deleting the branch on the
+/// shared remote, and the run finds out about that when it fetches.
+fn machine_scope_missing(session: &Session, machine_scope: &str) -> DotsyncError {
+    DotsyncError::MachineScopeMissing {
+        scope: machine_scope.to_string(),
+        scopes: session.graph().names().map(str::to_string).collect(),
+        root: session.graph().a_root().map(str::to_string),
+    }
 }
 
 /// Reads a conflicted merge out into the stop that presents it: every

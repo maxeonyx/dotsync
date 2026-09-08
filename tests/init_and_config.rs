@@ -1,6 +1,6 @@
-// `dotsync init`: what it creates, the config.toml it writes and preserves
-// when a second machine joins, and what every command says on a machine that
-// has not been initialized yet.
+// `dotsync init` and `dotsync create-scope`: what they create, where a joining
+// machine hangs, and what every command says on a machine that has not been
+// initialized yet.
 
 mod harness;
 use harness::*;
@@ -51,86 +51,77 @@ fn init_reports_no_drift() {
 
     // A machine with no sync state has no record of putting anything in home,
     // so it cannot claim a file missing from home was deleted there. On a fresh
-    // init that is every file the scope holds.
+    // init that is every file the scope holds, and a new fleet's scopes hold
+    // nothing at all.
     let init_output = machine.init();
     assert_stderr_snapshot(
         &init_output,
-        "dotsync: initialized mx-xps-cy and synced 1 file(s)\n",
+        "dotsync: initialized mx-xps-cy and synced 0 file(s)\n",
     );
 }
 
-/// The comments in this file are load-bearing: they are how an agent with no
-/// memory of this machine learns that hyprland config goes on `hyprland` and
-/// not on `linux`. `init` used to generate the scope list with no comments at
-/// all, so the mechanism DESIGN.md and the dotfiles skill both send agents to
-/// produced nothing to read.
+/// Creating a scope is the whole of what can be done to the graph, and the
+/// test the graph work has owed since PLAN §2.3 step 1: a run that reports it
+/// created a scope means the scope exists and can be used. Declaring one in
+/// `config.toml` reported success and created no bookmark, so the scope was
+/// unusable and `dotsync view` broke on every machine in the fleet.
+///
+/// Usable means usable from another machine, which is why this ends on a
+/// second machine reading the file: a scope only earns its name by carrying
+/// config to the machines under it.
 #[test]
-fn init_writes_a_config_whose_comments_teach_scope_choice() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    let config = machine.read_file(".config/dotsync/config.toml");
-    for expected in [
-        "Every scope is a branch",
-        "root-est scope",
-        "`all` — every machine",
-        "`linux` — every machine whose OS is linux",
-        "`mx-xps-cy` — only the machine called mx-xps-cy",
-    ] {
-        assert!(
-            config.contains(expected),
-            "the generated config must explain the scopes it created; missing {expected:?}:\n{config}"
-        );
-    }
-    assert!(
-        config.matches("What belongs here:").count() >= 3,
-        "every scope needs somewhere to write what it is for:\n{config}"
-    );
-
-    let status = machine.run("dotsync status");
-    assert!(
-        status.status.success(),
-        "and the commented file still has to be the file dotsync reads\n{}",
-        render_output(&status)
-    );
-}
-
-/// A second machine joining adds its own scope to the shared config. It used to
-/// re-render that file from the parsed scope graph, which threw away every
-/// comment anyone had written — so the load-bearing comments survived exactly
-/// until the next machine ran `init`.
-#[test]
-fn a_machine_joining_keeps_the_comments_already_in_the_config() {
+fn a_scope_created_on_one_machine_is_usable_from_another() {
     let harness = TestHarness::new();
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
-
     machine_a.init_ok();
 
-    let described = machine_a.read_file(".config/dotsync/config.toml").replace(
-        "\nlinux = ",
-        "\n# hand-written: hyprland and fish config live on `linux`.\nlinux = ",
-    );
-    machine_a.write_file(".config/dotsync/config.toml", &described);
-    machine_a.run_ok("dotsync commit all -m 'describe linux' -- .config/dotsync/config.toml");
+    machine_a.run_ok("dotsync create-scope hyprland --parent linux -m 'wayland compositor config'");
+    machine_a.write_file(".config/hypr/hyprland.conf", "monitor = eDP-1\n");
+    machine_a.run_ok("dotsync commit hyprland -m 'seed hyprland' -- .config/hypr/hyprland.conf");
 
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
-    machine_b.init_ok();
+    let init_b = machine_b.init_with("--parent hyprland");
+    assert!(
+        init_b.status.success(),
+        "a machine has to be able to join under a scope somebody created\n{}",
+        render_output(&init_b)
+    );
+    assert_eq!(
+        machine_b.read_file(".config/hypr/hyprland.conf"),
+        "monitor = eDP-1\n",
+        "and the config on that scope has to reach it\n{}",
+        render_output(&init_b)
+    );
+}
 
-    let joined = machine_b.read_file(".config/dotsync/config.toml");
-    assert!(
-        joined.contains("# hand-written: hyprland and fish config live on `linux`."),
-        "joining a remote must not throw away what the config says:\n{joined}"
+/// A hostname cannot say whether this machine is a `home-linux` or a
+/// `work-linux`, so joining a fleet that already has scopes means naming the
+/// one this machine's config hangs off. A name that is not there is a mistake
+/// dotsync can see immediately, and the graph is append-only — a machine
+/// hung in the wrong place cannot be moved — so this is the last moment the
+/// mistake is cheap.
+#[test]
+fn init_refuses_a_parent_scope_that_does_not_exist() {
+    let harness = TestHarness::new();
+    let machine_a = harness.machine("machine-a", "linux", "goof-a");
+    machine_a.init_ok();
+
+    let machine_b = harness.machine("machine-b", "linux", "goof-b");
+    let joined = machine_b.init_with("--parent hyprland");
+
+    assert_eq!(
+        joined.status.code(),
+        Some(1),
+        "joining under a scope that does not exist has to stop\n{}",
+        render_output(&joined)
     );
-    assert!(
-        joined.contains("goof-b = { parents = [\"linux\"] }"),
-        "while still adding the joining machine's scope:\n{joined}"
-    );
-    assert!(
-        joined.contains("`goof-b` — only the machine called goof-b"),
-        "with the same explanation init writes for a scope it creates:\n{joined}"
-    );
+    let stderr = String::from_utf8_lossy(&joined.stderr).into_owned();
+    for expected in ["hyprland", "linux", "create-scope"] {
+        assert!(
+            stderr.contains(expected),
+            "the stop has to say which scopes there are and how to make one; missing {expected:?}\n{stderr}"
+        );
+    }
 }
 
 /// `repo already exists at <path>` was a one-line dead end: it named a

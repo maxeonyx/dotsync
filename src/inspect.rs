@@ -1,17 +1,16 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use jj_lib::merge::Merge;
 use jj_lib::repo::Repo as _;
 
-use crate::config::DotsyncPaths;
 use crate::drift::{changed_paths, FileState};
 use crate::error::{jj_error, DotsyncError};
 use crate::home::Home;
+use crate::paths::DotsyncPaths;
 use crate::repo::{
     collect_managed_tree_entries, diverged_scopes, read_tree_entry_bytes, scope_head_tree,
 };
-use crate::scope_graph::scope_depth;
 use crate::session::{in_session, Run, Session};
 use crate::sync::{classify_home_against_machine_scope, file_drift, finishing, FileDrift};
 
@@ -19,6 +18,9 @@ use crate::sync::{classify_home_against_machine_scope, file_drift, finishing, Fi
 pub struct ScopeInfo {
     pub name: String,
     pub parents: Vec<String>,
+    /// What the scope is for, in the words of whoever created it. Only there
+    /// when they said.
+    pub description: Option<String>,
 }
 
 /// What `view` found, and the one thing it has to say whatever it was asked.
@@ -83,7 +85,7 @@ pub async fn view(
         // in full — and the answer a lookup failure gave instead was about
         // jj's objects.
         if let Some(scope) = scope {
-            if !session.config().graph.parents.contains_key(scope) {
+            if !session.graph().contains(scope) {
                 return Err(DotsyncError::InvalidScope {
                     scope: scope.to_string(),
                 });
@@ -102,7 +104,7 @@ pub async fn view(
             },
             (None, Some(file)) => {
                 let mut scopes = Vec::new();
-                for scope in scope_list(session)? {
+                for scope in scope_list(session) {
                     if scope_files(session, &scope.name)
                         .await?
                         .iter()
@@ -117,7 +119,7 @@ pub async fn view(
                 }
             }
             (None, None) => {
-                let scopes = scope_list(session)?;
+                let scopes = scope_list(session);
                 let mut files = BTreeSet::new();
                 for scope in &scopes {
                     files.extend(scope_files(session, &scope.name).await?);
@@ -131,7 +133,7 @@ pub async fn view(
 
         Ok(ViewReport {
             paused_cascade: crate::pause::paused_cascade_scope(session.paths())?,
-            diverged_scopes: diverged_scopes(session.repo().as_ref(), &session.config().graph),
+            diverged_scopes: diverged_scopes(session.repo().as_ref(), session.graph()),
             found,
         })
     })
@@ -140,29 +142,28 @@ pub async fn view(
 
 /// The scope graph, root scopes first and alphabetical within a depth, which
 /// is the order the DAG reads in.
-fn scope_list(session: &Session) -> Result<Vec<ScopeInfo>, DotsyncError> {
-    let graph = &session.config().graph;
-    let mut memo = HashMap::new();
-    let mut scopes = graph
-        .parents
-        .iter()
-        .map(|(name, parents)| {
-            Ok((
-                scope_depth(graph, name, &mut memo)?,
+fn scope_list(session: &Session) -> Vec<ScopeInfo> {
+    let graph = session.graph();
+    let mut scopes: Vec<(usize, ScopeInfo)> = graph
+        .scopes()
+        .map(|scope| {
+            (
+                graph.depth(&scope.name),
                 ScopeInfo {
-                    name: name.clone(),
-                    parents: parents.clone(),
+                    name: scope.name.clone(),
+                    parents: scope.parents.clone(),
+                    description: scope.description.clone(),
                 },
-            ))
+            )
         })
-        .collect::<Result<Vec<_>, DotsyncError>>()?;
+        .collect();
     scopes.sort_by(|(left_depth, left), (right_depth, right)| {
         left_depth
             .cmp(right_depth)
             .then_with(|| left.name.cmp(&right.name))
     });
 
-    Ok(scopes.into_iter().map(|(_, scope)| scope).collect())
+    scopes.into_iter().map(|(_, scope)| scope).collect()
 }
 
 /// The files one scope holds. A scope the graph names and the repo has no head
@@ -233,7 +234,7 @@ async fn diff_report(session: &mut Session, home: &mut Home) -> Result<DiffRepor
     Ok(DiffReport {
         machine_scope,
         paused_cascade: crate::pause::paused_cascade_scope(session.paths())?,
-        diverged_scopes: diverged_scopes(session.repo().as_ref(), &session.config().graph),
+        diverged_scopes: diverged_scopes(session.repo().as_ref(), session.graph()),
         drifts,
     })
 }

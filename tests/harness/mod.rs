@@ -117,8 +117,15 @@ impl MachineEnvironment {
     }
 
     pub fn init(&self) -> Output {
+        self.init_with("")
+    }
+
+    /// `init` with whatever else the test is about on the end of it — where
+    /// this machine's scope hangs, which is the one thing a hostname cannot
+    /// say.
+    pub fn init_with(&self, extra: &str) -> Output {
         self.run(&format!(
-            "dotsync init {}",
+            "dotsync init {} {extra}",
             self.remote_dir
                 .to_str()
                 .expect("remote path should be valid UTF-8")
@@ -132,6 +139,18 @@ impl MachineEnvironment {
         assert!(
             output.status.success(),
             "expected `dotsync init` to succeed\n{}",
+            render_output(&output)
+        );
+        output
+    }
+
+    /// `init`, joining a fleet that already has scopes — which means saying
+    /// where this machine's config comes from.
+    pub fn init_ok_under(&self, parent: &str) -> Output {
+        let output = self.init_with(&format!("--parent {parent}"));
+        assert!(
+            output.status.success(),
+            "expected `dotsync init --parent {parent}` to succeed\n{}",
             render_output(&output)
         );
         output
@@ -746,36 +765,68 @@ pub fn remove_remote_scope_file(machine: &MachineEnvironment, scope: &str, relat
     git_push(&clone_dir, scope);
 }
 
+/// Adds a scope between `linux` and the machine's own, the way a fleet grows
+/// one: created by dotsync on one machine, and reached by the machines that
+/// join under it.
 pub fn add_hyprland_scope(machine: &MachineEnvironment) {
-    let clone_dir = machine.home_dir.join("remote-all.ignore");
+    let created = machine.run("dotsync create-scope hyprland --parent linux");
+    assert!(created.status.success(), "{}", render_output(&created));
+}
+
+/// Pushes a branch that has nothing to do with dotsync, the way anything else
+/// sharing the remote would: a plain git client, one commit, its own name.
+/// Returns where it left it.
+pub fn push_a_branch_with_a_plain_git_client(
+    machine: &MachineEnvironment,
+    branch: &str,
+    relative: &str,
+    contents: &str,
+) -> String {
+    let clone_dir = machine.home_dir.join(format!("remote-{branch}.ignore"));
     if clone_dir.exists() {
-        fs::remove_dir_all(&clone_dir).expect("remove old remote all clone dir");
+        fs::remove_dir_all(&clone_dir).expect("remove old remote clone dir");
     }
     clone_remote_branch_to(&clone_dir, &machine.remote_dir, "all");
+    git_checkout_new_branch(&clone_dir, branch);
+    write_file_at(&clone_dir.join(relative), contents);
+    git_commit_all(&clone_dir, &format!("test: {branch} {relative}"));
+    git_push(&clone_dir, branch);
+    remote_branch_revision(machine, branch)
+}
 
-    let config_path = clone_dir.join(".config/dotsync/config.toml");
-    let original = fs::read_to_string(&config_path).expect("read remote config");
-    // Edited the way a person would: one scope entry at a time, leaving the
-    // comments dotsync wrote between them where they are.
-    let updated = original.replace(
-        "mx-xps-cy = { parents = [\"linux\"] }",
-        "hyprland = { parents = [\"linux\"] }\nmx-xps-cy = { parents = [\"hyprland\"] }",
-    );
-    assert_ne!(
-        updated, original,
-        "expected init config shape to match test harness"
-    );
-    fs::write(&config_path, updated).expect("write remote config");
-    git_commit_all(&clone_dir, "test: add hyprland scope");
-    git_push(&clone_dir, "all");
+/// Moves a branch back one commit and force-pushes it, which is the other
+/// half of what a person does with a branch of their own.
+pub fn rewind_a_branch_with_a_plain_git_client(
+    machine: &MachineEnvironment,
+    branch: &str,
+) -> String {
+    let clone_dir = machine.home_dir.join(format!("remote-{branch}.ignore"));
+    let reset = git_in(&clone_dir, &["reset", "--hard", "HEAD~1"]);
+    assert!(reset.status.success(), "{}", render_output(&reset));
+    let push = git_in(&clone_dir, &["push", "--force", "origin", branch]);
+    assert!(push.status.success(), "{}", render_output(&push));
+    remote_branch_revision(machine, branch)
+}
 
-    let hyprland_clone_dir = machine.home_dir.join("remote-hyprland.ignore");
-    if hyprland_clone_dir.exists() {
-        fs::remove_dir_all(&hyprland_clone_dir).expect("remove old remote hyprland clone dir");
-    }
-    clone_remote_branch_to(&hyprland_clone_dir, &machine.remote_dir, "linux");
-    git_checkout_new_branch(&hyprland_clone_dir, "hyprland");
-    git_push(&hyprland_clone_dir, "hyprland");
+pub fn delete_a_branch_with_a_plain_git_client(machine: &MachineEnvironment, branch: &str) {
+    let delete = git_in(&machine.remote_dir, &["branch", "-D", branch]);
+    assert!(delete.status.success(), "{}", render_output(&delete));
+}
+
+/// Every branch the shared remote holds. Read from the remote rather than from
+/// this machine's repo, because the remote is the state every other machine
+/// and every other client sees.
+pub fn remote_branches(machine: &MachineEnvironment) -> Vec<String> {
+    let output = git_in(
+        &machine.remote_dir,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+    );
+    assert!(output.status.success(), "{}", render_output(&output));
+    String::from_utf8(output.stdout)
+        .expect("git for-each-ref output should be utf-8")
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 pub fn merge_remote_scope_into(machine: &MachineEnvironment, source: &str, target: &str) {
@@ -1089,8 +1140,7 @@ pub fn pause_a_conflict_on(
 
     let init_a = machine_a.init();
     assert!(init_a.status.success(), "{}", render_output(&init_a));
-    let init_b = machine_b.init();
-    assert!(init_b.status.success(), "{}", render_output(&init_b));
+    machine_b.init_ok_under("linux");
     let sync_a_after_join = machine_a.run("dotsync --force");
     assert!(
         sync_a_after_join.status.success(),
@@ -1186,15 +1236,16 @@ pub fn dotsync_args(command: &str) -> Vec<String> {
 }
 
 /// Two machines on one remote, both initialised and both synced to the same
-/// state. `machine_a` syncs last because `machine_b`'s init adds its own scope
-/// to the shared scope graph, which reaches `machine_a`'s home config.
+/// state. `machine_a` goes first, because it is the one that creates the
+/// fleet: `machine_b` joins the graph `machine_a` started, under the shared
+/// `linux` scope.
 pub fn two_synced_machines(harness: &TestHarness) -> (MachineEnvironment, MachineEnvironment) {
     let machine_a = harness.machine("machine-a", "linux", "goof-a");
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
 
     let init_a = machine_a.init();
     assert!(init_a.status.success(), "{}", render_output(&init_a));
-    let init_b = machine_b.init();
+    let init_b = machine_b.init_with("--parent linux");
     assert!(init_b.status.success(), "{}", render_output(&init_b));
     let sync_a = machine_a.run("dotsync --force");
     assert!(sync_a.status.success(), "{}", render_output(&sync_a));

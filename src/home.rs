@@ -54,9 +54,9 @@ use jj_lib::ref_name::WorkspaceNameBuf;
 use jj_lib::repo::Repo as _;
 use jj_lib::working_copy::{LockedWorkingCopy as _, SnapshotOptions, WorkingCopyFreshness};
 
-use crate::config::{DotsyncPaths, SHED_SYNC_STATE_RELATIVE_PATH};
 use crate::error::{jj_error, DotsyncError};
 use crate::machine::{detect_machine, machine_signature};
+use crate::paths::{DotsyncPaths, SHED_SYNC_STATE_RELATIVE_PATH};
 use crate::repo::scope_head_commit;
 use crate::session::Session;
 use crate::working_copy::{HomeLockedWorkingCopy, HomeWorkingCopy};

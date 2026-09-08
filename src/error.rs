@@ -177,8 +177,6 @@ pub enum CommitPathProblem {
     Unmatched {
         home_path: PathBuf,
     },
-    /// The scope graph, named for a scope other than `all`.
-    ScopeGraphOutsideAllScope,
     DotsyncRepoRoot {
         repo_root: PathBuf,
     },
@@ -204,9 +202,6 @@ impl RejectedCommitPath {
                 "`{path}` matched nothing: no file exists at or under {}, and scope `{scope}` tracks no file at or under `{path}`.",
                 home_path.display()
             ),
-            CommitPathProblem::ScopeGraphOutsideAllScope => format!(
-                "`{path}` is the scope graph, and dotsync only reads it from `all`; a copy recorded on `{scope}` would configure nothing, and would still overwrite the real one in home on every machine using that scope."
-            ),
             CommitPathProblem::DotsyncRepoRoot { repo_root } => format!(
                 "`{path}` is dotsync's hidden repo itself, at {}, which is where dotsync stores every scope.",
                 repo_root.display()
@@ -224,12 +219,6 @@ impl RejectedCommitPath {
             self.problem,
             CommitPathProblem::DotsyncRepoRoot { .. } | CommitPathProblem::InsideDotsyncRepo { .. }
         )
-    }
-
-    /// Read by the binary's renderer to point at the one scope that owns the
-    /// scope graph.
-    pub fn is_scope_graph(&self) -> bool {
-        matches!(self.problem, CommitPathProblem::ScopeGraphOutsideAllScope)
     }
 
     /// Read by the binary's renderer to say what to name instead of home.
@@ -277,24 +266,48 @@ pub enum DotsyncError {
         #[source]
         source: std::io::Error,
     },
-    /// The config file could not be edited to add this machine's scopes. The
-    /// parse that produced it succeeded, so this is dotsync disagreeing with
-    /// itself rather than a file a person got wrong.
-    #[error("failed to update config {path}: {message}")]
-    ConfigEdit { path: PathBuf, message: String },
-    #[error("failed to parse config {path}: {source}")]
-    ConfigParse {
-        path: PathBuf,
-        #[source]
-        source: toml::de::Error,
+    /// A scope named as a parent that the repo has no scope for. Carries the
+    /// scopes it does have, because the answer to "which ones are there" is
+    /// the whole of what the reader needs and dotsync has it in hand.
+    #[error("there is no scope called `{parent}`")]
+    NoSuchParentScope { parent: String, scopes: Vec<String> },
+    /// Creating a scope without saying where it hangs. The graph is
+    /// append-only, so this is the only moment that answer can be given.
+    #[error("scope `{scope}` needs at least one parent scope")]
+    ParentScopeRequired { scope: String, scopes: Vec<String> },
+    /// A machine trying to adopt a scope other scopes already hang off.
+    /// Config on a scope reaches every machine below it, so such a scope
+    /// cannot be one machine's own.
+    #[error("scope `{scope}` is shared with {}", children.join(", "))]
+    MachineScopeIsShared {
+        scope: String,
+        children: Vec<String>,
     },
-    #[error("scope `{scope}` references missing parent `{parent}`")]
-    MissingParent { scope: String, parent: String },
-    #[error("scope graph contains a cycle involving `{scope}`")]
-    ScopeCycle { scope: String },
-    #[error("unable to determine current machine scope")]
-    NoCurrentScope,
-    #[error("scope `{scope}` does not exist in config")]
+    /// `init --parent` on a machine whose scope the fleet already has. Where
+    /// it hangs was decided when it was created and cannot be changed.
+    #[error("scope `{scope}` already exists")]
+    MachineScopeAlreadyPlaced { scope: String, parents: Vec<String> },
+    /// This machine's hostname names no scope in the repo — nothing has been
+    /// created for it, or something outside dotsync moved the branch it was
+    /// on.
+    #[error("this machine has no scope of its own: nothing in the repo is called `{scope}`")]
+    MachineScopeMissing {
+        scope: String,
+        scopes: Vec<String>,
+        /// A scope with no parents, when the repo has one. The stop needs a
+        /// parent it can name outright, and a root is the answer that assumes
+        /// least about where this machine belongs.
+        root: Option<String>,
+    },
+    /// Creating a scope over a name the repo already uses. A scope is created
+    /// once, and a branch that is not a scope belongs to whoever pushed it.
+    #[error("`{scope}` already exists on the remote")]
+    ScopeNameTaken { scope: String },
+    /// A scope created under parents that hold different versions of the same
+    /// file. Its first commit would be a conflict nobody asked for.
+    #[error("scope `{scope}` cannot be created while its parents disagree about {}", files.join(", "))]
+    ScopeCreationConflict { scope: String, files: Vec<String> },
+    #[error("scope `{scope}` does not exist")]
     InvalidScope { scope: String },
     /// Asked for a file on a scope that does not hold it. An ordinary answer
     /// to an ordinary question — a file exists on the scope that added it and
@@ -394,11 +407,13 @@ impl DotsyncError {
             | DotsyncError::UnusableCommitPaths { .. }
             | DotsyncError::StaleCommitPaths { .. }
             | DotsyncError::Io { .. }
-            | DotsyncError::ConfigParse { .. }
-            | DotsyncError::ConfigEdit { .. }
-            | DotsyncError::MissingParent { .. }
-            | DotsyncError::ScopeCycle { .. }
-            | DotsyncError::NoCurrentScope
+            | DotsyncError::NoSuchParentScope { .. }
+            | DotsyncError::ParentScopeRequired { .. }
+            | DotsyncError::MachineScopeIsShared { .. }
+            | DotsyncError::MachineScopeAlreadyPlaced { .. }
+            | DotsyncError::MachineScopeMissing { .. }
+            | DotsyncError::ScopeNameTaken { .. }
+            | DotsyncError::ScopeCreationConflict { .. }
             | DotsyncError::InvalidScope { .. }
             | DotsyncError::ScopeDiverged { .. }
             | DotsyncError::ScopeNotInRepo { .. }
@@ -429,13 +444,27 @@ impl DotsyncError {
             },
             DotsyncError::InvalidScope { .. } => basic_error_report("invalid_scope", self),
             DotsyncError::ScopeDiverged { .. } => basic_error_report("scope_diverged", self),
-            DotsyncError::NoCurrentScope => basic_error_report("no_current_scope", self),
             DotsyncError::ScopeNotInRepo { .. } => basic_error_report("scope_not_in_repo", self),
             DotsyncError::FileNotOnScope { .. } => basic_error_report("file_not_on_scope", self),
-            DotsyncError::MissingParent { .. } => basic_error_report("missing_parent", self),
-            DotsyncError::ScopeCycle { .. } => basic_error_report("scope_cycle", self),
-            DotsyncError::ConfigParse { .. } => basic_error_report("config_parse", self),
-            DotsyncError::ConfigEdit { .. } => basic_error_report("config_edit", self),
+            DotsyncError::NoSuchParentScope { .. } => {
+                basic_error_report("no_such_parent_scope", self)
+            }
+            DotsyncError::ParentScopeRequired { .. } => {
+                basic_error_report("parent_scope_required", self)
+            }
+            DotsyncError::MachineScopeIsShared { .. } => {
+                basic_error_report("machine_scope_is_shared", self)
+            }
+            DotsyncError::MachineScopeAlreadyPlaced { .. } => {
+                basic_error_report("machine_scope_already_placed", self)
+            }
+            DotsyncError::MachineScopeMissing { .. } => {
+                basic_error_report("machine_scope_missing", self)
+            }
+            DotsyncError::ScopeNameTaken { .. } => basic_error_report("scope_name_taken", self),
+            DotsyncError::ScopeCreationConflict { .. } => {
+                basic_error_report("scope_creation_conflict", self)
+            }
             DotsyncError::CascadePaused { .. } => basic_error_report("cascade_paused", self),
             DotsyncError::PausedCascadeInProgress { .. } => {
                 basic_error_report("paused_cascade_in_progress", self)
@@ -556,17 +585,39 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Vec<String> {
             "expected repo path: {}; standard location: ~/.local/share/dotsync/repo",
             path.display()
         )],
+        DotsyncError::NoSuchParentScope { parent, scopes }
+        | DotsyncError::MachineScopeMissing {
+            scope: parent,
+            scopes,
+            ..
+        } => vec![scopes_in_the_repo(parent, scopes)],
+        DotsyncError::ParentScopeRequired { scope, scopes } => vec![format!(
+            "creating scope: {scope}; {}",
+            if scopes.is_empty() {
+                "this remote has no scopes yet".to_string()
+            } else {
+                format!("scopes in the repo: {}", scopes.join(", "))
+            }
+        )],
+        DotsyncError::MachineScopeIsShared { scope, children } => vec![format!(
+            "scope: {scope}; scopes hanging off it: {}",
+            children.join(", ")
+        )],
+        DotsyncError::MachineScopeAlreadyPlaced { scope, parents } => vec![format!(
+            "scope: {scope}; it already hangs off: {}",
+            parents.join(", ")
+        )],
+        DotsyncError::ScopeCreationConflict { scope, files } => vec![format!(
+            "scope: {scope}; its parents hold different versions of: {}",
+            files.join(", ")
+        )],
         DotsyncError::HomeNotSet
         | DotsyncError::NonUtf8Path { .. }
         | DotsyncError::GitSubmodule { .. }
         | DotsyncError::NotARegularFile { .. }
         | DotsyncError::NoPausedCascade
         | DotsyncError::Io { .. }
-        | DotsyncError::ConfigParse { .. }
-        | DotsyncError::ConfigEdit { .. }
-        | DotsyncError::MissingParent { .. }
-        | DotsyncError::ScopeCycle { .. }
-        | DotsyncError::NoCurrentScope
+        | DotsyncError::ScopeNameTaken { .. }
         | DotsyncError::ScopeNotInRepo { .. }
         | DotsyncError::FileNotOnScope { .. }
         | DotsyncError::RepoAlreadyExists { .. }
@@ -574,6 +625,18 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Vec<String> {
         | DotsyncError::RemoteUnreachable { .. }
         | DotsyncError::Jj { .. } => Vec::new(),
         DotsyncError::PartialInitLeftBehind { original, .. } => error_current_state(original),
+    }
+}
+
+/// What the repo does have, for a stop about a scope name it does not.
+fn scopes_in_the_repo(named: &str, scopes: &[String]) -> String {
+    if scopes.is_empty() {
+        format!("named scope: {named}; this remote has no scopes yet")
+    } else {
+        format!(
+            "named scope: {named}; scopes in the repo: {}",
+            scopes.join(", ")
+        )
     }
 }
 

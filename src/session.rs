@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use jj_lib::repo::ReadonlyRepo;
 
-use crate::config::{load_config, DotsyncConfig, DotsyncPaths};
 use crate::error::DotsyncError;
+use crate::paths::DotsyncPaths;
 use crate::repo::{diverged_scopes, fetch_origin, load_repo_direct, scope_diverged};
+use crate::scope_graph::{self, ScopeGraph};
 
 /// Everything one run of dotsync knows: where home and the hidden repo are,
 /// the repo as this run opened it, the scope graph read out of that repo, and
@@ -19,7 +20,7 @@ use crate::repo::{diverged_scopes, fetch_origin, load_repo_direct, scope_diverge
 pub(crate) struct Session {
     paths: DotsyncPaths,
     repo: Arc<ReadonlyRepo>,
-    config: DotsyncConfig,
+    graph: ScopeGraph,
     unreachable_remote: Option<UnreachableRemote>,
 }
 
@@ -35,11 +36,11 @@ impl Session {
         paths: &DotsyncPaths,
         repo: Arc<ReadonlyRepo>,
     ) -> Result<Self, DotsyncError> {
-        let config = load_config(paths, repo.as_ref()).await?;
+        let graph = scope_graph::derive(repo.as_ref())?;
         Ok(Self {
             paths: paths.clone(),
             repo,
-            config,
+            graph,
             unreachable_remote: None,
         })
     }
@@ -48,8 +49,8 @@ impl Session {
         &self.paths
     }
 
-    pub(crate) fn config(&self) -> &DotsyncConfig {
-        &self.config
+    pub(crate) fn graph(&self) -> &ScopeGraph {
+        &self.graph
     }
 
     pub(crate) fn repo(&self) -> &Arc<ReadonlyRepo> {
@@ -96,7 +97,7 @@ impl Session {
     /// five different outcomes, two of them silent.
     pub(crate) async fn converge(&mut self) -> Result<(), DotsyncError> {
         self.fetch().await?;
-        match diverged_scopes(self.repo.as_ref(), &self.config.graph)
+        match diverged_scopes(self.repo.as_ref(), &self.graph)
             .first()
             .map(|scope| scope_diverged(self.repo.view(), scope))
         {
@@ -109,10 +110,10 @@ impl Session {
     /// the run reads what that transaction wrote instead of re-opening the
     /// repo from disk to find it.
     pub(crate) async fn advance_to(&mut self, repo: Arc<ReadonlyRepo>) -> Result<(), DotsyncError> {
-        // A fetch fast-forwards `all`, and a commit or a cascade can write to
-        // it, so the graph is re-read rather than assumed to be the one this
-        // session opened with.
-        self.config = load_config(&self.paths, repo.as_ref()).await?;
+        // A fetch can bring a scope another machine created, and this run can
+        // create one itself, so the graph is re-read rather than assumed to be
+        // the one this session opened with.
+        self.graph = scope_graph::derive(repo.as_ref())?;
         self.repo = repo;
         Ok(())
     }
