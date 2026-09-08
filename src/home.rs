@@ -55,7 +55,7 @@ use jj_lib::repo::Repo as _;
 use jj_lib::working_copy::{LockedWorkingCopy as _, SnapshotOptions, WorkingCopyFreshness};
 
 use crate::error::{jj_error, DotsyncError};
-use crate::machine::{detect_machine, machine_signature};
+use crate::machine::machine_signature;
 use crate::paths::{DotsyncPaths, SHED_SYNC_STATE_RELATIVE_PATH};
 use crate::repo::scope_head_commit;
 use crate::session::Session;
@@ -103,7 +103,7 @@ impl Home {
         session: &mut Session,
         paths: &DotsyncPaths,
     ) -> Result<Self, DotsyncError> {
-        let machine_scope = detect_machine()?.machine_scope;
+        let machine_scope = session.machine_scope().to_string();
         let workspace: WorkspaceNameBuf = machine_scope.as_str().into();
         let store = session.repo().store().clone();
         let state_path = paths.repo_root.join(".jj/working_copy");
