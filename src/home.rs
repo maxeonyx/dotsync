@@ -451,11 +451,10 @@ impl Home {
     /// tree is materialized whole and every local change at a managed path is
     /// gone.
     ///
-    /// That is the one question `--force` asks — "overwrite what is in home?" —
-    /// and it cannot be answered by `materialize`, whose whole job is to carry
-    /// local changes across. It is also the operation `discard <paths>` narrows
-    /// to a path list (PLAN §2.3 step 7); the whole-home version is what the
-    /// flag can express.
+    /// It cannot be answered by `materialize`, whose whole job is to carry
+    /// local changes across. `init` and `abort` are the commands that ask it:
+    /// both exist to take the head's side of everything. `discard` asks the
+    /// same question about named paths, through `materialize_taking_head_at`.
     pub(crate) async fn materialize_discarding_local(
         &mut self,
         session: &mut Session,
@@ -653,7 +652,7 @@ impl Home {
     ///
     /// Every command that moves home to a new head ends here — the ordinary
     /// merge, the resolution `continue` writes, and the head-wins tree
-    /// `--force` asks for — because the difference between them is entirely in
+    /// `abort` and `discard` ask for — because the difference between them is entirely in
     /// which tree they arrive with. Keeping the pair in one place is what makes
     /// "the wc commit describes home" hold by construction rather than by three
     /// call sites each remembering the second half.

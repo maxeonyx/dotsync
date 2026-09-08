@@ -44,13 +44,6 @@ pub(crate) struct Selection {
     /// never silent: a bulk selection that quietly recorded less than it
     /// matched would read to an agent as a complete commit.
     pub(crate) skipped: Vec<SkippedCommitPath>,
-    /// The paths `--force` covers. These skip the merge below entirely: the
-    /// point of forcing is that home wins here whatever the repo says.
-    pub(crate) forced_paths: Vec<PathBuf>,
-    /// The forced paths where that authority actually decided something —
-    /// where, without it, the commit would have been refused or would have
-    /// merged rather than overwritten.
-    pub(crate) forced_overwrites: Vec<PathBuf>,
 }
 
 /// Decides which paths a commit records and whether it is allowed to.
@@ -114,9 +107,7 @@ pub(crate) async fn select_changes_to_record(
             let mut selected = selection.named.clone();
             for relative in &selection.under_directory {
                 let state = state_of(&classified, relative);
-                // `--force` is the explicit claim that home wins for what this
-                // command named, so it reaches under a named directory too.
-                if !options.force && !selection.named.contains(relative) && state.blocks_commit() {
+                if !selection.named.contains(relative) && state.blocks_commit() {
                     skipped.push(SkippedCommitPath {
                         path: relative.clone(),
                         reason: SkipReason::NotChangedHere(state),
@@ -134,43 +125,27 @@ pub(crate) async fn select_changes_to_record(
         .cloned()
         .collect::<Vec<_>>();
 
-    if !options.force {
-        let refused = selected_paths
-            .iter()
-            .filter_map(|relative| {
-                let state = state_of(&classified, relative);
-                state.blocks_commit().then(|| RefusedCommitPath {
-                    path: relative.clone(),
-                    state,
-                })
+    let refused = selected_paths
+        .iter()
+        .filter_map(|relative| {
+            let state = state_of(&classified, relative);
+            state.blocks_commit().then(|| RefusedCommitPath {
+                path: relative.clone(),
+                state,
             })
-            .collect::<Vec<_>>();
-        if !refused.is_empty() {
-            return Err(DotsyncError::StaleCommitPaths {
-                scope: options.scope.clone(),
-                refused,
-            });
-        }
-        return Ok(Selection {
-            paths: selected_paths,
-            newly_tracked,
-            skipped,
-            forced_paths: Vec::new(),
-            forced_overwrites: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    if !refused.is_empty() {
+        return Err(DotsyncError::StaleCommitPaths {
+            scope: options.scope.clone(),
+            refused,
         });
     }
 
-    let forced_overwrites = selected_paths
-        .iter()
-        .filter(|relative| state_of(&classified, relative).forcing_decides_something())
-        .cloned()
-        .collect::<Vec<_>>();
     Ok(Selection {
-        forced_paths: selected_paths.clone(),
         paths: selected_paths,
         newly_tracked,
         skipped,
-        forced_overwrites,
     })
 }
 

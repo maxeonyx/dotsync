@@ -1163,7 +1163,7 @@ pub fn pause_a_conflict_on(
     let init_a = machine_a.init();
     assert!(init_a.status.success(), "{}", render_output(&init_a));
     machine_b.init_ok_under("linux");
-    let sync_a_after_join = machine_a.run("dotsync --force");
+    let sync_a_after_join = machine_a.run("dotsync");
     assert!(
         sync_a_after_join.status.success(),
         "{}",
@@ -1269,7 +1269,7 @@ pub fn two_synced_machines(harness: &TestHarness) -> (MachineEnvironment, Machin
     assert!(init_a.status.success(), "{}", render_output(&init_a));
     let init_b = machine_b.init_with("--parent linux");
     assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a = machine_a.run("dotsync --force");
+    let sync_a = machine_a.run("dotsync");
     assert!(sync_a.status.success(), "{}", render_output(&sync_a));
 
     (machine_a, machine_b)

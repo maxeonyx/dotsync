@@ -325,11 +325,10 @@ fn holds_conflict_markers(bytes: &[u8]) -> bool {
 
 pub async fn continue_after_conflict(
     paths: &DotsyncPaths,
-    discard_local: bool,
 ) -> Run<Result<ContinueReport, DotsyncError>> {
     in_session(paths, async |session, paths| {
         let mut home = Home::acquire(session, paths).await?;
-        let outcome = continue_in_session(session, &mut home, discard_local).await;
+        let outcome = continue_in_session(session, &mut home).await;
         finishing(home, session, outcome).await
     })
     .await
@@ -344,13 +343,11 @@ pub async fn continue_after_conflict(
 async fn continue_in_session(
     session: &mut Session,
     home: &mut Home,
-    discard_local: bool,
 ) -> Result<ContinueReport, DotsyncError> {
     let recorded = load_paused_run(session.paths())?;
     if let Some(paused_commit) = recorded.as_ref().and_then(|run| run.paused_commit.clone()) {
         let checkpoint = recorded.map(|run| run.checkpoint).unwrap_or_default();
-        return finish_the_paused_commit(session, home, paused_commit, checkpoint, discard_local)
-            .await;
+        return finish_the_paused_commit(session, home, paused_commit, checkpoint).await;
     }
     let Some(pause) =
         converge::pending_pause(session.repo(), session.graph(), session.machine_scope()).await?
@@ -360,7 +357,7 @@ async fn continue_in_session(
     let checkpoint = recorded
         .map(|run| run.checkpoint)
         .unwrap_or_else(|| converge::checkpoint(session.repo().as_ref(), session.graph()));
-    finish_the_paused_convergence(session, home, pause, checkpoint, discard_local).await
+    finish_the_paused_convergence(session, home, pause, checkpoint).await
 }
 
 /// The pass again, with home's bytes as the answer at exactly the paths it
@@ -375,7 +372,6 @@ async fn finish_the_paused_convergence(
     home: &mut Home,
     pause: converge::Pause,
     checkpoint: BTreeMap<String, String>,
-    discard_local: bool,
 ) -> Result<ContinueReport, DotsyncError> {
     let machine_scope = session.machine_scope().to_string();
     let conflicted = conflicted_paths_of(&pause.merged, &pause.scope)?;
@@ -405,7 +401,7 @@ async fn finish_the_paused_convergence(
     }
     remove_paused_run(session.paths())?;
     let push = publish_or_pause(session, home, &checkpoint).await?;
-    finished_resolving(session, home, pause.scope, conflicted, discard_local, push).await
+    finished_resolving(session, home, pause.scope, conflicted, push).await
 }
 
 /// The `commit` whose own merge stopped it, finished: merge its parent again,
@@ -420,7 +416,6 @@ async fn finish_the_paused_commit(
     home: &mut Home,
     paused: PausedCommit,
     checkpoint: BTreeMap<String, String>,
-    discard_local: bool,
 ) -> Result<ContinueReport, DotsyncError> {
     let repo = session.repo().clone();
     let parent = load_commit_by_hex(repo.as_ref(), &paused.parent_commit_id)?;
@@ -464,7 +459,7 @@ async fn finish_the_paused_commit(
     remove_paused_run(session.paths())?;
     converge_or_pause(session, home, &checkpoint).await?;
     let push = publish_or_pause(session, home, &checkpoint).await?;
-    finished_resolving(session, home, paused.scope, conflicted, discard_local, push).await
+    finished_resolving(session, home, paused.scope, conflicted, push).await
 }
 
 /// The end both resolutions share: home stops holding the answer, because the
@@ -480,15 +475,12 @@ async fn finished_resolving(
     home: &mut Home,
     scope: String,
     conflicted: Vec<PathBuf>,
-    discard_local: bool,
     push: PushReport,
 ) -> Result<ContinueReport, DotsyncError> {
     let borrowed_from = borrowed_from(session, home.machine_scope(), &scope);
-    let local = match discard_local {
-        true => LocalChanges::Discard,
-        false => LocalChanges::DiscardAt(conflicted),
-    };
-    let sync = crate::sync::sync_home_to_machine_scope(session, home, local).await?;
+    let sync =
+        crate::sync::sync_home_to_machine_scope(session, home, LocalChanges::DiscardAt(conflicted))
+            .await?;
     Ok(ContinueReport {
         resumed: Resumed::Cascade {
             borrowed_from,
@@ -608,9 +600,7 @@ async fn abort_in_session(
     // exactly what abort exists to discard, so it cannot also be a reason to
     // refuse. Drift outside the paused selection goes the same way, which is
     // what DESIGN.md's "reverts all the config files" says and what the old
-    // selective restore quietly did not do. That is the same discarding sync
-    // `dotsync --force` runs, which is why `abort` refuses the flag: it has
-    // already made that choice.
+    // selective restore quietly did not do.
     let sync =
         crate::sync::sync_home_to_machine_scope(session, home, LocalChanges::Discard).await?;
 

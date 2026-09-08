@@ -21,10 +21,6 @@ pub struct ErrorReport {
     /// whoever is rendering, and a reader that has to split them back apart on
     /// a newline is reading a rendering rather than an answer.
     pub current_state: Vec<String>,
-    /// What the run had already overwritten under `--force` when it stopped.
-    /// Empty for every error raised before a run can overwrite anything, which
-    /// is all of them except a commit that failed after writing its history.
-    pub forced_overwrites: Vec<PathBuf>,
     /// The files a stop could not merge, each with every version of it.
     pub conflicts: Vec<ConflictedFile>,
 }
@@ -263,6 +259,12 @@ pub enum DotsyncError {
     },
     #[error("{} conflicted file(s) still hold conflict markers", paths.len())]
     UnresolvedConflict { scope: String, paths: Vec<PathBuf> },
+    /// `discard` naming a path that holds no change of this machine's own.
+    /// There is nothing at it to decide against — the path is a typo, or the
+    /// file is already whatever the scope says it is — and a run that answered
+    /// "discarded 0 file(s)" would read as having done the job.
+    #[error("{}", one_or_many(paths.len(), "there is no change of yours to discard at the path you named", "there is no change of yours to discard at {n} of the paths you named"))]
+    NothingToDiscard { paths: Vec<PathBuf> },
     #[error("failed to read {path}: {source}")]
     Io {
         path: PathBuf,
@@ -415,6 +417,7 @@ impl DotsyncError {
             | DotsyncError::NotARegularFile { .. }
             | DotsyncError::UnusableCommitPaths { .. }
             | DotsyncError::StaleCommitPaths { .. }
+            | DotsyncError::NothingToDiscard { .. }
             | DotsyncError::Io { .. }
             | DotsyncError::NoSuchParentScope { .. }
             | DotsyncError::ParentScopeRequired { .. }
@@ -448,7 +451,6 @@ impl DotsyncError {
                 drifts: Vec::new(),
                 paused_cascade: self.paused_scope().map(str::to_string),
                 current_state: error_current_state(self),
-                forced_overwrites: Vec::new(),
                 conflicts: files.clone(),
             },
             DotsyncError::CascadePaused { files, .. } => ErrorReport {
@@ -457,7 +459,6 @@ impl DotsyncError {
                 drifts: Vec::new(),
                 paused_cascade: self.paused_scope().map(str::to_string),
                 current_state: error_current_state(self),
-                forced_overwrites: Vec::new(),
                 conflicts: files.clone(),
             },
             DotsyncError::InvalidScope { .. } => basic_error_report("invalid_scope", self),
@@ -498,7 +499,6 @@ impl DotsyncError {
                 drifts: Vec::new(),
                 paused_cascade: self.paused_scope().map(str::to_string),
                 current_state: error_current_state(self),
-                forced_overwrites: Vec::new(),
                 conflicts: Vec::new(),
             },
             DotsyncError::MissingHostname => basic_error_report("missing_hostname", self),
@@ -528,6 +528,9 @@ impl DotsyncError {
             DotsyncError::UnresolvedConflict { .. } => {
                 basic_error_report("unresolved_conflict", self)
             }
+            DotsyncError::NothingToDiscard { .. } => {
+                basic_error_report("nothing_to_discard", self)
+            }
         }
     }
 }
@@ -539,7 +542,6 @@ pub(crate) fn basic_error_report(code: &'static str, error: &DotsyncError) -> Er
         drifts: Vec::new(),
         paused_cascade: error.paused_scope().map(str::to_string),
         current_state: error_current_state(error),
-        forced_overwrites: Vec::new(),
         conflicts: Vec::new(),
     }
 }
@@ -584,6 +586,16 @@ pub(crate) fn error_current_state(error: &DotsyncError) -> Vec<String> {
                 .join(", ")
         )],
         DotsyncError::PausedCascadeInProgress { scope } => vec![format!("paused scope: {scope}")],
+        // One entry per path, the shape every other list of named paths uses.
+        DotsyncError::NothingToDiscard { paths } => paths
+            .iter()
+            .map(|path| {
+                format!(
+                    "`{}` holds no change of this machine's own: dotsync either does not manage it, or home already holds what the scope says it should.",
+                    path.display()
+                )
+            })
+            .collect(),
         // One entry per file, because one file is one thing to resolve. Every
         // version of it is printed in full below the teaching block and
         // carried in the payload; this is the list of decisions to make.

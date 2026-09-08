@@ -114,14 +114,14 @@ fn an_untracked_home_file_is_not_overwritten_by_an_incoming_add() {
         "dotsync must not silently overwrite home content it has never seen"
     );
 
-    machine_a.run_ok("dotsync --force");
+    machine_a.run_ok("dotsync discard .newfile");
     assert_eq!(machine_a.read_file(".newfile"), "theirs\n");
 }
 
 /// Deleting a managed file from home is a local change like any other: `diff`
 /// shows what it would discard, an ordinary sync carries it rather than
 /// stopping on it or quietly putting the file back, `commit` records it, and
-/// `--force` is how you change your mind.
+/// and `dotsync discard` is how you change your mind.
 #[test]
 fn deleting_a_managed_file_is_a_change_the_sync_carries_and_commit_records() {
     let harness = TestHarness::new();
@@ -163,9 +163,9 @@ fn deleting_a_managed_file_is_a_change_the_sync_carries_and_commit_records() {
         "and the deletion is still this machine's to decide about"
     );
 
-    // Changing your mind: `--force` discards the deletion with every other
-    // local change.
-    machine.run_ok("dotsync --force");
+    // Changing your mind: the deletion is a local change like any other, so
+    // discarding it is what puts the file back.
+    machine.run_ok("dotsync discard .bashrc");
     assert_eq!(machine.read_file(".bashrc"), "export DOTSYNC=repo\n");
 
     machine.delete_file(".bashrc");
@@ -273,39 +273,6 @@ dotsync: 1 incoming file(s) for goof-a — plain `dotsync` applies these
     );
 }
 
-/// A forced sync is the one thing plain `dotsync` does that cannot be undone:
-/// it throws away what is in home. The notes on stderr said so and the payload
-/// did not, so the machine-readable half of the run was the less honest one.
-#[test]
-fn a_forced_sync_says_which_home_files_it_overwrote() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
-    let clean = machine.run_ok("dotsync --output json");
-    assert_eq!(
-        parse_stdout_json(&clean)["overwritten_files"]
-            .as_array()
-            .map(Vec::len),
-        Some(0),
-        "a sync that overwrote nothing says so, rather than saying nothing\n{}",
-        render_output(&clean)
-    );
-
-    machine.write_file(".bashrc", "export DOTSYNC=mine\n");
-    let forced = machine.run_ok("dotsync --force --output json");
-    let json = parse_stdout_json(&forced);
-    assert_eq!(
-        json["overwritten_files"],
-        serde_json::json!([".bashrc"]),
-        "the file whose contents this run discarded has to be in the payload\n{}",
-        render_output(&forced)
-    );
-    assert_eq!(machine.read_file(".bashrc"), "export DOTSYNC=repo\n");
-}
-
 /// Changing your mind about one file, named.
 ///
 /// `--force` was a mood a whole run was in: every local change lost, and no
@@ -321,6 +288,16 @@ fn discarding_a_named_change_takes_the_scopes_version() {
     seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
     seed_remote_scope_file(&machine, "mx-xps-cy", ".vimrc", "set number\n");
     machine.run_ok("dotsync");
+
+    let clean = machine.run_ok("dotsync --output json");
+    assert_eq!(
+        parse_stdout_json(&clean)["overwritten_files"]
+            .as_array()
+            .map(Vec::len),
+        Some(0),
+        "a sync that overwrote nothing says so, rather than saying nothing\n{}",
+        render_output(&clean)
+    );
 
     machine.write_file(".bashrc", "export DOTSYNC=mine\n");
     machine.write_file(".vimrc", "set nonumber\n");

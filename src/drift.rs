@@ -138,7 +138,7 @@ pub enum FileState {
 impl FileState {
     /// Home holds a change of this machine's own: something dotsync neither put
     /// there nor has a record of. These are what `status` and `diff` report as
-    /// changes, what a plain sync carries across and a forced one discards, and
+    /// changes, what a plain sync carries across, what `discard` drops, and
     /// what the home sync at the end of a commit stops on.
     pub fn is_drift(self) -> bool {
         matches!(
@@ -166,9 +166,9 @@ impl FileState {
 
     /// Home holds no change of this machine's own at this path, so recording
     /// home's bytes here would overwrite someone else's change rather than
-    /// contribute one. `commit` refuses these unless the same command forces
-    /// the path, which is what makes "a machine that is merely behind reverts
-    /// another machine's work" unrepresentable rather than merely unlikely.
+    /// contribute one. `commit` refuses these, which is what makes "a machine
+    /// that is merely behind reverts another machine's work" unrepresentable
+    /// rather than merely unlikely.
     ///
     /// The two states where home *and* the tip both moved are not here, because
     /// `commit` does not write home's bytes over the tip: it merges them against
@@ -182,15 +182,6 @@ impl FileState {
                 | Self::RemovedFromRepo
                 | Self::IncomingNewCollidesWithUntrackedHome
         )
-    }
-
-    /// Forcing this path decided something. Without `--force` the commit would
-    /// have been refused, or it would have merged home's bytes with a change
-    /// that arrived from another machine rather than writing them over it — and
-    /// a forced commit does write over it, so a run that forced this owes the
-    /// reader the path.
-    pub fn forcing_decides_something(self) -> bool {
-        self.blocks_commit() || matches!(self, Self::DivergedEdit | Self::DivergedEditThatMerges)
     }
 
     /// What happened, naming every side that moved. The remedy depends on
@@ -314,7 +305,7 @@ fn edited_in_home(home: &TreeValue, tip: &TreeValue) -> FileState {
 ///
 /// Tree entries rather than content: an id and a mode are all the
 /// classification compares, and the renderings that do want content — `diff`,
-/// and a forced sync saying what it discarded — read it from these for the few
+/// and a sync saying what it discarded — read it from these for the few
 /// paths they show. Reading it here instead would read every managed file
 /// twice on every `status`.
 #[derive(Debug, Clone)]

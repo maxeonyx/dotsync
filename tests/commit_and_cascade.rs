@@ -359,7 +359,7 @@ fn multiple_machines_can_contribute_to_all_without_losing_changes() {
 
     machine_a.init_ok();
     machine_b.init_ok_under("linux");
-    machine_a.run_ok("dotsync --force");
+    machine_a.run_ok("dotsync");
 
     machine_a.write_file(".config/shared-a.conf", "from machine a\n");
     machine_a.run_ok("dotsync commit all -m 'add shared a' -- .config/shared-a.conf");

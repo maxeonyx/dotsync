@@ -227,7 +227,7 @@ fn a_symlink_on_a_scope_materialises_in_home_as_a_symlink() {
 /// was never asked to manage, under a name it does not know.
 ///
 /// Reproduced with two managed files: `toolA` recorded as a regular file, then
-/// replaced in home by a link to the managed `toolB`, and `dotsync --force`
+/// replaced in home by a link to the managed `toolB`, and `dotsync discard`
 /// wrote toolA's recorded content into toolB. The link target here is outside
 /// home so the loss is unambiguous, and its content is asserted explicitly:
 /// that byte comparison is the data loss.
@@ -257,7 +257,7 @@ fn a_sync_replaces_a_home_symlink_instead_of_writing_through_it() {
         "a run that stopped must not have written anything"
     );
 
-    machine.run_ok("dotsync --force");
+    machine.run_ok("dotsync discard .apprc");
     assert_eq!(
         fs::read_to_string(&outside).expect("read the link target"),
         "notes nobody asked dotsync to touch\n",

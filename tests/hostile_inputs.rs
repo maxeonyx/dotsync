@@ -120,7 +120,7 @@ fn a_machine_named_after_a_shared_scope_does_not_publish_its_private_config() {
 
     machine_a.init_ok();
     named_after_a_shared_scope.init();
-    machine_a.run("dotsync --force");
+    machine_a.run("dotsync");
 
     if let Some(own_scope) = machine_scope_reported_by(&named_after_a_shared_scope) {
         named_after_a_shared_scope.write_file(

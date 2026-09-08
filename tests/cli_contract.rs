@@ -104,7 +104,7 @@ fn a_usage_error_has_the_same_shape_as_every_other_error() {
     let output = machine.run_expecting("dotsync --output json bogus", 2);
 
     let json = parse_stdout_json(&output);
-    for field in ["current_state", "drifts", "forced_overwrites"] {
+    for field in ["current_state", "drifts"] {
         assert_eq!(
             json[field].as_array().map(Vec::len),
             Some(0),
@@ -121,65 +121,12 @@ fn output_format_is_accepted_after_the_subcommand() {
 
     machine.init_ok();
 
-    // `--force` is global and `--output` was not, so the two flags on the same
-    // struct had opposite positional rules and neither one said so.
     let status_output = machine.run_expecting("dotsync status --output json", 0);
 
     let payload = parse_stdout_json(&status_output);
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["command"], "status");
     assert_eq!(payload["machine_scope"], "mx-xps-cy");
-}
-
-#[test]
-fn force_is_refused_with_one_message_wherever_it_is_meaningless() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    // `--force` reaches exactly one decision: whether to overwrite drifted
-    // home files. On the commands that never write home it means nothing, and
-    // it has to say so in whichever position the agent wrote it - `--output`
-    // works after the subcommand, so that is the position agents will reach
-    // for.
-    for command in [
-        "dotsync status --force",
-        "dotsync --force status",
-        "dotsync diff --force",
-        "dotsync --force diff",
-        "dotsync view --force",
-        "dotsync --force view",
-        "dotsync init --force",
-        "dotsync --force init",
-        "dotsync abort --force",
-        "dotsync --force abort",
-    ] {
-        let output = machine.run(command);
-        assert_eq!(
-            output.status.code(),
-            Some(2),
-            "`{command}` should be a usage error\n{}",
-            render_output(&output)
-        );
-        let name = command
-            .split_whitespace()
-            .find(|word| !matches!(*word, "dotsync" | "--force"))
-            .expect("command name");
-        assert_stderr_snapshot(
-            &output,
-            &format!(
-                "dotsync: `--force` has no meaning for `{name}`; it only decides whether to overwrite drifted files in your home directory, which is a choice made by plain `dotsync`, `commit`, and `continue`\n"
-            ),
-        );
-    }
-
-    // The commands that do write home keep it, in both positions.
-    machine.write_file(".apprc", "ui_theme = dark\n");
-    machine.run_ok("dotsync commit all -m 'add apprc' --force -- .apprc");
-    machine.write_file(".apprc", "ui_theme = light\n");
-    machine.run_ok("dotsync --force commit all -m 'light theme' -- .apprc");
-    machine.run_ok("dotsync --force");
 }
 
 /// A run that found three problems found three things, not one paragraph. The

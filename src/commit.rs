@@ -34,12 +34,6 @@ use crate::sync::{finishing, SyncReport};
 pub struct CommitOptions {
     pub scope: String,
     pub message: String,
-    /// Home wins for the paths this commit names, whatever the classification
-    /// says about them — and for nothing else. Selection and
-    /// authority ride the same argument list on purpose: naming a path says
-    /// "include this", and forcing says "and home is right about it", so a
-    /// forced commit cannot reach a file it never mentioned.
-    pub force: bool,
     /// Empty means every managed file this machine has changed, which is the
     /// same set `dotsync status` reports as changes.
     pub paths: Vec<PathBuf>,
@@ -61,8 +55,8 @@ pub struct CommitReport {
     /// What the commit recorded, or `None` when it found nothing to record.
     ///
     /// A commit with nothing to record writes no history, so it also runs no
-    /// cascade and no home sync — and therefore has no synced files, no newly
-    /// tracked files and no forced overwrites, rather than empty lists of them.
+    /// cascade and no home sync — and therefore has no synced files and no
+    /// newly tracked files, rather than empty lists of them.
     pub recorded: Option<RecordedCommit>,
 }
 
@@ -75,11 +69,6 @@ pub struct RecordedCommit {
     /// run that adds files says which ones rather than reading like a run that
     /// changed a line.
     pub newly_tracked: Vec<PathBuf>,
-    /// Paths recorded on the authority of `--force` rather than on the
-    /// authority of a change made on this machine. Reported because a forced
-    /// commit is the one shape of commit that can discard someone else's work,
-    /// and a run that does that has to say so.
-    pub forced_overwrites: Vec<PathBuf>,
     pub sync: SyncReport,
 }
 
@@ -103,35 +92,10 @@ impl CommitReport {
     }
 }
 
-/// A commit that stopped part-way, and what it had already done when it did.
-///
-/// A forced overwrite is finished the moment the history carrying it is
-/// written and pushed: nothing later in the run can take it back. Returning a
-/// bare error would drop that fact exactly when it matters most — a run that
-/// reverted another machine's change and then failed.
-#[derive(Debug)]
-pub struct CommitFailure {
-    pub forced_overwrites: Vec<PathBuf>,
-    /// Boxed because this struct rides in `Result::Err` through the whole
-    /// commit path, and `DotsyncError` is a large enum — an unboxed copy of it
-    /// here makes every `Result` on that path carry the worst-case variant.
-    pub error: Box<DotsyncError>,
-}
-
-impl From<DotsyncError> for CommitFailure {
-    /// Everything that can go wrong before any history exists.
-    fn from(error: DotsyncError) -> Self {
-        Self {
-            forced_overwrites: Vec::new(),
-            error: Box::new(error),
-        }
-    }
-}
-
 pub async fn commit_and_sync(
     paths: &DotsyncPaths,
     options: CommitOptions,
-) -> Run<Result<CommitReport, CommitFailure>> {
+) -> Run<Result<CommitReport, DotsyncError>> {
     in_session(paths, async |session, paths| {
         reject_commit_if_paused(session, session.machine_scope()).await?;
         let mut home = Home::acquire(session, paths).await?;
@@ -145,7 +109,7 @@ async fn commit_in_session(
     session: &mut Session,
     home: &mut Home,
     options: CommitOptions,
-) -> Result<CommitReport, CommitFailure> {
+) -> Result<CommitReport, DotsyncError> {
     // Converge before looking at this commit at all: DESIGN's "commit is
     // converge, add the new commit, converge again". Building a commit on a
     // head that another machine has moved is how a change comes to be recorded
@@ -163,8 +127,7 @@ async fn commit_in_session(
     if !graph.contains(&options.scope) {
         return Err(DotsyncError::InvalidScope {
             scope: options.scope.clone(),
-        }
-        .into());
+        });
     }
 
     let machine_scope = home.machine_scope().to_string();
@@ -176,8 +139,6 @@ async fn commit_in_session(
         paths: selected_paths,
         newly_tracked,
         skipped,
-        forced_paths,
-        forced_overwrites,
     } = selection;
 
     if selected_paths.is_empty() {
@@ -231,7 +192,7 @@ async fn commit_in_session(
     // over it. When the scope has not moved the first two are equal and this
     // is a plain assignment; when another machine has moved it, this is the
     // merge that keeps their change instead of overwriting it.
-    let merged_tree = MergedTree::merge(Merge::from_removes_adds(
+    let new_tree = MergedTree::merge(Merge::from_removes_adds(
         [(
             merge_base_tree,
             "the state this machine last synced".to_string(),
@@ -244,14 +205,6 @@ async fn commit_in_session(
     .await
     .map_err(|err| DotsyncError::Jj {
         message: format!("merge home edit into {}: {err}", options.scope),
-    })?;
-
-    let mut builder = MergedTreeBuilder::new(merged_tree);
-    for relative in &forced_paths {
-        builder.set_or_remove(repo_path_of(relative)?, home.entry(relative)?);
-    }
-    let new_tree = builder.write_tree().await.map_err(|err| DotsyncError::Jj {
-        message: format!("write forced commit tree for {}: {err}", options.scope),
     })?;
 
     if new_tree.has_conflict() {
@@ -275,9 +228,7 @@ async fn commit_in_session(
         // this machine's own scope or one above it, so the borrowing half of
         // it never applies — which falls out of the ancestry test rather than
         // being asserted here.
-        return Err(present(session, &machine_scope, &new_tree, &options.scope)
-            .await?
-            .into());
+        return Err(present(session, &machine_scope, &new_tree, &options.scope).await?);
     }
 
     if new_tree.tree_ids() == base_commit.tree().tree_ids() {
@@ -314,25 +265,14 @@ async fn commit_in_session(
         )
         .await?;
 
-    // From here the history exists, so every exit has to carry what it
-    // overwrote — the forced overwrites are in it and nothing later can take
-    // them back.
-    let stopped = |error: DotsyncError| CommitFailure {
-        forced_overwrites: forced_overwrites.clone(),
-        error: Box::new(error),
-    };
     // The second pass: this commit moved one scope, and every scope below it
     // now merges a parent that moved. It is the same operation the run opened
     // with, which is why there is no cascade to plan.
-    converge_or_pause(session, home, &checkpoint)
-        .await
-        .map_err(stopped)?;
+    converge_or_pause(session, home, &checkpoint).await?;
     // Push as soon as the history exists: the home sync below can legitimately
     // stop on a conflict, and a stop must never strand committed scope
     // history.
-    let push = publish_or_pause(session, home, &checkpoint)
-        .await
-        .map_err(stopped)?;
+    let push = publish_or_pause(session, home, &checkpoint).await?;
     // The same home sync every other command ends with. It needs nothing said
     // about the paths this commit just recorded: they reached the scope from
     // home, so the merge that moves home onto the new head finds home's side
@@ -340,8 +280,7 @@ async fn commit_in_session(
     // is carried across rather than stopped on.
     let sync =
         crate::sync::sync_home_to_machine_scope(session, home, crate::sync::LocalChanges::Carry)
-            .await
-            .map_err(stopped)?;
+            .await?;
 
     Ok(CommitReport {
         committed_scope: options.scope,
@@ -350,7 +289,6 @@ async fn commit_in_session(
         push,
         recorded: Some(RecordedCommit {
             newly_tracked,
-            forced_overwrites,
             sync,
         }),
     })

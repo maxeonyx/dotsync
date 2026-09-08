@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
-    abort_paused_cascade, commit_and_sync, continue_after_conflict, create_scope, diff_home, init,
-    status, sync, view, CommitFailure, CommitOptions, DiffReport, DotsyncError, DotsyncPaths,
+    abort_paused_cascade, commit_and_sync, continue_after_conflict, create_scope, diff_home,
+    discard, init, status, sync, view, CommitOptions, DiffReport, DotsyncError, DotsyncPaths,
     MachineState, Resumed, Run, UnreachableRemote, ViewAnswer,
 };
 mod render;
@@ -75,11 +75,15 @@ dotsync compares three sides of every path: what it last synced to this machine,
 
 Naming a directory records what this machine changed under it, adds what is new under it, and steps around what another machine changed. Omitting the paths records only changes to files dotsync already tracks — it never adds anything, which is why a new file has to be opted into by naming it or the directory it is in.
 
-A run reports both halves of what that came to: `newly_tracked` for the files it put on the scope for the first time, and `skipped_paths` for the files under a named directory it left alone. Both appear in `--output json` and as notes on stderr, alongside `forced_overwrites`.
+A run reports both halves of what that came to: `newly_tracked` for the files it put on the scope for the first time, and `skipped_paths` for the files under a named directory it left alone. Both appear in `--output json` and as notes on stderr.";
 
-`--force` means \"home wins anyway\", and on `commit` it applies only to the paths you name. That is deliberately different from `--force` on plain `dotsync` and on `continue`, which name no paths and so overwrite every drifted file. So `dotsync commit linux -m msg --force -- .bashrc` overwrites `.bashrc` and nothing else, while `dotsync --force` overwrites everything that drifted.
+const DISCARD_ABOUT: &str = "Throw away the local changes at the paths you name";
 
-Forced paths are listed in the run's `--output json` under `forced_overwrites`.";
+const DISCARD_LONG_ABOUT: &str = "PATHS are home-relative files whose local changes to throw away: dotsync writes the scope's version of each one into home instead, and syncs as usual.
+
+This is the other way a local change ends. `dotsync commit` makes it everybody's; `dotsync discard` decides against it. Deleting the file yourself is neither — a deletion is a local change too, so home would come back empty rather than canonical.
+
+Every path must be one of the changes `dotsync status` lists. Naming anything else is a stop rather than a run that discarded nothing, because discarding cannot be undone.";
 
 const CONTINUE_ABOUT: &str = "Continue a paused merge cascade after resolving conflicts";
 const ABORT_ABOUT: &str = "Abort a paused merge cascade and restore the pre-pause state";
@@ -106,18 +110,11 @@ struct Cli {
     /// Output format
     #[arg(long = "output", value_enum, default_value = "human", global = true)]
     output_format: OutputFormat,
-
-    /// Overwrite drifted home files: every one on plain `dotsync` and
-    /// `continue`, only the paths you name on `commit`
-    #[arg(long, global = true)]
-    force: bool,
 }
 
 #[derive(Debug, Clone)]
 enum Action {
-    Sync {
-        force: bool,
-    },
+    Sync,
     Init {
         remote_url: InitRemote,
         parents: Vec<String>,
@@ -130,12 +127,12 @@ enum Action {
     Commit {
         scope: String,
         message: String,
-        force: bool,
         paths: Vec<PathBuf>,
     },
-    Continue {
-        force: bool,
+    Discard {
+        paths: Vec<PathBuf>,
     },
+    Continue,
     Abort,
     Status,
     Diff,
@@ -180,6 +177,12 @@ enum Command {
 
         /// Home-relative file or directory paths to commit; omit to commit
         /// every managed file this machine has changed
+        paths: Vec<PathBuf>,
+    },
+    #[command(about = DISCARD_ABOUT, long_about = DISCARD_LONG_ABOUT)]
+    Discard {
+        /// Home-relative paths whose local changes to throw away
+        #[arg(required = true)]
         paths: Vec<PathBuf>,
     },
     #[command(about = CONTINUE_ABOUT)]
@@ -305,7 +308,7 @@ struct CliOutput {
 #[derive(Debug)]
 enum OutputKind {
     Success(SuccessOutput),
-    Error(ErrorOutput),
+    Error(DotsyncError),
     Usage(UsageError),
 }
 
@@ -323,7 +326,7 @@ impl CliOutput {
 
 /// Turns a finished run into output, carrying what the run could not do onto
 /// whichever arm it ended in. The one place that decision is made.
-fn output_of<T, E: Into<ErrorOutput>>(
+fn output_of<T, E: Into<DotsyncError>>(
     invocation: &'static str,
     run: Run<Result<T, E>>,
     render: impl FnOnce(T) -> SuccessOutput,
@@ -339,34 +342,6 @@ fn output_of<T, E: Into<ErrorOutput>>(
         },
         unreachable_remote,
         invocation: Some(invocation),
-    }
-}
-
-/// A run that stopped, plus anything it had already done that the error alone
-/// would not say.
-#[derive(Debug)]
-struct ErrorOutput {
-    error: DotsyncError,
-    forced_overwrites: Vec<PathBuf>,
-}
-
-impl From<DotsyncError> for ErrorOutput {
-    fn from(error: DotsyncError) -> Self {
-        Self {
-            error,
-            forced_overwrites: Vec::new(),
-        }
-    }
-}
-
-impl From<CommitFailure> for ErrorOutput {
-    /// A commit that stopped after writing history has to say what it
-    /// overwrote on the way past.
-    fn from(failure: CommitFailure) -> Self {
-        Self {
-            error: *failure.error,
-            forced_overwrites: failure.forced_overwrites,
-        }
     }
 }
 
@@ -390,7 +365,7 @@ async fn main() {
         Ok(output) => emit_output(&output_format, output),
         Err(error) => emit_output(
             &output_format,
-            CliOutput::without_run(OutputKind::Error(error.into())),
+            CliOutput::without_run(OutputKind::Error(error)),
         ),
     };
     std::process::exit(exit_code);
@@ -490,7 +465,6 @@ impl Action {
                 remote_url,
                 parents,
             }) => {
-                reject_force_before(cli.force, "init")?;
                 let remote_url = init_remote_from_args(remote_url, context)?;
                 Ok(Self::Init {
                     remote_url,
@@ -501,31 +475,17 @@ impl Action {
                 scope,
                 parents,
                 description,
-            }) => {
-                reject_force_before(cli.force, "create-scope")?;
-                Ok(Self::CreateScope {
-                    scope,
-                    parents,
-                    description,
-                })
-            }
-            Some(Command::Continue) => Ok(Self::Continue { force: cli.force }),
-            Some(Command::Abort) => {
-                reject_force_before(cli.force, "abort")?;
-                Ok(Self::Abort)
-            }
-            Some(Command::Status) => {
-                reject_force_before(cli.force, "status")?;
-                Ok(Self::Status)
-            }
-            Some(Command::Diff) => {
-                reject_force_before(cli.force, "diff")?;
-                Ok(Self::Diff)
-            }
-            Some(Command::View { scope, file }) => {
-                reject_force_before(cli.force, "view")?;
-                Ok(Self::View { scope, file })
-            }
+            }) => Ok(Self::CreateScope {
+                scope,
+                parents,
+                description,
+            }),
+            Some(Command::Discard { paths }) => Ok(Self::Discard { paths }),
+            Some(Command::Continue) => Ok(Self::Continue),
+            Some(Command::Abort) => Ok(Self::Abort),
+            Some(Command::Status) => Ok(Self::Status),
+            Some(Command::Diff) => Ok(Self::Diff),
+            Some(Command::View { scope, file }) => Ok(Self::View { scope, file }),
             Some(Command::Commit {
                 scope,
                 message,
@@ -533,18 +493,15 @@ impl Action {
             }) => Ok(Self::Commit {
                 scope,
                 message,
-                force: cli.force,
                 paths,
             }),
             Some(Command::Unknown(args)) => {
-                // `--force` is checked per command below, and an unknown
-                // command has no behavior to force.
                 let command = args.first().map(String::as_str).unwrap_or("<empty>");
                 Err(usage_error(&format!(
                     "unknown command `{command}`; run `dotsync --help` for supported commands"
                 )))
             }
-            None => Ok(Self::Sync { force: cli.force }),
+            None => Ok(Self::Sync),
         }
     }
 }
@@ -566,13 +523,13 @@ fn init_remote_from_args(
 
 async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
     match action {
-        Action::Sync { force } => run_sync(force).await,
+        Action::Sync => run_sync().await,
         Action::Commit {
             scope,
             message,
-            force,
             paths,
-        } => run_commit(scope, message, force, paths).await,
+        } => run_commit(scope, message, paths).await,
+        Action::Discard { paths } => run_discard(paths).await,
         Action::Init {
             remote_url,
             parents,
@@ -582,31 +539,12 @@ async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
             parents,
             description,
         } => run_create_scope(scope, parents, description).await,
-        Action::Continue { force } => run_continue(force).await,
+        Action::Continue => run_continue().await,
         Action::Abort => run_abort().await,
         Action::Status => run_status().await,
         Action::Diff => run_diff().await,
         Action::View { scope, file } => run_view(scope, file).await,
     }
-}
-
-/// `--force` is global, like `--output`, so it parses in either position and
-/// one message explains it wherever it means nothing. Declaring it per command
-/// instead would hand the commands that reject it clap's generic 'unexpected
-/// argument' - and on `init`, clap's 'to pass --force as a value' tip, which
-/// would make the flag the remote URL. A command that never chooses whether to
-/// overwrite drifted home files has no meaning for it, and silently accepting
-/// it there would teach an agent that retrying with `--force` could change the
-/// answer. `init` and `abort` write home but never make that choice: `init`
-/// has nothing of yours to overwrite, and `abort` exists precisely to discard
-/// the home edit that started the cascade.
-fn reject_force_before(force: bool, command: &str) -> Result<(), UsageError> {
-    if !force {
-        return Ok(());
-    }
-    Err(usage_error(&format!(
-        "`--force` has no meaning for `{command}`; it only decides whether to overwrite drifted files in your home directory, which is a choice made by plain `dotsync`, `commit`, and `continue`"
-    )))
 }
 
 fn usage_error(message: &str) -> UsageError {
@@ -681,11 +619,9 @@ fn prompt_init_remote_url() -> Result<String, UsageError> {
     Ok(remote_url)
 }
 
-async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
+async fn run_continue() -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    // `continue` names no paths, so its `--force` is necessarily blanket: it
-    // overwrites every locally changed file or none of them.
-    let run = continue_after_conflict(&paths, force).await;
+    let run = continue_after_conflict(&paths).await;
     Ok(output_of("dotsync continue", run, |report| {
         let synced = report.sync.synced_paths.len();
         let output = render::synced_output(
@@ -761,14 +697,32 @@ async fn run_abort() -> Result<CliOutput, DotsyncError> {
     }))
 }
 
-async fn run_sync(force: bool) -> Result<CliOutput, DotsyncError> {
+async fn run_sync() -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let run = sync(&paths, force).await;
+    let run = sync(&paths).await;
     Ok(output_of("dotsync", run, |report| {
         render::synced_output(
             "sync",
             format!(
                 "dotsync: synced {} file(s) for {}",
+                report.sync.synced_paths.len(),
+                report.sync.current_scope
+            ),
+            &report.sync,
+            Some(&report.push),
+        )
+    }))
+}
+
+async fn run_discard(discard_paths: Vec<PathBuf>) -> Result<CliOutput, DotsyncError> {
+    let paths = discover_paths()?;
+    let run = discard(&paths, &discard_paths).await;
+    Ok(output_of("dotsync discard", run, |report| {
+        render::synced_output(
+            "discard",
+            format!(
+                "dotsync: discarded {} local change(s) and synced {} file(s) for {}",
+                report.sync.drifts.len(),
                 report.sync.synced_paths.len(),
                 report.sync.current_scope
             ),
@@ -888,7 +842,6 @@ async fn run_view(scope: Option<String>, file: Option<PathBuf>) -> Result<CliOut
 async fn run_commit(
     scope: String,
     message: String,
-    force: bool,
     commit_paths: Vec<PathBuf>,
 ) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
@@ -897,7 +850,6 @@ async fn run_commit(
         CommitOptions {
             scope,
             message,
-            force,
             paths: commit_paths,
         },
     )
@@ -938,7 +890,6 @@ fn render_commit_success(report: dotsync::CommitReport) -> SuccessOutput {
 
     json["synced_files"] = json!(render::display_paths(&recorded.sync.synced_paths));
     json["newly_tracked"] = json!(render::display_paths(&recorded.newly_tracked));
-    json["forced_overwrites"] = json!(render::display_paths(&recorded.forced_overwrites));
     SuccessOutput::message(
         json,
         format!(
@@ -951,7 +902,6 @@ fn render_commit_success(report: dotsync::CommitReport) -> SuccessOutput {
         render::newly_tracked_notes(&recorded.newly_tracked)
             .into_iter()
             .chain(skipped)
-            .chain(render::forced_overwrite_notes(&recorded.forced_overwrites))
             .chain(render::success_notes(
                 &recorded.sync.drifts,
                 Some(&report.push),
@@ -1142,17 +1092,10 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
             }
             success.exit_code
         }
-        OutputKind::Error(ErrorOutput {
-            error,
-            forced_overwrites,
-        }) => {
+        OutputKind::Error(error) => {
             let exit_code = if error.paused_scope().is_some() { 3 } else { 1 };
-            for note in render::forced_overwrite_notes(&forced_overwrites) {
-                eprintln!("{note}");
-            }
             eprintln!("{}", render::render_error_human(&error, invocation));
-            let mut error_report = error.to_error_report();
-            error_report.forced_overwrites = forced_overwrites;
+            let error_report = error.to_error_report();
             // After the teaching message and set apart from it: these are the
             // files the run stopped on, not more instructions.
             if !error_report.drifts.is_empty() {

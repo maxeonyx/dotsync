@@ -206,9 +206,9 @@ fn work_done_offline_reaches_the_remote_on_the_next_online_run() {
 
 /// A run that stops still has to say which state it stopped against. A
 /// conflict is the stop a sync can reach, and one of the things it offers is
-/// `--force` — overwrite home with what the scope holds — so a reader who is
-/// not told the scope snapshot is however old this machine's last fetch was
-/// cannot judge that advice.
+/// `dotsync discard <path>` — overwrite home with what the scope holds — so a
+/// reader who is not told the scope snapshot is however old this machine's
+/// last fetch was cannot judge that advice.
 #[test]
 fn a_run_that_stops_offline_still_says_the_remote_was_out_of_reach() {
     let harness = TestHarness::new();

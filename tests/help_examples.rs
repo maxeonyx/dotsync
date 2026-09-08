@@ -36,6 +36,7 @@ fn help_examples() {
         })
         .page(&["create-scope"], |_fixture| {})
         .page(&["commit"], |_fixture| {})
+        .page(&["discard"], |_fixture| {})
         .page(&["continue"], |_fixture| {})
         .page(&["diff"], |_fixture| {})
         .page(&["abort"], |_fixture| {})

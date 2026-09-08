@@ -30,9 +30,7 @@ pub(crate) fn synced_output(
         // reached this report is a drift the run was allowed to overwrite —
         // anything else stopped it — so this is exactly the home content this
         // run discarded. Named for what happened to the file rather than for
-        // the flag, because `init` and `abort` do it without one, and because
-        // `commit`'s `forced_overwrites` is the opposite direction: paths
-        // recorded over another machine's change.
+        // the command, because `discard`, `init` and `abort` all do it.
         "overwritten_files": display_paths(
             &sync.drifts.iter().map(|drift| drift.repo_path.clone()).collect::<Vec<_>>(),
         ),
@@ -224,7 +222,6 @@ pub(crate) fn render_error_json(error: &ErrorReport) -> serde_json::Value {
         "message": error.message,
         "drifts": error.drifts.iter().map(render_drift_json).collect::<Vec<_>>(),
         "conflicts": error.conflicts.iter().map(render_conflict_json).collect::<Vec<_>>(),
-        "forced_overwrites": error.forced_overwrites.iter().map(|path| display_path(path)).collect::<Vec<_>>(),
         "current_state": error.current_state,
     });
     // Present only when the run met the state, under the name `status`, `diff`
@@ -303,7 +300,6 @@ pub(crate) fn render_usage_error_json(error: &UsageError) -> serde_json::Value {
         "current_state": Vec::<String>::new(),
         "drifts": Vec::<serde_json::Value>::new(),
         "conflicts": Vec::<serde_json::Value>::new(),
-        "forced_overwrites": Vec::<String>::new(),
     })
 }
 
@@ -383,7 +379,7 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
                 &format!(
                     "then record your decision on a scope: `dotsync commit {scope} -m \"message\" -- <path>`. That is what makes it everybody's version, and it leaves this sync nothing left to merge."
                 ),
-                "or, if the version the scope already holds is the one you want, rerun with `dotsync --force`; that discards what is in home for every changed file, so check `dotsync status` first.",
+                "or, if the version the scope already holds is the one you want, run `dotsync discard <path>` and let the sync finish. That throws away what is in home at the paths you name and nothing else.",
             ],
         ),
         DotsyncError::CascadePaused {
@@ -502,8 +498,24 @@ pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>)
                 "run `dotsync` to bring this machine up to date; the incoming change is written into home, and an incoming deletion removes the file.",
                 "then edit the file in home if you still want a change of your own, and commit it. To bring back a file another machine deleted, recreate it in home after syncing and commit that.",
                 &format!(
-                    "if you really do mean to overwrite the incoming change with what is in home, rerun with `--force`: `dotsync commit {scope} -m \"message\" --force -- <paths...>`. On `commit`, `--force` applies only to the paths you name."
+                    "there is no way to skip the middle step: a commit of home's older bytes onto `{scope}` is the revert, so making it deliberately means syncing, writing what you want, and committing that."
                 ),
+            ],
+        ),
+        DotsyncError::NothingToDiscard { paths } => render_structured_error(
+            if paths.len() == 1 {
+                "there is nothing of yours to discard there"
+            } else {
+                "there is nothing of yours to discard at those paths"
+            },
+            "Dotsync writes what the scopes hold into your home directory, and carries a file you have edited since across each sync rather than overwriting it. That edit stays yours until you commit it to a scope — or decide against it.",
+            "This discard flow throws away what home holds at the paths you name and writes the scope's version of them instead.",
+            "It expects each path you name to be one of the changes `dotsync status` lists.",
+            &current_state_text(&error_report),
+            "Dotsync wrote nothing. Discarding is the one thing it does that cannot be undone, so a path it has nothing to discard at is a mistyped path far more often than it is a change of mind.",
+            &[
+                "run `dotsync status` to see the changes there are, and name one of those.",
+                "to record a change instead of discarding it, run `dotsync commit <scope> -m \"message\" -- <paths...>`.",
             ],
         ),
         // Raised by every command that takes a scope name, so it teaches about
@@ -768,26 +780,6 @@ pub(crate) fn with_remote_state(
         json["remote_unreachable"] = json!(unreachable.reason);
     }
     json
-}
-
-/// What a run overwrote under `--force`, said out loud. A forced overwrite is
-/// the one thing a run can do that discards somebody else's work, so both
-/// exits report it: the run that stopped afterwards, and the run that
-/// finished and left the revert standing on the remote.
-pub(crate) fn forced_overwrite_notes(forced_overwrites: &[std::path::PathBuf]) -> Vec<String> {
-    if forced_overwrites.is_empty() {
-        return Vec::new();
-    }
-    let mut notes = vec![format!(
-        "dotsync: recorded {} file(s) over an incoming change, because you passed `--force`",
-        forced_overwrites.len()
-    )];
-    notes.extend(
-        forced_overwrites
-            .iter()
-            .map(|path| format!("- {}", path.display())),
-    );
-    notes
 }
 
 /// What a commit put on the scope for the first time.
