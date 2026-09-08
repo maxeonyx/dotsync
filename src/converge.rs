@@ -108,79 +108,67 @@ pub(crate) async fn converge(
 
     for scope in graph.in_cascade_order() {
         let inputs = convergence_inputs(tx.repo_mut(), &graph, &scope.name)?;
-        let Some((first, rest)) = inputs.split_first() else {
-            // No head at all. Unreachable for a scope the graph names, since
-            // the graph is derived from the bookmarks that exist — and a skip
-            // rather than a stop because a scope dotsync cannot see is not a
-            // scope it should be writing to.
-            continue;
-        };
-        if rest.is_empty() {
-            // One input left after dropping the ancestors: there is nothing to
-            // merge, and the head is either already there or a fast-forward.
-            if scope_head(tx.repo_mut(), &scope.name).as_normal() != Some(first.commit.id()) {
-                set_head(tx.repo_mut(), &scope.name, first.commit.id().clone());
+        let parents: Vec<CommitId> = inputs.iter().map(|it| it.commit.id().clone()).collect();
+        match inputs.as_slice() {
+            // No head at all — unreachable for a scope the graph names, since
+            // the graph is derived from the bookmarks that exist. A skip
+            // rather than a stop, because a scope dotsync cannot see is not
+            // one it should be writing to.
+            [] => continue,
+            // Everything else reaches this one, so there is nothing to merge.
+            // The bookmark is either already here or fast-forwards onto it.
+            [only] => {
+                if scope_head(tx.repo_mut(), &scope.name).as_normal() != Some(only.commit.id()) {
+                    set_head(tx.repo_mut(), &scope.name, only.commit.id().clone());
+                    moved = true;
+                }
+            }
+            _ => {
+                let merged = merge_inputs(tx.repo_mut(), &inputs).await?;
+                let description = format!("dotsync: converge {}", scope.name);
+                if merged.has_conflict() {
+                    paused = Some(Pause {
+                        scope: scope.name.clone(),
+                        parents,
+                        description,
+                        merged,
+                    });
+                    break;
+                }
+                let commit = tx
+                    .repo_mut()
+                    .new_commit(parents, merged)
+                    .set_description(&description)
+                    .set_author(machine_signature(machine_scope))
+                    .write()
+                    .await
+                    .map_err(|err| {
+                        jj_error(format!("write the merge for {}: {err}", scope.name))
+                    })?;
+                set_head(tx.repo_mut(), &scope.name, commit.id().clone());
                 moved = true;
             }
-            continue;
         }
+    }
 
-        let merged = merge_inputs(tx.repo_mut(), &inputs).await?;
-        let description = format!("dotsync: converge {}", scope.name);
-        if merged.has_conflict() {
-            paused = Some(Pause {
-                scope: scope.name.clone(),
-                parents: inputs
-                    .iter()
-                    .map(|input| input.commit.id().clone())
-                    .collect(),
-                description,
-                merged,
-            });
-            break;
-        }
-
-        let commit = tx
-            .repo_mut()
-            .new_commit(
-                inputs
-                    .iter()
-                    .map(|input| input.commit.id().clone())
-                    .collect(),
-                merged,
+    // A pass that moved nothing drops its transaction rather than committing
+    // one, so a settled machine writes no operation and leaves every bookmark
+    // exactly where it found it. That includes a pass that stopped at a
+    // conflict before reaching anything it could write: the conflicted merge
+    // is not history, and the next run recomputes it.
+    if moved {
+        session
+            .advance_to(
+                tx.commit("dotsync: converge")
+                    .await
+                    .map_err(|err| jj_error(format!("commit the convergence: {err}")))?,
             )
-            .set_description(&description)
-            .set_author(machine_signature(machine_scope))
-            .write()
-            .await
-            .map_err(|err| jj_error(format!("write the merge for {}: {err}", scope.name)))?;
-        set_head(tx.repo_mut(), &scope.name, commit.id().clone());
-        moved = true;
+            .await?;
     }
-
-    match (moved, paused) {
-        // Nothing to converge. The transaction is dropped rather than
-        // committed, so a steady-state run writes no operation and leaves
-        // every bookmark exactly where it found it.
-        (false, None) => Ok(Converged::Completed),
-        (_, paused) => {
-            let description = match &paused {
-                Some(pause) => format!("dotsync: converge, stopping at {}", pause.scope),
-                None => "dotsync: converge".to_string(),
-            };
-            session
-                .advance_to(
-                    tx.commit(&description)
-                        .await
-                        .map_err(|err| jj_error(format!("commit the convergence: {err}")))?,
-                )
-                .await?;
-            Ok(match paused {
-                Some(pause) => Converged::Paused(pause),
-                None => Converged::Completed,
-            })
-        }
-    }
+    Ok(match paused {
+        Some(pause) => Converged::Paused(pause),
+        None => Converged::Completed,
+    })
 }
 
 /// Everything a scope's new head has to account for: its own head, and its

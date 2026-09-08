@@ -692,7 +692,7 @@ async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
             "continue",
             match &report.resumed {
                 Resumed::Cascade { scope } => format!(
-                    "dotsync: resumed the cascade paused at {scope} and synced {synced} file(s)"
+                    "dotsync: recorded your version on `{scope}` and synced {synced} file(s)"
                 ),
                 Resumed::SyncConflict => format!(
                     "dotsync: took your version of the conflicted file(s) and synced {synced} file(s)"
