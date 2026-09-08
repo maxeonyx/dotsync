@@ -198,6 +198,14 @@ async fn join_the_fleet(
         return Ok(repo);
     }
 
+    // A branch of this name that is not a scope belongs to whoever pushed it,
+    // and creating this machine's scope would move it.
+    if !scope_head(repo.as_ref(), &identity.machine_scope).is_absent() {
+        return Err(DotsyncError::ScopeNameTaken {
+            scope: identity.machine_scope.clone(),
+        });
+    }
+
     let parent_commits =
         parent_commits_for(repo.as_ref(), graph, &identity.machine_scope, parents)?;
     let mut tx = repo.start_transaction();
@@ -227,7 +235,11 @@ pub async fn create_scope(
     parents: &[String],
     description: Option<&str>,
 ) -> Run<Result<CreatedScope, DotsyncError>> {
-    in_session(paths, async |session, _paths| {
+    in_session(paths, async |session, paths| {
+        // A paused cascade has scopes half cascaded, and this run ends by
+        // publishing every scope commit the machine holds — so the pause has
+        // to be resolved first, for the reason a commit does.
+        crate::pause::reject_commit_if_cascade_paused(paths)?;
         session.fetch().await?;
         let graph = session.graph().clone();
         if graph.contains(scope) || !scope_head(session.repo().as_ref(), scope).is_absent() {

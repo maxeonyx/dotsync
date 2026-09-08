@@ -118,10 +118,15 @@ impl ScopeGraph {
                 .cloned()
                 .collect();
             ready.sort();
-            // A DAG always has something ready, and this graph is a DAG
-            // because it is read off commit ancestry: a cycle would need a
-            // commit to be its own ancestor.
-            debug_assert!(!ready.is_empty(), "scope graph is not a DAG");
+            // A DAG always has something ready, and this graph is one because
+            // its edges are the ancestry of creation commits — a cycle would
+            // need a commit to be its own ancestor. Asserted rather than
+            // trusted, because the alternative to noticing is this loop
+            // spinning for ever.
+            assert!(
+                !ready.is_empty(),
+                "the scope graph is not a DAG: {remaining:?} have no order"
+            );
             for name in ready {
                 remaining.remove(&name);
                 ordered.push(&self.scopes[&name]);
@@ -254,13 +259,17 @@ pub(crate) fn derive(repo: &dyn Repo) -> Result<ScopeGraph, DotsyncError> {
     let creations = creation_commits(repo, heads.iter().flat_map(|(_, ids)| ids.iter().cloned()))?;
 
     let index = repo.index();
-    let reaches = |from: &[CommitId], to: &CommitId| -> Result<bool, DotsyncError> {
-        for id in from {
-            if index
-                .is_ancestor(to, id)
-                .map_err(|err| jj_error(format!("read commit ancestry: {err}")))?
-            {
-                return Ok(true);
+    // Either side can be more than one commit: a contested head holds two,
+    // and two machines can create one scope name at once.
+    let reaches = |from: &[CommitId], to: &[CommitId]| -> Result<bool, DotsyncError> {
+        for descendant in from {
+            for ancestor in to {
+                if index
+                    .is_ancestor(ancestor, descendant)
+                    .map_err(|err| jj_error(format!("read commit ancestry: {err}")))?
+                {
+                    return Ok(true);
+                }
             }
         }
         Ok(false)
@@ -274,26 +283,26 @@ pub(crate) fn derive(repo: &dyn Repo) -> Result<ScopeGraph, DotsyncError> {
         let Some(creation) = creations.get(name) else {
             continue;
         };
-        for created_at in &creation.commits {
-            if reaches(head_ids, created_at)? {
-                members.push((name.clone(), head_ids.clone()));
-                break;
-            }
+        if reaches(head_ids, &creation.commits)? {
+            members.push((name.clone(), head_ids.clone()));
         }
     }
 
+    // Creation commit to creation commit, not head to creation commit. A head
+    // moves and can be merged into by anything with git — merge a scope into
+    // its own parent and head-to-creation makes the two scopes each other's
+    // ancestor, which is not a DAG and has no cascade order. A creation commit
+    // has the ancestry it was written with for ever, and one of two commits is
+    // always older, so this relation cannot come back around.
     let mut reached: HashMap<String, Vec<String>> = HashMap::new();
-    for (name, head_ids) in &members {
+    for (name, _) in &members {
         let mut found = Vec::new();
         for (other, _) in &members {
             if other == name {
                 continue;
             }
-            for created_at in &creations[other].commits {
-                if reaches(head_ids, created_at)? {
-                    found.push(other.clone());
-                    break;
-                }
+            if reaches(&creations[name].commits, &creations[other].commits)? {
+                found.push(other.clone());
             }
         }
         reached.insert(name.clone(), found);
