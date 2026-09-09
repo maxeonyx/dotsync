@@ -229,10 +229,13 @@ fn noop_commit_names_the_scope_it_targeted() {
     // it did not carry the scope the agent had just named - and the message
     // interpolated the empty string into "committed  and synced". It now names
     // the scope, and says what it did instead of claiming a commit.
+    // A bare commit also says why it might have found nothing: the commonest
+    // reason is a file dotsync does not track yet, which `status` does not
+    // list either.
     let commit_output = machine.run_expecting("dotsync commit mx-xps-cy -m noop", 0);
     assert_stderr_snapshot(
         &commit_output,
-        "dotsync: nothing to record on `mx-xps-cy`; no commit was made and home was not synced\n",
+        "dotsync: a file dotsync does not track yet is not a change to it, so a commit naming no paths never adds one. Name the file, or the directory it is in, to start tracking it.\ndotsync: nothing to record on `mx-xps-cy`; no commit was made and home was not synced\n",
     );
 }
 

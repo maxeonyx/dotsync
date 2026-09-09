@@ -865,6 +865,9 @@ async fn run_commit(
     commit_paths: Vec<PathBuf>,
 ) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
+    // Whether the caller named anything, which decides what a commit that
+    // recorded nothing has to explain.
+    let named_paths = !commit_paths.is_empty();
     let run = commit_and_sync(
         &paths,
         CommitOptions {
@@ -874,13 +877,15 @@ async fn run_commit(
         },
     )
     .await;
-    Ok(output_of("dotsync commit", run, render_commit_success))
+    Ok(output_of("dotsync commit", run, |report| {
+        render_commit_success(report, named_paths)
+    }))
 }
 
 /// A commit has two outcomes and says which one it had, because they are not
 /// the same event: one wrote history and synced home, the other did neither.
 /// The fields that only one of them can honestly fill are only on that one.
-fn render_commit_success(report: dotsync::CommitReport) -> SuccessOutput {
+fn render_commit_success(report: dotsync::CommitReport, named_paths: bool) -> SuccessOutput {
     let mut json = json!({
         "status": "ok",
         "command": "commit",
@@ -893,6 +898,18 @@ fn render_commit_success(report: dotsync::CommitReport) -> SuccessOutput {
     let skipped = render::skipped_path_notes(&report.skipped);
 
     let Some(recorded) = report.recorded else {
+        // A commit that named nothing records only changes to files dotsync
+        // already tracks, so this is the answer an agent gets after writing a
+        // config file dotsync has never seen — and `status` did not list it
+        // either, for the same reason. Saying so here is the only place that
+        // reaches them.
+        let new_file_advice = match named_paths {
+            true => Vec::new(),
+            false => vec![
+                "dotsync: a file dotsync does not track yet is not a change to it, so a commit naming no paths never adds one. Name the file, or the directory it is in, to start tracking it."
+                    .to_string(),
+            ],
+        };
         return SuccessOutput::message(
             json,
             format!(
@@ -903,6 +920,7 @@ fn render_commit_success(report: dotsync::CommitReport) -> SuccessOutput {
         .with_notes(
             skipped
                 .into_iter()
+                .chain(new_file_advice)
                 .chain(render::push_notes(&report.push))
                 .collect(),
         );
