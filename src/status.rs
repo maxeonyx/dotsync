@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::drift::{changed_paths, FileState};
-use crate::error::DotsyncError;
+use crate::error::{ConflictedFile, DotsyncError};
 use crate::home::Home;
 use crate::paths::DotsyncPaths;
 use crate::repo::{diverged_scopes, unpushed_scopes};
@@ -18,12 +18,12 @@ use crate::sync::{classify_home_against_machine_scope, finishing};
 /// machine that could not commit at all.
 #[derive(Debug, Clone)]
 pub struct MachineState {
-    /// The scope a cascade is paused at, if one is.
+    /// The merge waiting for a decision, if one is.
     ///
     /// A paused cascade is the one state where a machine that looks completely
     /// clean cannot commit anything at all, and the message that said so
     /// scrolled away one command ago.
-    pub paused_cascade: Option<String>,
+    pub paused_cascade: Option<PausedCascade>,
     /// The scopes this machine and the remote have each moved. Reported
     /// because it is the state the next writing run will merge, and this
     /// answer describes the state before that merge.
@@ -42,7 +42,7 @@ impl MachineState {
     pub(crate) async fn read(session: &Session) -> Result<Self, DotsyncError> {
         let recorded = crate::pause::load_paused_run(session.paths())?;
         Ok(Self {
-            paused_cascade: crate::pause::paused_scope(
+            paused_cascade: crate::pause::pending_pause(
                 session,
                 session.machine_scope(),
                 recorded.as_ref(),
@@ -68,6 +68,22 @@ pub struct StatusReport {
     pub changes: Vec<FileChange>,
     /// The repo moved and home did not. Plain `dotsync` applies these.
     pub incoming: Vec<FileChange>,
+}
+
+/// The merge a machine is waiting on, and every version of every file it could
+/// not resolve.
+///
+/// The versions are the whole reason this carries more than a scope name: they
+/// exist nowhere else — nothing is written into home, and neither side is on a
+/// scope this machine syncs from — so an agent that lost the pause message has
+/// to be able to ask for them again.
+#[derive(Debug, Clone)]
+pub struct PausedCascade {
+    pub scope: String,
+    /// Empty when the merge that stopped is a `commit`'s own. That one has
+    /// home as a side, so nothing repo-side recomputes it, and it is the same
+    /// reason the run that made it had to write down what it was doing.
+    pub conflicts: Vec<ConflictedFile>,
 }
 
 #[derive(Debug, Clone)]

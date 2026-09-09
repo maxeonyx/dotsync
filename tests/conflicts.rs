@@ -1416,11 +1416,10 @@ fn view_reprints_the_conflict_the_pause_message_showed() {
         json["conflicts"],
         serde_json::json!([{
             "path": ".config/app.conf",
-            "state": serde_json::Value::Null,
             "versions": [
-                {"role": "base", "label": "`all` as it was published", "contents": "setting = \"base\"\n"},
-                {"role": "side", "label": "`all` as this machine has it", "contents": "setting = \"all\"\n"},
+                {"role": "base", "label": "the version they last agreed on", "contents": "setting = \"base\"\n"},
                 {"role": "side", "label": "scope `linux`", "contents": "setting = \"linux\"\n"},
+                {"role": "side", "label": "scope `all`", "contents": "setting = \"all\"\n"},
             ],
         }]),
         "every version of every conflicted file, the same object the stop carried\n{}",

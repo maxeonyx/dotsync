@@ -267,8 +267,11 @@ impl SuccessOutput {
         }
     }
 
+    /// Adds to what this run has to say rather than replacing it: a run that
+    /// overwrote a file and also has something to explain about why owes the
+    /// reader both.
     fn with_notes(mut self, notes: Vec<String>) -> Self {
-        self.notes = notes;
+        self.notes.extend(notes);
         self
     }
 }
@@ -849,7 +852,7 @@ async fn run_view(scope: Option<String>, file: Option<PathBuf>) -> Result<CliOut
             ),
         };
 
-        with_machine_state(answer, &machine)
+        with_machine_state(reprinting_any_conflict(answer, &machine), &machine)
     }))
 }
 
@@ -924,6 +927,38 @@ fn render_commit_success(report: dotsync::CommitReport) -> SuccessOutput {
     )
 }
 
+/// The conflict a machine is paused on, printed again by `view`.
+///
+/// Every version of every conflicted file exists nowhere else: dotsync writes
+/// no markers into home, and neither side is on a scope this machine syncs
+/// from. So the pause message is the only copy, and an agent that lost it — a
+/// new session, a scrolled terminal — needs somewhere to ask. `view` is that
+/// somewhere, because it already answers "what is checked in" and the pause is
+/// derived, so it is correct whenever it is asked.
+///
+/// `status` and `diff` name the pause and stop there. `status` is the concise
+/// one, and three versions of every conflicted file is not concise.
+fn reprinting_any_conflict(answer: SuccessOutput, machine: &MachineState) -> SuccessOutput {
+    let Some(paused) = &machine.paused_cascade else {
+        return answer;
+    };
+    if paused.conflicts.is_empty() {
+        return answer;
+    }
+    let mut json = answer.json;
+    json["conflicts"] = json!(paused
+        .conflicts
+        .iter()
+        .map(render::render_conflict_json)
+        .collect::<Vec<_>>());
+    let mut human = vec![format!(
+        "dotsync: the merge at `{}` is waiting on these file(s)",
+        paused.scope
+    )];
+    human.extend(render::render_conflicts_human(&paused.conflicts));
+    SuccessOutput { json, ..answer }.with_notes(human)
+}
+
 /// What `status`, `diff` and `view` say about the machine, whatever they were
 /// asked, in both channels.
 ///
@@ -936,13 +971,13 @@ fn render_commit_success(report: dotsync::CommitReport) -> SuccessOutput {
 /// to whoever reads that field.
 fn with_machine_state(answer: SuccessOutput, machine: &MachineState) -> SuccessOutput {
     let mut json = answer.json;
-    if let Some(scope) = &machine.paused_cascade {
-        json["paused_cascade"] = json!(scope);
+    if let Some(paused) = &machine.paused_cascade {
+        json["paused_cascade"] = json!(paused.scope);
     }
     json["diverged_scopes"] = json!(machine.diverged_scopes);
     json["unpushed_scopes"] = json!(machine.unpushed_scopes);
     SuccessOutput { json, ..answer }.with_notes(
-        render::paused_cascade_notes(machine.paused_cascade.as_ref())
+        render::paused_cascade_notes(machine.paused_cascade.as_ref().map(|paused| &paused.scope))
             .into_iter()
             .chain(render::diverged_scope_notes(&machine.diverged_scopes))
             .chain(render::unpushed_scope_notes(&machine.unpushed_scopes))

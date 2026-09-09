@@ -64,7 +64,7 @@
     "dotsync::conflicts$shared_scope_conflict_pauses_and_continue_applies_resolution_to_machine_homes": "passing",
     "dotsync::conflicts$status_and_diff_say_a_cascade_is_paused": "passing",
     "dotsync::conflicts$the_drift_stop_says_a_cascade_is_paused_rather_than_advising_a_refused_commit": "passing",
-    "dotsync::conflicts$view_reprints_the_conflict_the_pause_message_showed": "pending",
+    "dotsync::conflicts$view_reprints_the_conflict_the_pause_message_showed": "passing",
     "dotsync::conflicts$view_says_a_cascade_is_paused": "passing",
     "dotsync::convergence$a_divergence_over_one_file_is_a_conflict_to_resolve_rather_than_a_wall": "passing",
     "dotsync::convergence$a_home_conflict_during_commit_does_not_strand_unpushed_history": "passing",
