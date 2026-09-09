@@ -758,7 +758,6 @@ async fn run_status() -> Result<CliOutput, DotsyncError> {
                 json!({
                     "status": "ok",
                     "command": "status",
-                    "machine_scope": report.machine_scope,
                     "changes": render::changes_json(&report.changes),
                     "incoming": render::changes_json(&report.incoming),
                 }),
@@ -783,7 +782,6 @@ async fn run_diff() -> Result<CliOutput, DotsyncError> {
                 json!({
                     "status": "ok",
                     "command": "diff",
-                    "machine_scope": report.machine_scope,
                     "changes": report
                         .drifts
                         .iter()
@@ -828,14 +826,19 @@ async fn run_view(scope: Option<String>, file: Option<PathBuf>) -> Result<CliOut
                 }),
                 render_view_scope_stdout(&scope, &files),
             ),
-            ViewAnswer::FileScopes { file, scopes } => SuccessOutput::stdout(
+            ViewAnswer::FileScopes {
+                file,
+                scopes,
+                owner,
+            } => SuccessOutput::stdout(
                 json!({
                     "status": "ok",
                     "command": "view",
                     "file": render::display_path(&file),
                     "scopes": scopes,
+                    "owner": owner,
                 }),
-                render_view_file_scopes_stdout(&file, &scopes),
+                render_view_file_scopes_stdout(&file, &scopes, owner.as_deref()),
             ),
             ViewAnswer::Overview { scopes, files } => SuccessOutput::stdout(
                 json!({
@@ -848,7 +851,7 @@ async fn run_view(scope: Option<String>, file: Option<PathBuf>) -> Result<CliOut
                     })).collect::<Vec<_>>(),
                     "files": files.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
                 }),
-                render_view_overview_stdout(&scopes, &files),
+                render_view_overview_stdout(&scopes, &files, &machine.machine_scope),
             ),
         };
 
@@ -971,6 +974,7 @@ fn reprinting_any_conflict(answer: SuccessOutput, machine: &MachineState) -> Suc
 /// to whoever reads that field.
 fn with_machine_state(answer: SuccessOutput, machine: &MachineState) -> SuccessOutput {
     let mut json = answer.json;
+    json["machine_scope"] = json!(machine.machine_scope);
     if let Some(paused) = &machine.paused_cascade {
         json["paused_cascade"] = json!(paused.scope);
     }
@@ -1008,7 +1012,7 @@ fn render_status_human(report: &dotsync::StatusReport) -> String {
     if !report.changes.is_empty() {
         lines.push(changed_files_header(
             report.changes.len(),
-            &report.machine_scope,
+            &report.machine.machine_scope,
         ));
         lines.extend(
             report
@@ -1021,7 +1025,7 @@ fn render_status_human(report: &dotsync::StatusReport) -> String {
         lines.push(format!(
             "dotsync: {} incoming file(s) for {} — plain `dotsync` applies these",
             report.incoming.len(),
-            report.machine_scope
+            report.machine.machine_scope
         ));
         lines.extend(
             report
@@ -1032,7 +1036,7 @@ fn render_status_human(report: &dotsync::StatusReport) -> String {
     }
 
     if lines.is_empty() {
-        return format!("dotsync: no changes for {}", report.machine_scope);
+        return format!("dotsync: no changes for {}", report.machine.machine_scope);
     }
     lines.join("\n")
 }
@@ -1040,12 +1044,12 @@ fn render_status_human(report: &dotsync::StatusReport) -> String {
 /// `status`'s changed list, with each file's two sides shown under it.
 fn render_diff_human(report: &DiffReport) -> String {
     if report.drifts.is_empty() {
-        return format!("dotsync: no changes for {}", report.machine_scope);
+        return format!("dotsync: no changes for {}", report.machine.machine_scope);
     }
 
     let mut lines = vec![changed_files_header(
         report.drifts.len(),
-        &report.machine_scope,
+        &report.machine.machine_scope,
     )];
     for drift in &report.drifts {
         lines.push(render::render_change_line(&drift.repo_path, drift.state));
@@ -1054,10 +1058,18 @@ fn render_diff_human(report: &DiffReport) -> String {
     lines.join("\n")
 }
 
-fn render_view_overview_stdout(scopes: &[dotsync::ScopeInfo], files: &[PathBuf]) -> String {
+fn render_view_overview_stdout(
+    scopes: &[dotsync::ScopeInfo],
+    files: &[PathBuf],
+    machine_scope: &str,
+) -> String {
     render_lines(
         std::iter::once("Scopes".to_string())
-            .chain(scopes.iter().map(render_scope_line))
+            .chain(
+                scopes
+                    .iter()
+                    .map(|scope| render_scope_line(scope, machine_scope)),
+            )
             .chain([String::new(), "Files".to_string()])
             .chain(files.iter().map(|path| render::display_path(path))),
     )
@@ -1077,19 +1089,27 @@ fn render_view_scope_stdout(scope: &str, files: &[PathBuf]) -> String {
 /// Still exit 0: "no scope holds this" is an answer to the question asked.
 /// Asking for the *contents* of a file on a named scope is a different
 /// question, and having none to print is a stop.
-fn render_view_file_scopes_stdout(path: &std::path::Path, scopes: &[String]) -> String {
+fn render_view_file_scopes_stdout(
+    path: &std::path::Path,
+    scopes: &[String],
+    owner: Option<&str>,
+) -> String {
     let path = render::display_path(path);
-    if scopes.is_empty() {
+    let Some(owner) = owner else {
         return render_lines([
             format!("File {path}"),
             format!("No scope holds {path}."),
             "Run `dotsync view` to see every file the scopes do hold.".to_string(),
         ]);
-    }
+    };
     render_lines(
-        [format!("File {path}"), "Scopes".to_string()]
-            .into_iter()
-            .chain(scopes.iter().cloned()),
+        [
+            format!("File {path}"),
+            format!("Owned by {owner}; every other scope below has it from the cascade."),
+            "Scopes".to_string(),
+        ]
+        .into_iter()
+        .chain(scopes.iter().cloned()),
     )
 }
 
@@ -1099,10 +1119,19 @@ fn render_lines(lines: impl IntoIterator<Item = String>) -> String {
     lines.join("\n")
 }
 
-fn render_scope_line(scope: &dotsync::ScopeInfo) -> String {
+/// One scope, its parents, and whether it is the machine reading this.
+///
+/// The marker is the answer to "where am I?", which is the question `view`
+/// exists for and the one thing the list could not say: two machine scopes
+/// rendered identically apart from their names.
+fn render_scope_line(scope: &dotsync::ScopeInfo, machine_scope: &str) -> String {
+    let here = match scope.name == machine_scope {
+        true => "* ",
+        false => "  ",
+    };
     let mut line = match scope.parents.as_slice() {
-        [] => scope.name.clone(),
-        parents => format!("{} <- {}", scope.name, parents.join(", ")),
+        [] => format!("{here}{}", scope.name),
+        parents => format!("{here}{} <- {}", scope.name, parents.join(", ")),
     };
     // Only the scopes whose creator said what they are for carry this, so a
     // graph of self-evident names reads as a graph and nothing else.

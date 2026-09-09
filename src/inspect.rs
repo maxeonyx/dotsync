@@ -48,8 +48,18 @@ pub enum ViewAnswer {
     },
     /// Every file one scope holds.
     Scope { scope: String, files: Vec<PathBuf> },
-    /// Every scope that holds one file.
-    FileScopes { file: PathBuf, scopes: Vec<String> },
+    /// Every scope that holds one file, and the one that owns it.
+    FileScopes {
+        file: PathBuf,
+        scopes: Vec<String>,
+        /// The rootmost scope holding the file, which is the one it was
+        /// committed to: every other scope in the list has it because the
+        /// cascade carried it down. `None` when no scope holds the file at
+        /// all. Answered rather than left to be derived, because deriving it
+        /// takes exactly the knowledge of how the graph propagates that an
+        /// agent is running `view` to acquire.
+        owner: Option<String>,
+    },
     /// One file's contents on one scope.
     FileContents {
         scope: String,
@@ -60,7 +70,6 @@ pub enum ViewAnswer {
 
 #[derive(Debug, Clone)]
 pub struct DiffReport {
-    pub machine_scope: String,
     /// `diff` answers `status`'s question in more detail, so it owes the same
     /// qualifications.
     pub machine: MachineState,
@@ -109,6 +118,9 @@ pub async fn view(
                 }
                 ViewAnswer::FileScopes {
                     file: file.to_path_buf(),
+                    // The scopes are collected parents-before-children, so the
+                    // first one to hold the file is the rootmost.
+                    owner: scopes.first().cloned(),
                     scopes,
                 }
             }
@@ -213,7 +225,6 @@ pub async fn diff_home(paths: &DotsyncPaths) -> Run<Result<DiffReport, DotsyncEr
 
 async fn diff_report(session: &mut Session, home: &mut Home) -> Result<DiffReport, DotsyncError> {
     session.fetch().await?;
-    let machine_scope = home.machine_scope().to_string();
 
     // The same changes `status` reports, with the two sides shown. A remote
     // advance this machine has not applied yet is not one of them, so `diff`
@@ -225,7 +236,6 @@ async fn diff_report(session: &mut Session, home: &mut Home) -> Result<DiffRepor
     }
 
     Ok(DiffReport {
-        machine_scope,
         machine: MachineState::read(session).await?,
         drifts,
     })

@@ -18,6 +18,9 @@ use crate::sync::{classify_home_against_machine_scope, finishing};
 /// machine that could not commit at all.
 #[derive(Debug, Clone)]
 pub struct MachineState {
+    /// Which scope this machine is, which is the first thing an agent needs in
+    /// order to read anything else dotsync says.
+    pub machine_scope: String,
     /// The merge waiting for a decision, if one is.
     ///
     /// A paused cascade is the one state where a machine that looks completely
@@ -42,6 +45,7 @@ impl MachineState {
     pub(crate) async fn read(session: &Session) -> Result<Self, DotsyncError> {
         let recorded = crate::pause::load_paused_run(session.paths())?;
         Ok(Self {
+            machine_scope: session.machine_scope().to_string(),
             paused_cascade: crate::pause::pending_pause(
                 session,
                 session.machine_scope(),
@@ -62,7 +66,6 @@ impl MachineState {
 /// a machine that was merely behind reverted another machine's work.
 #[derive(Debug, Clone)]
 pub struct StatusReport {
-    pub machine_scope: String,
     pub machine: MachineState,
     /// Home holds something dotsync did not put there. Someone has to choose.
     pub changes: Vec<FileChange>,
@@ -112,7 +115,6 @@ async fn status_report(
     home: &mut Home,
 ) -> Result<StatusReport, DotsyncError> {
     session.fetch().await?;
-    let machine_scope = home.machine_scope().to_string();
     let classified = classify_home_against_machine_scope(session, home).await?;
     let file_changes = |include: fn(FileState) -> bool| {
         changed_paths(&classified, include)
@@ -125,7 +127,6 @@ async fn status_report(
     };
 
     Ok(StatusReport {
-        machine_scope,
         machine: MachineState::read(session).await?,
         changes: file_changes(FileState::is_drift),
         incoming: file_changes(FileState::is_incoming),

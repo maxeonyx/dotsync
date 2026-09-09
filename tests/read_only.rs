@@ -277,9 +277,9 @@ fn view_summarizes_checked_in_scopes_and_files() {
         &view_output,
         "\
 Scopes
-all
-linux <- all
-mx-xps-cy <- linux
+  all
+  linux <- all
+* mx-xps-cy <- linux
 
 Files
 .gitconfig
@@ -326,6 +326,7 @@ fn view_file_shows_scopes_and_scoped_file_content() {
         &file_scopes_output,
         "\
 File .gitconfig
+Owned by all; every other scope below has it from the cascade.
 Scopes
 all
 linux
