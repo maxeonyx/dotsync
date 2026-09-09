@@ -1199,7 +1199,7 @@ pub fn pause_a_conflict_on(
         machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
     assert_eq!(
         conflict.status.code(),
-        Some(3),
+        Some(1),
         "{}",
         render_output(&conflict)
     );

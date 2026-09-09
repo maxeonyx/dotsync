@@ -1,4 +1,4 @@
-use crate::{HumanOutput, SuccessOutput, UsageError};
+use crate::{HumanOutput, SuccessOutput};
 use dotsync::{
     ConflictedFile, Explanation, FileChange, FileDrift, FileState, PushReport, SkipReason,
     SkippedCommitPath, SyncReport, UnreachableRemote,
@@ -283,22 +283,6 @@ pub(crate) fn render_conflicts_human(files: &[ConflictedFile]) -> Vec<String> {
         }
     }
     lines
-}
-
-/// A usage error in the shape every other error has.
-///
-/// Both collections are always empty here — a run that never started found no
-/// state and stopped on no conflict — but they are present, because "every
-/// error payload has one shape" is only useful to a caller if it is true of
-/// the first error it ever meets.
-pub(crate) fn render_usage_error_json(error: &UsageError) -> serde_json::Value {
-    json!({
-        "status": "error",
-        "error": "usage",
-        "message": error.message,
-        "current_state": Vec::<String>::new(),
-        "conflicts": Vec::<serde_json::Value>::new(),
-    })
 }
 
 /// A changed file with the two sides shown. Exactly the object `status`

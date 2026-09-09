@@ -75,7 +75,7 @@ fn concurrent_same_scope_file_edits_require_resolution() {
         machine_b.run("dotsync commit all -m 'update shared from b' -- .config/shared.conf");
     assert_eq!(
         conflict.status.code(),
-        Some(3),
+        Some(1),
         "concurrent same-scope edit should require conflict resolution\n{}",
         render_output(&conflict)
     );
@@ -164,7 +164,7 @@ fn concurrent_edits_still_require_resolution_after_an_intervening_status() {
         machine_b.run("dotsync commit all -m 'update shared from b' -- .config/shared.conf");
     assert_eq!(
         conflict.status.code(),
-        Some(3),
+        Some(1),
         "a two-sided conflict must still pause after an intervening read-only command\n{}",
         render_output(&conflict)
     );
@@ -214,7 +214,7 @@ fn shared_scope_conflict_pauses_and_continue_applies_resolution_to_machine_homes
         machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
     assert_eq!(
         conflict.status.code(),
-        Some(3),
+        Some(1),
         "conflicting all-to-linux cascade should pause\n{}",
         render_output(&conflict)
     );
@@ -365,7 +365,7 @@ fn continue_preserves_non_conflicting_parent_changes_from_paused_merge() {
     );
     assert_eq!(
         conflict.status.code(),
-        Some(3),
+        Some(1),
         "conflicting all-to-linux cascade should pause\n{}",
         render_output(&conflict)
     );
@@ -421,7 +421,7 @@ fn continue_json_reports_unpushed_scopes() {
         machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
     assert_eq!(
         conflict.status.code(),
-        Some(3),
+        Some(1),
         "this test needs a paused cascade\n{}",
         render_output(&conflict)
     );
@@ -480,7 +480,7 @@ fn commit_while_cascade_paused_is_blocked_without_mutating_scope() {
         machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
     assert_eq!(
         conflict.status.code(),
-        Some(3),
+        Some(1),
         "conflicting all-to-linux cascade should pause\n{}",
         render_output(&conflict)
     );
@@ -493,7 +493,7 @@ fn commit_while_cascade_paused_is_blocked_without_mutating_scope() {
 
     assert_eq!(
         blocked.status.code(),
-        Some(3),
+        Some(1),
         "commit while a cascade is paused should be blocked, with the code that means a pause is waiting\n{}",
         render_output(&blocked)
     );
@@ -552,7 +552,7 @@ fn paused_cascade_withholds_publishing_until_it_is_resolved() {
         machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
     assert_eq!(
         conflict.status.code(),
-        Some(3),
+        Some(1),
         "this test needs a paused cascade\n{}",
         render_output(&conflict)
     );
@@ -583,7 +583,7 @@ fn paused_cascade_withholds_publishing_until_it_is_resolved() {
     // no state to consult in order to apply it.
     assert_eq!(
         sync_output.status.code(),
-        Some(3),
+        Some(1),
         "the conflict is still there, so the run that meets it stops at it\n{}",
         render_output(&sync_output)
     );
@@ -628,7 +628,7 @@ fn abort_paused_cascade_restores_pre_pause_state_and_clears_pause() {
         machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
     assert_eq!(
         conflict.status.code(),
-        Some(3),
+        Some(1),
         "conflicting all-to-linux cascade should pause\n{}",
         render_output(&conflict)
     );
@@ -694,7 +694,7 @@ fn abort_paused_cascade_restores_non_conflicting_selected_paths() {
         .run("dotsync commit all -m 'update shared config' -- .config/app.conf .config/other.conf");
     assert_eq!(
         conflict.status.code(),
-        Some(3),
+        Some(1),
         "conflicting all-to-linux cascade should pause\n{}",
         render_output(&conflict)
     );
@@ -734,7 +734,7 @@ fn abort_restores_a_drifted_file_outside_the_paused_selection() {
         machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
     assert_eq!(
         conflict.status.code(),
-        Some(3),
+        Some(1),
         "conflicting all-to-linux cascade should pause\n{}",
         render_output(&conflict)
     );
@@ -756,10 +756,10 @@ fn abort_restores_a_drifted_file_outside_the_paused_selection() {
     );
 }
 
-/// A paused cascade is one state with one remedy, so it is one exit code
-/// wherever a command meets it. It used to be 3 for the run that created the
-/// pause and 1 for the next run that ran into it, which teaches an agent that
-/// its own next command is a different kind of failure.
+/// A paused cascade is one state with one remedy, so every command that meets
+/// it answers alike: it stops, and it says which state it is in. The exit code
+/// alone cannot say that any more — there is one for "did not work" — so what
+/// this pins is that `paused_cascade` reaches the payload every time.
 #[test]
 fn a_paused_cascade_is_the_same_answer_whichever_command_meets_it() {
     let harness = TestHarness::new();
@@ -772,35 +772,37 @@ fn a_paused_cascade_is_the_same_answer_whichever_command_meets_it() {
 
     machine_b.run_ok("dotsync");
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
-    let conflict =
-        machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
-    assert_eq!(
-        conflict.status.code(),
-        Some(3),
-        "the run that pauses reports the pause\n{}",
-        render_output(&conflict)
-    );
+    let conflict = machine_b
+        .run("dotsync --output json commit all -m 'update shared config' -- .config/app.conf");
 
     machine_b.write_file(".config/other.conf", "other = true\n");
-    let blocked = machine_b.run("dotsync commit goof-b -m 'try another' -- .config/other.conf");
-    assert_eq!(
-        blocked.status.code(),
-        Some(3),
-        "and so does the next run that meets it\n{}",
-        render_output(&blocked)
-    );
+    let blocked =
+        machine_b.run("dotsync --output json commit goof-b -m 'try' -- .config/other.conf");
 
     machine_b.write_file(
         ".config/app.conf",
         "<<<<<<< all\nsetting = \"all\"\n=======\nsetting = \"linux\"\n>>>>>>> linux\n",
     );
-    let unresolved = machine_b.run("dotsync continue");
-    assert_eq!(
-        unresolved.status.code(),
-        Some(3),
-        "a continue that finds a half-done resolution is still the same paused cascade\n{}",
-        render_output(&unresolved)
-    );
+    let unresolved = machine_b.run("dotsync --output json continue");
+
+    for (run, what) in [
+        (&conflict, "the run that pauses"),
+        (&blocked, "the next run that meets it"),
+        (&unresolved, "a continue that finds a half-done resolution"),
+    ] {
+        assert_eq!(
+            run.status.code(),
+            Some(1),
+            "{what} did not do what it says\n{}",
+            render_output(run)
+        );
+        assert_eq!(
+            parse_stdout_json(run)["paused_cascade"],
+            "linux",
+            "{what} has to name the state, because the exit code no longer can\n{}",
+            render_output(run)
+        );
+    }
 
     let aborted = machine_b.run_ok("dotsync --output json abort");
     let json = parse_stdout_json(&aborted);
@@ -840,7 +842,7 @@ fn status_and_diff_say_a_cascade_is_paused() {
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     machine_b.run_expecting(
         "dotsync commit all -m 'shared change' -- .config/app.conf",
-        3,
+        1,
     );
 
     // Home now holds exactly what the pause left there, so both commands would
@@ -889,7 +891,7 @@ fn view_says_a_cascade_is_paused() {
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     machine_b.run_expecting(
         "dotsync commit all -m 'shared change' -- .config/app.conf",
-        3,
+        1,
     );
 
     // Every shape `view` answers in, because the pause is true of the machine
@@ -1186,7 +1188,7 @@ fn continue_refuses_a_resolution_that_still_holds_conflict_markers() {
     );
     assert_eq!(
         continued.status.code(),
-        Some(3),
+        Some(1),
         "a file that still holds conflict markers is not a resolution, and the cascade is still paused after refusing it\n{}",
         render_output(&continued)
     );
@@ -1225,7 +1227,7 @@ fn continue_refuses_conflict_markers_left_in_another_machines_scope() {
     // this apart from K2: today's continue exits 1 here whatever it recorded.
     assert_eq!(
         continued.status.code(),
-        Some(3),
+        Some(1),
         "a file that still holds conflict markers is not a resolution, and the cascade is still paused after refusing it\n{}",
         render_output(&continued)
     );
@@ -1289,7 +1291,7 @@ fn a_pause_on_another_machines_scope_withholds_this_machines_own_too() {
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     let pause = machine_b.run_expecting(
         "dotsync commit all -m 'update shared config' -- .config/app.conf",
-        3,
+        1,
     );
 
     for (scope, was) in scopes.iter().zip(&before) {
@@ -1335,7 +1337,7 @@ fn a_pause_on_another_machines_scope_withholds_this_machines_own_too() {
 /// the machine has to say so. Driven on v0.6.0 and recorded in PLAN §2.3 step
 /// 6: abort exits 0 saying `discarded the merge paused at 'linux'`, `status`
 /// then answers `no changes` with no `paused_cascade`, and the very next
-/// command exits 3 on the same conflict. Three aborts, three pauses, and the
+/// command stops on the same conflict. Three aborts, three pauses, and the
 /// one command an agent runs to find out where it stands is the one that says
 /// everything is fine.
 ///
@@ -1367,11 +1369,11 @@ fn a_conflict_that_came_from_the_remote_is_still_reported_after_abort() {
         "setting = \"from-elsewhere\"\n",
     );
 
-    machine_b.run_expecting("dotsync", 3);
+    machine_b.run_expecting("dotsync", 1);
     let aborted = machine_b.run("dotsync abort");
     assert_eq!(
         aborted.status.code(),
-        Some(3),
+        Some(1),
         "abort put home back and took nothing away from the remote, so the machine is still paused — and 3 is what says a pause is waiting\n{}",
         render_output(&aborted)
     );
@@ -1389,7 +1391,7 @@ fn a_conflict_that_came_from_the_remote_is_still_reported_after_abort() {
     let next = machine_b.run("dotsync");
     assert_eq!(
         next.status.code(),
-        Some(3),
+        Some(1),
         "`status` said clean and the next run stopped, which is the disagreement this is about\n{}",
         render_output(&next)
     );
@@ -1475,7 +1477,7 @@ fn a_pause_survives_losing_every_machine_local_record_of_it() {
     let commit = machine_b.run("dotsync commit goof-b -m 'unrelated' -- .config/app.conf");
     assert_eq!(
         commit.status.code(),
-        Some(3),
+        Some(1),
         "and a commit is still refused, because the machine is still in the state that refuses it\n{}",
         render_output(&commit)
     );

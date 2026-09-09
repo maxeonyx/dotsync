@@ -13,7 +13,7 @@ fn unknown_command_is_not_treated_as_scope_commit() {
 
     assert_eq!(
         output.status.code(),
-        Some(2),
+        Some(1),
         "unknown top-level command should be a usage error\n{}",
         render_output(&output)
     );
@@ -37,7 +37,7 @@ fn an_unknown_command_honors_the_json_contract_wherever_the_flag_sits() {
         let output = machine.run(command);
         assert_eq!(
             output.status.code(),
-            Some(2),
+            Some(1),
             "{command}\n{}",
             render_output(&output)
         );
@@ -70,7 +70,7 @@ fn clap_usage_errors_emit_the_json_contract() {
         let output = machine.run(command);
         assert_eq!(
             output.status.code(),
-            Some(2),
+            Some(1),
             "`{command}` should be a usage error\n{}",
             render_output(&output)
         );
@@ -101,7 +101,7 @@ fn a_usage_error_has_the_same_shape_as_every_other_error() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let output = machine.run_expecting("dotsync --output json bogus", 2);
+    let output = machine.run_expecting("dotsync --output json bogus", 1);
 
     let json = parse_stdout_json(&output);
     for field in ["current_state", "conflicts"] {

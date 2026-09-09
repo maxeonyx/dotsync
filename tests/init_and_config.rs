@@ -156,7 +156,7 @@ fn init_without_remote_noninteractive_matches_full_recovery_message() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.run_expecting("dotsync init", 2);
+    let init_output = machine.run_expecting("dotsync init", 1);
 
     let stderr = String::from_utf8_lossy(&init_output.stderr);
     let expected = "dotsync: init needs the repo remote URL

@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
     abort_paused_cascade, commit_and_sync, continue_after_conflict, create_scope, diff_home,
     discard, init, status, sync, view, CommitOptions, DiffReport, DotsyncError, DotsyncPaths,
-    MachineState, Resumed, Run, UnreachableRemote, ViewAnswer,
+    Explanation, MachineState, Resumed, Run, UnreachableRemote, ViewAnswer,
 };
 mod render;
 use serde_json::json;
@@ -24,11 +24,10 @@ Basic workflow:
 
 const TOP_LEVEL_AFTER_HELP: &str = "Exit codes:
   0  the command did what it says
-  1  dotsync stopped, or `dotsync diff` found changes — with `--output json`,
-     `status` is \"error\" for a stop and \"ok\" for changes `diff` found
-  2  the command line was wrong
-  3  a paused cascade is waiting; resolve the conflicted files in home and run
-     `dotsync continue`, or run `dotsync abort` to discard it
+  1  it did not, or `dotsync diff` found changes. Which of those, and what kind
+     of stop it was, is in `--output json`: `status` is \"error\" for a stop and
+     \"ok\" for the changes `diff` found, and `error` names the kind — including
+     `cascade_paused`, the one that means a merge is waiting for you
 
 Examples:
   $ dotsync
@@ -274,11 +273,6 @@ impl SuccessOutput {
     }
 }
 
-#[derive(Debug, Clone)]
-struct UsageError {
-    message: String,
-}
-
 /// What to print, and what the run that produced it could not do.
 ///
 /// The remote state sits out here rather than inside either arm, because it is
@@ -309,7 +303,11 @@ struct CliOutput {
 enum OutputKind {
     Success(SuccessOutput),
     Error(DotsyncError),
-    Usage(UsageError),
+    /// The command line was wrong, so there was never a run. It reports in the
+    /// same shape as everything else: `Explanation` is what a stop is, and a
+    /// caller that has learned to read one has learned to read the first error
+    /// it is ever likely to meet.
+    Usage(Explanation),
 }
 
 impl CliOutput {
@@ -358,7 +356,9 @@ async fn main() {
     let output_format = output_format_of(&cli);
     let outcome = match Action::try_from_cli(cli, detect_cli_context()) {
         Ok(action) => dispatch(action).await,
-        Err(error) => Ok(CliOutput::without_run(OutputKind::Usage(error))),
+        Err(message) => Ok(CliOutput::without_run(OutputKind::Usage(usage_error(
+            &message,
+        )))),
     };
 
     let exit_code = match outcome {
@@ -423,10 +423,10 @@ fn emit_clap_error(error: clap::Error) -> i32 {
     if matches!(output_format_from_args(), OutputFormat::Json) {
         println!(
             "{}",
-            render::render_usage_error_json(&usage_error(message.trim_end()))
+            render::render_error_json(&usage_error(message.trim_end()))
         );
     }
-    error.exit_code()
+    1
 }
 
 /// Which format this run answers in, including when clap could not tell.
@@ -459,7 +459,7 @@ fn output_format_from_args() -> OutputFormat {
 }
 
 impl Action {
-    fn try_from_cli(cli: Cli, context: CliContext) -> Result<Self, UsageError> {
+    fn try_from_cli(cli: Cli, context: CliContext) -> Result<Self, String> {
         match cli.command {
             Some(Command::Init {
                 remote_url,
@@ -497,9 +497,9 @@ impl Action {
             }),
             Some(Command::Unknown(args)) => {
                 let command = args.first().map(String::as_str).unwrap_or("<empty>");
-                Err(usage_error(&format!(
+                Err(format!(
                     "unknown command `{command}`; run `dotsync --help` for supported commands"
-                )))
+                ))
             }
             None => Ok(Self::Sync),
         }
@@ -509,7 +509,7 @@ impl Action {
 fn init_remote_from_args(
     remote_url: Option<String>,
     context: CliContext,
-) -> Result<InitRemote, UsageError> {
+) -> Result<InitRemote, String> {
     if let Some(remote_url) = remote_url {
         return Ok(InitRemote::Provided(remote_url));
     }
@@ -518,7 +518,7 @@ fn init_remote_from_args(
         return Ok(InitRemote::Prompt);
     }
 
-    Err(usage_error(INIT_REMOTE_URL_USAGE))
+    Err(INIT_REMOTE_URL_USAGE.to_string())
 }
 
 async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
@@ -547,9 +547,17 @@ async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
     }
 }
 
-fn usage_error(message: &str) -> UsageError {
-    UsageError {
+/// A command line that never started a run is still a stop, and it reports in
+/// the shape every other stop has — so a caller that has learned to read one
+/// payload has learned to read the first error it is ever likely to meet.
+fn usage_error(message: &str) -> Explanation {
+    Explanation {
+        code: "usage",
         message: message.to_string(),
+        paused_cascade: None,
+        current_state: Vec::new(),
+        conflicts: Vec::new(),
+        teaching: None,
     }
 }
 
@@ -558,7 +566,11 @@ async fn run_init(remote_url: InitRemote, parents: Vec<String>) -> Result<CliOut
         InitRemote::Provided(remote_url) => remote_url,
         InitRemote::Prompt => match prompt_init_remote_url() {
             Ok(remote_url) => remote_url,
-            Err(error) => return Ok(CliOutput::without_run(OutputKind::Usage(error))),
+            Err(message) => {
+                return Ok(CliOutput::without_run(OutputKind::Usage(usage_error(
+                    &message,
+                ))))
+            }
         },
     };
     let paths = discover_paths()?;
@@ -602,19 +614,19 @@ async fn run_create_scope(
     }))
 }
 
-fn prompt_init_remote_url() -> Result<String, UsageError> {
+fn prompt_init_remote_url() -> Result<String, String> {
     eprint!("dotsync init remote URL: ");
     io::stderr()
         .flush()
-        .map_err(|err| usage_error(&format!("init could not write prompt: {err}")))?;
+        .map_err(|err| format!("init could not write prompt: {err}"))?;
 
     let mut remote_url = String::new();
     io::stdin()
         .read_line(&mut remote_url)
-        .map_err(|err| usage_error(&format!("init could not read remote URL: {err}")))?;
+        .map_err(|err| format!("init could not read remote URL: {err}"))?;
     let remote_url = remote_url.trim().to_string();
     if remote_url.is_empty() {
-        return Err(usage_error(INIT_REMOTE_URL_USAGE));
+        return Err(INIT_REMOTE_URL_USAGE.to_string());
     }
     Ok(remote_url)
 }
@@ -688,7 +700,9 @@ async fn run_abort() -> Result<CliOutput, DotsyncError> {
             return output;
         };
         output.json["paused_cascade"] = json!(scope);
-        output.exit_code = 3;
+        // The run did not do what it says on the tin: home went back, and the
+        // merge it was asked to end is still waiting.
+        output.exit_code = 1;
         output.notes.extend([
             format!("dotsync: the conflict at `{scope}` came from the remote rather than from anything this machine committed, so there was nothing to take back and it is still waiting"),
             "dotsync: aborting again will not clear it — edit the conflicted file(s) in home to the merged contents you want and run `dotsync continue`.".to_string(),
@@ -1092,43 +1106,42 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
             }
             success.exit_code
         }
-        OutputKind::Error(error) => {
-            let explanation = error.explain(invocation);
-            let exit_code = if explanation.paused_cascade.is_some() {
-                3
-            } else {
-                1
-            };
-            eprintln!("{}", render::render_error_human(&explanation));
-            // The conflict itself, after the teaching block and apart from it,
-            // because it is the material to work from rather than more
-            // instructions — and because it is what dotsync hands over
-            // *instead* of writing markers into the file.
-            if !explanation.conflicts.is_empty() {
-                eprintln!("\nConflicted files:");
-                for line in render::render_conflicts_human(&explanation.conflicts) {
-                    eprintln!("{line}");
-                }
-            }
-            if matches!(output_format, OutputFormat::Json) {
-                println!(
-                    "{}",
-                    render::with_remote_state(
-                        render::render_error_json(&explanation),
-                        unreachable_remote.as_ref()
-                    )
-                );
-            }
-            exit_code
-        }
-        OutputKind::Usage(error) => {
-            eprintln!("dotsync: {}", error.message);
-            if matches!(output_format, OutputFormat::Json) {
-                println!("{}", render::render_usage_error_json(&error));
-            }
-            2
+        OutputKind::Error(error) => emit_stop(
+            output_format,
+            error.explain(invocation),
+            unreachable_remote.as_ref(),
+        ),
+        OutputKind::Usage(explanation) => {
+            emit_stop(output_format, explanation, unreachable_remote.as_ref())
         }
     }
+}
+
+/// A run that stopped, or a command line that never started one: the teaching
+/// block, the conflict if there is one, the payload, and 1.
+fn emit_stop(
+    output_format: &OutputFormat,
+    explanation: Explanation,
+    unreachable_remote: Option<&UnreachableRemote>,
+) -> i32 {
+    eprintln!("{}", render::render_error_human(&explanation));
+    // The conflict itself, after the teaching block and apart from it,
+    // because it is the material to work from rather than more
+    // instructions — and because it is what dotsync hands over
+    // *instead* of writing markers into the file.
+    if !explanation.conflicts.is_empty() {
+        eprintln!("\nConflicted files:");
+        for line in render::render_conflicts_human(&explanation.conflicts) {
+            eprintln!("{line}");
+        }
+    }
+    if matches!(output_format, OutputFormat::Json) {
+        println!(
+            "{}",
+            render::with_remote_state(render::render_error_json(&explanation), unreachable_remote)
+        );
+    }
+    1
 }
 
 #[cfg(test)]
