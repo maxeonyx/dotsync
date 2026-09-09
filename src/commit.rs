@@ -97,6 +97,13 @@ pub async fn commit_and_sync(
     options: CommitOptions,
 ) -> Run<Result<CommitReport, DotsyncError>> {
     in_session(paths, async |session, paths| {
+        // Before the fetch, because it is a fact about the command line and
+        // nothing about the repo can change the answer.
+        if options.message.trim().is_empty() {
+            return Err(DotsyncError::EmptyCommitMessage {
+                scope: options.scope.clone(),
+            });
+        }
         reject_commit_if_paused(session, session.machine_scope()).await?;
         let mut home = Home::acquire(session, paths).await?;
         let outcome = commit_in_session(session, &mut home, options).await;

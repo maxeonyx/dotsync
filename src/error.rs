@@ -388,6 +388,11 @@ pub enum DotsyncError {
     ScopeCreationConflict { scope: String, files: Vec<String> },
     #[error("scope `{scope}` does not exist")]
     InvalidScope { scope: String },
+    /// `commit -m ""`. Omitting `-m` is already a hard error, so this is a
+    /// hole in a rule that exists rather than a new one: what it lands is a
+    /// commit in shared history with nothing to say what it was for.
+    #[error("a commit to scope `{scope}` needs a message")]
+    EmptyCommitMessage { scope: String },
     /// Asked for a file on a scope that does not hold it. An ordinary answer
     /// to an ordinary question — a file exists on the scope that added it and
     /// on every scope below — so it is its own error rather than an internal
@@ -644,6 +649,18 @@ impl DotsyncError {
         // scopes rather than about whichever command the reader happened to be
         // running: `view --scope` used to get a bare one-liner for the mistake
         // `commit` explained in full.
+        Self::EmptyCommitMessage { scope } => Explanation::stop("empty_commit_message", self)
+            .teaching(Teaching::new(
+                "that commit has no message",
+                "Dotsync records the home files you name onto a scope branch, and that commit is shared history: every machine on the scope fetches it, and its message is the only thing that ever says why the change was made.",
+                "This commit flow was about to write it.",
+                "It expects `-m` to carry a description. Whitespace is not one.",
+                "A commit with an empty subject cannot be described afterwards, and dotsync does not rewrite published history.",
+                &[
+                    &format!("run the same command with a description: `dotsync commit {scope} -m \"what changed and why\" -- <paths...>`."),
+                    "run `dotsync status` if you need to see what is about to be recorded.",
+                ],
+            )),
         Self::InvalidScope { .. } => Explanation::stop("invalid_scope", self)
             .teaching(Teaching::new(
             "invalid scope",

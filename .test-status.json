@@ -9,7 +9,7 @@
     "dotsync::cli_contract$every_command_the_advice_names_is_a_command_dotsync_knows": "passing",
     "dotsync::cli_contract$output_format_is_accepted_after_the_subcommand": "passing",
     "dotsync::cli_contract$unknown_command_is_not_treated_as_scope_commit": "passing",
-    "dotsync::commit_and_cascade$a_commit_with_an_empty_message_is_refused": "pending",
+    "dotsync::commit_and_cascade$a_commit_with_an_empty_message_is_refused": "passing",
     "dotsync::commit_and_cascade$commit_cascades_through_all_descendants": "passing",
     "dotsync::commit_and_cascade$commit_deletes_file_from_scope": "passing",
     "dotsync::commit_and_cascade$commit_explicit_path_adds_file_to_scope_and_syncs": "passing",

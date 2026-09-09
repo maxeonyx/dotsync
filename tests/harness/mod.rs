@@ -1233,15 +1233,22 @@ pub fn dotsync_args(command: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut quote = None;
+    // A quoted empty string is an argument. Dropping it silently is how
+    // `dotsync commit all -m '' -- .apprc` reached the binary as `-m .apprc`.
+    let mut quoted = false;
 
     for character in command.chars() {
         match (quote, character) {
-            (Some(active), character) if character == active => quote = None,
+            (Some(active), character) if character == active => {
+                quote = None;
+                quoted = true;
+            }
             (Some(_), character) => current.push(character),
             (None, '\'' | '"') => quote = Some(character),
             (None, character) if character.is_whitespace() => {
-                if !current.is_empty() {
+                if !current.is_empty() || quoted {
                     parts.push(std::mem::take(&mut current));
+                    quoted = false;
                 }
             }
             (None, character) => current.push(character),
@@ -1249,7 +1256,7 @@ pub fn dotsync_args(command: &str) -> Vec<String> {
     }
 
     assert!(quote.is_none(), "unterminated quote in command: {command}");
-    if !current.is_empty() {
+    if !current.is_empty() || quoted {
         parts.push(current);
     }
 
