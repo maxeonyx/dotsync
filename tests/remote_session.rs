@@ -52,8 +52,12 @@ fn status_diff_sync_and_commit_each_reach_the_remote_once() {
         "dotsync status",
         "dotsync diff",
         "dotsync",
+        "dotsync discard .bashrc",
         "dotsync commit all -m 'add bashrc' -- .bashrc",
     ] {
+        // Each command needs something to do, and `discard` needs a change to
+        // throw away in particular.
+        machine.write_file(".bashrc", "export DOTSYNC=1\n");
         let (output, fetches) = machine.fetches_during(command);
         assert_eq!(
             fetches,

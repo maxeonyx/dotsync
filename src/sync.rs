@@ -74,7 +74,11 @@ pub struct SyncCommandReport {
 pub async fn sync(paths: &DotsyncPaths) -> Run<Result<SyncCommandReport, DotsyncError>> {
     in_session(paths, async |session, paths| {
         let mut home = Home::acquire(session, paths).await?;
-        let outcome = sync_home(session, &mut home, LocalChanges::Carry).await;
+        let outcome = async {
+            session.fetch().await?;
+            sync_home(session, &mut home, LocalChanges::Carry).await
+        }
+        .await;
         finishing(home, session, outcome).await
     })
     .await
@@ -147,12 +151,13 @@ pub(crate) async fn finishing<T, E: From<DotsyncError>>(
     Ok(value)
 }
 
+/// Converge, publish, and move home — the whole of what a run does once it has
+/// fetched. Its callers fetch, because a run fetches once.
 async fn sync_home(
     session: &mut Session,
     home: &mut Home,
     local: LocalChanges,
 ) -> Result<SyncCommandReport, DotsyncError> {
-    session.fetch().await?;
     let checkpoint = converge::checkpoint(session.repo().as_ref(), session.graph());
     converge_or_pause(session, home, &checkpoint).await?;
     // Publish before touching home: scope commits left behind by an
