@@ -7,6 +7,12 @@ build, test, and release without an `agent-tools` checkout.
 
 Run `cargo ratchet`, not plain `cargo test`. A new test must be red when first introduced and committed as `pending`; that expected red test keeps CI green. A new test must not pass when first introduced—doing so makes the ratchet and CI red. Implement only after the red commit, then rerun the ratchet and commit the promotion to `passing`.
 
+**The tests encode the design, so a design change changes them** (Max): _"the tests encode the design - they are derived from the design. If the design changes, the tests thus change. No questions needed."_ Rewrite or delete such a test in the same commit as the behaviour change, and say why in the message. Never work around a test you believe is wrong, and never silently delete one.
+
+**Don't run `cargo ratchet` from a git hook.** It fails there: git's `GIT_DIR`/`GIT_WORK_TREE` leak into the test processes, so every test that shells out to git resolves against the wrong repository ([tdd-ratchet-rs#4](https://github.com/maxeonyx/tdd-ratchet-rs/issues/4)).
+
+**Run the ratchet once, then commit what it wrote.** It rewrites `.test-status.json` itself — consuming a `removals` list, applying a `renames` bridge, flipping a promotion — and running it again before committing that rewrite reports the removals as tests missing from the run.
+
 ## Integration workflow
 
 Run `devenv test` before committing and pushing; it includes `actionlint`, so
