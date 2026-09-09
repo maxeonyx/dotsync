@@ -398,7 +398,7 @@ fn every_command_that_only_syncs_names_the_machine_scope_once() {
 }
 
 /// Home is the working copy and its parent is the mark, so a sync is
-/// `merge(home, mark, new head)` (PLAN §2.3 step 2; `spike.ignore/README.md`,
+/// `merge(home, mark, new head)` (`spike.ignore/README.md`,
 /// "Implications for the real step 2": "if the in-memory merge is resolved,
 /// create the new wc commit ... carrying non-conflicting local edits across
 /// the sync"). An edit to one file and an incoming change to another is that
@@ -582,12 +582,12 @@ fn an_edit_here_and_a_change_elsewhere_in_the_same_file_combine_instead_of_confl
 }
 
 /// The live fleet migrates by upgrading the binary and running `dotsync`
-/// (PLAN §2.6, "The live fleet"), and every machine in it is carrying a
+/// (the rewrite's own migration requirement), and every machine in it is carrying a
 /// `sync-state.json` written by the release before. That file holds exactly
 /// `machine_scope` and `last_synced_revision` — a hand-rolled record of what
 /// jj's own view already says — so step 2 dissolves it: `spike.ignore/README.md`,
 /// "Migration for the live fleet: first run of the new binary creates the wc
-/// commit ..., snapshots home ..., deletes `sync-state.json`." PLAN §2.6,
+/// commit ..., snapshots home ..., deletes `sync-state.json`." The rewrite's end state,
 /// "On-disk, per machine": "Two things: the home files, and the hidden repo.
 /// Nothing else — no sync state file, no pause file, no `config.toml`."
 ///

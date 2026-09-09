@@ -1147,7 +1147,7 @@ pub fn pause_a_conflict_on_linux(harness: &TestHarness) -> (MachineEnvironment, 
 /// its own path and the resolution is its own config. `goof-a` is the *other*
 /// machine's leaf scope: the cascade from `all` still has to merge into it, so
 /// the same collision happens, but the paused machine does not descend from it
-/// and the resolution is not its config. PLAN item 3: "Every conflict test in
+/// and the resolution is not its config. The standing rule: "every conflict test in
 /// the suite today pauses on a scope the machine descends from, which is why
 /// this survived three waves."
 ///
@@ -1334,7 +1334,7 @@ pub fn quoted_dotsync_invocations(text: &str) -> Vec<String> {
 /// both came from. Anything less and the agent is asked to merge something it
 /// can only see part of.
 ///
-/// **Where** it reaches the agent is deliberately open. PLAN §2.3 step 6:
+/// **Where** it reaches the agent is deliberately open. The rewrite settled it:
 /// "Conflict presentation is not settled and is decided by the agent
 /// validation loop, not here" — writing `<<<<<<<` into live config is one
 /// answer and describing the conflict without touching the file is another,

@@ -1024,7 +1024,7 @@ fn discarding_at_a_pause_does_not_overwrite_the_resolution_in_progress() {
     );
 }
 
-/// K2, and the reason PLAN item 3 opens with "read this first": resolving a
+/// K2: resolving a
 /// conflict on a scope this machine is not on is broken end to end, and the
 /// run reports two contradictory things at once.
 ///
@@ -1334,8 +1334,7 @@ fn a_pause_on_another_machines_scope_withholds_this_machines_own_too() {
 
 /// `dotsync abort` takes back what this machine committed, and a conflict that
 /// arrived from the remote is not that — so aborting one cannot end it, and
-/// the machine has to say so. Driven on v0.6.0 and recorded in PLAN §2.3 step
-/// 6: abort exits 0 saying `discarded the merge paused at 'linux'`, `status`
+/// the machine has to say so. Driven on v0.6.0: abort exits 0 saying `discarded the merge paused at 'linux'`, `status`
 /// then answers `no changes` with no `paused_cascade`, and the very next
 /// command stops on the same conflict. Three aborts, three pauses, and the
 /// one command an agent runs to find out where it stands is the one that says
@@ -1503,7 +1502,7 @@ fn a_pause_survives_losing_every_machine_local_record_of_it() {
 /// nothing of the conflict in the file.
 ///
 /// Whether the answer is markers written into home or a description that
-/// leaves home alone is PLAN §2.3 step 6's open question, so this asserts only
+/// leaves home alone is the presentation's own question, so this asserts only
 /// that all three versions reach the agent.
 #[test]
 fn a_pause_puts_the_conflict_in_front_of_the_agent() {
@@ -1552,7 +1551,7 @@ fn a_pause_on_another_machines_scope_puts_that_conflict_in_front_of_the_agent() 
 
 /// A conflict does not need a `commit` to produce it. Home is the working copy
 /// and its parent is the mark, so an ordinary sync is `merge(home, mark, new
-/// head)` (PLAN §2.3 step 2), and two edits to the same line of the same file
+/// head)`, and two edits to the same line of the same file
 /// are the case that merge cannot resolve on its own.
 ///
 /// What is decided about it: the sync stops *whole*. Home is derived from one
@@ -1562,7 +1561,7 @@ fn a_pause_on_another_machines_scope_puts_that_conflict_in_front_of_the_agent() 
 /// home derived partly from `P` and partly from `H` makes any single parent a
 /// lie ... which is the silent-revert path." So the second, entirely
 /// unconflicted incoming file does not arrive either. And no marker is written
-/// into home: the conflict is presented instead (PLAN §2.3 step 6, settled
+/// into home: the conflict is presented instead (settled
 /// 2026-08-19), because a config file full of `<<<<<<<` is broken config for
 /// exactly as long as the conflict takes to fix.
 ///
@@ -1570,7 +1569,7 @@ fn a_pause_on_another_machines_scope_puts_that_conflict_in_front_of_the_agent() 
 /// agent is shown neither the version it collided with nor the version they
 /// both came from.
 ///
-/// The exit code is deliberately not pinned — PLAN has left what a stopping
+/// The exit code is deliberately not pinned — what a stopping
 /// sync exits with open through batches A, B and C, and this does not close
 /// it. Nor are the payload's key names: the assertion is that the payload
 /// carries the conflicted path at all.
@@ -1622,7 +1621,8 @@ fn a_local_edit_conflicting_with_an_incoming_change_stops_the_sync_whole() {
 /// Without markers in home, home reads identically before the agent starts and
 /// after it decides to keep its own side, so "I'm done" is the one thing
 /// dotsync cannot find out for itself — which is why `continue` survives the
-/// rewrite (PLAN §2.3 step 6, "The preference carries an implication").
+/// rewrite: without markers in home, "I am done" is the one thing dotsync
+/// cannot find out for itself.
 ///
 /// Finishing means finishing the whole sync: the unconflicted file that could
 /// not arrive on its own arrives now, with the resolution. And the resolution

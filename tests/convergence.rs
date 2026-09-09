@@ -344,7 +344,7 @@ fn two_machines_that_both_moved_a_scope_converge_into_a_merge() {
 /// agent is shown neither the version it is colliding with nor the version
 /// they both came from, and the only way out of the state is repo surgery.
 ///
-/// Where the three versions reach the agent is not asserted: PLAN §2.3 step 6
+/// Where the three versions reach the agent is not asserted: The conflict presentation
 /// leaves conflict presentation to the agent validation loop, so markers in
 /// home and a description that leaves home alone are both live answers. What
 /// they have to hold is the same either way.
@@ -467,7 +467,7 @@ fn a_push_another_machine_won_the_race_to_is_retried_within_the_run() {
     );
 }
 
-/// PLAN item 2: "Kill-in-the-middle black-box tests enforce that every
+/// The convergence requirement: "kill-in-the-middle black-box tests enforce that every
 /// interruption point converges on rerun."
 ///
 /// This is that matrix's `continue` row, at the one interruption point that
@@ -584,7 +584,7 @@ fn a_scope_published_without_its_cascade_still_reaches_the_other_machines() {
     );
 }
 
-/// PLAN §2.2, reported and not carried elsewhere: "Two `dotsync commit` runs
+/// Reported during the rewrite's root-cause review: "Two `dotsync commit` runs
 /// overlapping on one machine leave it permanently dead", four reproductions
 /// out of four. Re-driven by hand against this build, which is deader than
 /// that record: both runs stop on each other's drift, and afterwards *every*

@@ -97,8 +97,8 @@ fn checkout_error(
 /// a symlink, and refuses paths inside dotsync's own repo directory.
 ///
 /// Following a symlinked parent is how a managed write escapes the managed
-/// set (the `selflink` sweep, PLAN §1.5), and writing under the repo root is
-/// how a sync clobbers dotsync's own `git_target` (PLAN §2.2). Both guards
+/// set (the `selflink` sweep), and writing under the repo root is
+/// how a sync clobbers dotsync's own `git_target`. Both guards
 /// live here — the single place every home read and write goes through — so
 /// no caller can forget them.
 fn home_disk_path(home: &Path, repo_root: &Path, path: &RepoPathBuf) -> Result<PathBuf, String> {

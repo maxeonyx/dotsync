@@ -94,7 +94,7 @@ fn clap_usage_errors_emit_the_json_contract() {
 }
 
 /// Every error payload carries the same collections, so error handling has one
-/// shape — PLAN says so. Usage errors carried none of them, which is the one
+/// shape. Usage errors carried none of them, which is the one
 /// error an agent hits before it has learned anything else.
 #[test]
 fn a_usage_error_has_the_same_shape_as_every_other_error() {

@@ -61,7 +61,7 @@ fn init_reports_no_drift() {
 }
 
 /// Creating a scope is the whole of what can be done to the graph, and the
-/// test the graph work has owed since PLAN §2.3 step 1: a run that reports it
+/// test the graph work has owed since the rewrite began: a run that reports it
 /// created a scope means the scope exists and can be used. Declaring one in
 /// `config.toml` reported success and created no bookmark, so the scope was
 /// unusable and `dotsync view` broke on every machine in the fleet.

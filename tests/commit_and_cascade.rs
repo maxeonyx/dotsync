@@ -400,7 +400,7 @@ fn multiple_machines_can_contribute_to_all_without_losing_changes() {
     );
 }
 
-/// History has to be able to say which machine made a change (PLAN §2.3 step 2;
+/// History has to be able to say which machine made a change (the working-copy rewrite;
 /// Max: "just an oversight from how we're using JJ I guess, but yeah a good one
 /// to fix"). Every commit dotsync writes on this machine's behalf carries the
 /// machine, and there are two kinds of them: the commit that records what you

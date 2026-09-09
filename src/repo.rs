@@ -283,7 +283,7 @@ impl PushReport {
 /// fork of one branch. Dotsync used to offer every bookmark it held, which
 /// meant a run would recreate a branch its owner had deleted and undo a rewind
 /// its owner meant, without saying anything: it modelled scopes and acted on
-/// refs (PLAN §2.2). What makes the two the same set now is that scope
+/// refs. What makes the two the same set now is that scope
 /// membership is structural.
 fn pending_bookmark_updates(
     repo: &dyn Repo,

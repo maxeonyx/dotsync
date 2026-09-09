@@ -109,7 +109,7 @@ impl Explanation {
 /// The versions are not materialized into home. A config file full of
 /// `<<<<<<<` is broken config for exactly as long as the conflict takes to
 /// fix, so the application it configures breaks precisely while somebody is
-/// fixing it (PLAN §2.3 step 6, settled 2026-08-19). This is the object that
+/// fixing it (settled 2026-08-19). This is the object that
 /// carries them instead.
 #[derive(Debug, Clone)]
 pub struct ConflictedFile {
