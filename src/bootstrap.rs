@@ -91,11 +91,13 @@ async fn create_repo_and_join(
 ) -> Result<InitReport, DotsyncError> {
     if let Some(parent) = paths.repo_root.parent() {
         std::fs::create_dir_all(parent).map_err(|source| DotsyncError::Io {
+            doing: "create",
             path: parent.to_path_buf(),
             source,
         })?;
     }
     std::fs::create_dir_all(&paths.repo_root).map_err(|source| DotsyncError::Io {
+        doing: "create",
         path: paths.repo_root.clone(),
         source,
     })?;

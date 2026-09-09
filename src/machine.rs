@@ -60,6 +60,7 @@ pub(crate) fn detect_hostname() -> Result<String, DotsyncError> {
     let etc_hostname = Path::new("/etc/hostname");
     if etc_hostname.exists() {
         let hostname = fs::read_to_string(etc_hostname).map_err(|source| DotsyncError::Io {
+            doing: "read",
             path: etc_hostname.to_path_buf(),
             source,
         })?;

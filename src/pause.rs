@@ -664,7 +664,11 @@ pub(crate) fn save_paused_run(paths: &DotsyncPaths, run: &PausedRun) -> Result<(
     let contents = serde_json::to_vec_pretty(run).map_err(|err| DotsyncError::Jj {
         message: format!("serialize the paused run: {err}"),
     })?;
-    fs::write(&path, contents).map_err(|source| DotsyncError::Io { path, source })
+    fs::write(&path, contents).map_err(|source| DotsyncError::Io {
+        doing: "write",
+        path,
+        source,
+    })
 }
 
 pub(crate) fn load_paused_run(paths: &DotsyncPaths) -> Result<Option<PausedRun>, DotsyncError> {
@@ -672,7 +676,13 @@ pub(crate) fn load_paused_run(paths: &DotsyncPaths) -> Result<Option<PausedRun>,
     let contents = match fs::read_to_string(&path) {
         Ok(contents) => contents,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => return Err(DotsyncError::Io { path, source }),
+        Err(source) => {
+            return Err(DotsyncError::Io {
+                doing: "read",
+                path,
+                source,
+            })
+        }
     };
     serde_json::from_str(&contents)
         .map(Some)
@@ -686,7 +696,11 @@ fn remove_paused_run(paths: &DotsyncPaths) -> Result<(), DotsyncError> {
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(DotsyncError::Io { path, source }),
+        Err(source) => Err(DotsyncError::Io {
+            doing: "remove",
+            path,
+            source,
+        }),
     }
 }
 

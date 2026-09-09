@@ -339,8 +339,12 @@ pub enum DotsyncError {
     /// "discarded 0 file(s)" would read as having done the job.
     #[error("{}", one_or_many(paths.len(), "there is no change of yours to discard at the path you named", "there is no change of yours to discard at {n} of the paths you named"))]
     NothingToDiscard { paths: Vec<PathBuf> },
-    #[error("failed to read {path}: {source}")]
+    /// A filesystem call dotsync makes for itself failed. `doing` is what it
+    /// was doing, because one hard-coded verb made every one of these read
+    /// `failed to read` — including the ones that were writing.
+    #[error("failed to {doing} {path}: {source}")]
     Io {
+        doing: &'static str,
         path: PathBuf,
         #[source]
         source: std::io::Error,

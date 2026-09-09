@@ -404,20 +404,24 @@ impl DirectoryWalk<'_> {
         // as files: a link cannot be resolved to learn its own name, because
         // resolving it is exactly what dotsync must not do here.
         let resolved_dir = current.canonicalize().map_err(|source| DotsyncError::Io {
+            doing: "resolve",
             path: current.to_path_buf(),
             source,
         })?;
 
         for entry in fs::read_dir(current).map_err(|source| DotsyncError::Io {
+            doing: "list",
             path: current.to_path_buf(),
             source,
         })? {
             let entry = entry.map_err(|source| DotsyncError::Io {
+                doing: "list",
                 path: current.to_path_buf(),
                 source,
             })?;
             let path = entry.path();
             let file_type = entry.file_type().map_err(|source| DotsyncError::Io {
+                doing: "read",
                 path: path.clone(),
                 source,
             })?;
