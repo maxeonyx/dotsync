@@ -1,7 +1,6 @@
 # dotsync - Agent Instructions
 
-This repository is self-contained for development. A standalone clone must
-build, test, and release without an `agent-tools` checkout.
+This repository is self-contained for development. A standalone clone must build, test, and release without an `agent-tools` checkout.
 
 ## TDD ratchet — read before testing
 
@@ -15,20 +14,14 @@ Run `cargo ratchet`, not plain `cargo test`. A new test must be red when first i
 
 ## Integration workflow
 
-Run `devenv test` before committing and pushing; it includes `actionlint`, so
-workflow syntax is checked offline. Source CI does not run on push. Open a pull
-request, merge current `main` into the feature branch, mark the pull request
-ready — the run's own merge step fails with `Pull Request is still a draft`
-otherwise, after spending ten minutes building — then explicitly dispatch:
+Run `devenv test` before committing and pushing; it includes `actionlint`, so workflow syntax is checked offline. Source CI does not run on push. Open a pull request, merge current `main` into the feature branch, mark the pull request ready — the run's own merge step fails with `Pull Request is still a draft` otherwise, after spending ten minutes building — then explicitly dispatch:
 
 ```bash
 gh pr ready <number>
 gh workflow run ci.yml --ref <feature-branch> -f pr_number=<number>
 ```
 
-The repository-serialized run records the required `Ready` check, builds the
-release artifacts, auto-merges the pull request, publishes those same artifacts,
-and records `integrated-ci` on the exact merge commit.
+The repository-serialized run records the required `Ready` check, builds the release artifacts, auto-merges the pull request, publishes those same artifacts, and records `integrated-ci` on the exact merge commit.
 
 The trusted ledger workflow runs on every push to an open pull request and commits even when the ledger is unchanged, so every ledger run moves the head SHA. Dispatch only once the ledger run for that push has finished. Dispatch first and the bot's commit lands after `Ready` was recorded, leaving the required status on a commit that is no longer the head, so auto-merge waits for a check that will never arrive and the Merge job fails.
 
@@ -70,21 +63,11 @@ Home is jj's working copy through dotsync's own `WorkingCopy` implementation; th
 
 PRs in this repo can be merged without approval (Max, 2026-08-12).
 
-Single explicitly dispatched `ci.yml` integration workflow: PR/base validation,
-actionlint, release-guard tests, format, lint, the test ratchet, Linux and
-Windows builds, auto-merge, GitHub Release, Pages, then an `integrated-ci`
-status on the exact merge commit.
+Single explicitly dispatched `ci.yml` integration workflow: PR/base validation, actionlint, release-guard tests, format, lint, the test ratchet, Linux and Windows builds, auto-merge, GitHub Release, Pages, then an `integrated-ci` status on the exact merge commit.
 
-Each integration run publishes a fresh release, so its PR must use a new version
-in `Cargo.toml`, `Cargo.lock`, and `docs/version.json`. The existing release
-guard still verifies that artifact-changing work actually moved these versions
-together. `docs/version.json` is deployed verbatim to Pages and read by the
-agent-tools umbrella.
+Each integration run publishes a fresh release, so its PR must use a new version in `Cargo.toml`, `Cargo.lock`, and `docs/version.json`. The existing release guard still verifies that artifact-changing work actually moved these versions together. `docs/version.json` is deployed verbatim to Pages and read by the agent-tools umbrella.
 
-CI compares the PR head with `origin/main` in `range` mode and runs
-`scripts/test_check_main_version_bump.py`. The repo-local pre-push hook remains
-an early version check; `devenv test` is the full offline actionlint, format,
-clippy, and ratchet gate.
+CI compares the PR head with `origin/main` in `range` mode and runs `scripts/test_check_main_version_bump.py`. The repo-local pre-push hook remains an early version check; `devenv test` is the full offline actionlint, format, clippy, and ratchet gate.
 
 When preparing a clone for local release work, set `git config core.hooksPath .githooks` so the repo-local `pre-push` hook actually runs.
 

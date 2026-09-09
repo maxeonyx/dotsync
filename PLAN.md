@@ -1,8 +1,6 @@
 # dotsync — Plan
 
-`DESIGN.md` describes dotsync as it is. This file is for what is not built: what
-is ahead, what is deliberately deferred, and the standing constraints any of it
-is done under.
+`DESIGN.md` describes dotsync as it is. This file is for what is not built: what is ahead, what is deliberately deferred, and the standing constraints any of it is done under.
 
 ## Where things stand
 
@@ -34,7 +32,7 @@ Rename, reparent and delete. Creation is the whole of the mutation surface today
 
 ### Windows
 
-- **What a scope may hold is constrained by what its machines can represent** ([#28](https://github.com/maxeonyx/dotsync/issues/28)). Symlinks, executable bits, non-UTF-8 text: the constraint is the union over every leaf a scope reaches, which makes `all` the *most* constrained scope rather than the least. The issue holds the model and the one open question — whether the constraint comes from machine leaves that exist, or from the OS scopes in the graph.
+- **What a scope may hold is constrained by what its machines can represent** ([#28](https://github.com/maxeonyx/dotsync/issues/28)). Symlinks, executable bits, non-UTF-8 text: the constraint is the union over every leaf a scope reaches, which makes `all` the _most_ constrained scope rather than the least. The issue holds the model and the one open question — whether the constraint comes from machine leaves that exist, or from the OS scopes in the graph.
 - **Path separators are unconfirmed on Windows.** The directory walk builds relative paths with `read_dir` separators and feeds `from_internal_string`, which would record `.config\fish\config.fish` as a tree entry name; `render::display_path` is `Path::display()`, so JSON would carry backslashes in some fields and forward slashes in others; and `canonicalize` returns the on-disk casing, so on a case-insensitive filesystem `dotsync commit all -- .APPRC` may look like a link to somewhere else and be refused. All inferred from source. Needs one Windows run.
 
 ### Smaller, unowned
