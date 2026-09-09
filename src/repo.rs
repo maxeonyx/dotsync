@@ -403,9 +403,16 @@ pub(crate) async fn push_scope_updates(session: &mut Session) -> Result<PushRepo
     })
 }
 
-pub(crate) fn collect_managed_tree_entries(
+/// Every managed path a tree holds, and what is at it — `None` where the tree
+/// holds a conflict there.
+///
+/// A contested scope head's tree is the merge of both sides, so a conflict in
+/// it is an ordinary thing for a reader to meet: the path is one this machine
+/// cannot state the fate of until the merge is resolved. Readers describe that;
+/// writers cannot use it, and take `collect_managed_tree_entries` instead.
+pub(crate) fn managed_tree_entries(
     tree: &jj_lib::merged_tree::MergedTree,
-) -> Result<BTreeMap<PathBuf, TreeValue>, DotsyncError> {
+) -> Result<BTreeMap<PathBuf, Option<TreeValue>>, DotsyncError> {
     let mut entries = BTreeMap::new();
     for (path, value) in tree.entries() {
         let display_path = PathBuf::from(path.as_internal_file_string());
@@ -413,10 +420,8 @@ pub(crate) fn collect_managed_tree_entries(
             jj_error(format!("read tree entry {}: {err}", display_path.display()))
         })?;
         let Some(value) = value.as_resolved() else {
-            return Err(jj_error(format!(
-                "tree entry {} is conflicted during sync",
-                display_path.display()
-            )));
+            entries.insert(display_path, None);
+            continue;
         };
         let Some(value) = value.clone() else {
             continue;
@@ -424,9 +429,27 @@ pub(crate) fn collect_managed_tree_entries(
         match value {
             TreeValue::Tree(_) => {}
             other => {
-                entries.insert(display_path, other);
+                entries.insert(display_path, Some(other));
             }
         }
+    }
+    Ok(entries)
+}
+
+/// The same, for a caller about to write home or a commit from it: a
+/// conflicted entry has no bytes to write, so it is a stop.
+pub(crate) fn collect_managed_tree_entries(
+    tree: &jj_lib::merged_tree::MergedTree,
+) -> Result<BTreeMap<PathBuf, TreeValue>, DotsyncError> {
+    let mut entries = BTreeMap::new();
+    for (path, value) in managed_tree_entries(tree)? {
+        let Some(value) = value else {
+            return Err(jj_error(format!(
+                "tree entry {} is conflicted during sync",
+                path.display()
+            )));
+        };
+        entries.insert(path, value);
     }
     Ok(entries)
 }

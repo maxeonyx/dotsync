@@ -683,7 +683,12 @@ fn read_only_commands_answer_when_the_diverged_merge_conflicts() {
     // different version of the same file: every scope diverges, and every
     // merge collides.
     interrupt_push_after_cascade(&machine, ".config/app.conf", "setting = \"mine\"\n");
-    seed_remote_scope_file(&machine, "all", ".config/app.conf", "setting = \"theirs\"\n");
+    seed_remote_scope_file(
+        &machine,
+        "all",
+        ".config/app.conf",
+        "setting = \"theirs\"\n",
+    );
 
     let status = machine.run("dotsync status --output json");
     assert_eq!(
@@ -693,7 +698,12 @@ fn read_only_commands_answer_when_the_diverged_merge_conflicts() {
         render_output(&status)
     );
     let payload = parse_stdout_json(&status);
-    assert_eq!(payload["paused_cascade"], "all", "{}", render_output(&status));
+    assert_eq!(
+        payload["paused_cascade"],
+        "all",
+        "{}",
+        render_output(&status)
+    );
 
     for command in ["dotsync diff", "dotsync view"] {
         let output = machine.run(command);

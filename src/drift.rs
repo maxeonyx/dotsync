@@ -6,7 +6,7 @@ use jj_lib::merged_tree::MergedTree;
 
 use crate::error::{jj_error, DotsyncError};
 use crate::home::repo_path_of;
-use crate::repo::collect_managed_tree_entries;
+use crate::repo::{collect_managed_tree_entries, managed_tree_entries};
 
 /// Where one managed path stands across the three sides dotsync knows about:
 ///
@@ -50,6 +50,12 @@ pub enum FileState {
     /// Present in home only. Never synced here and not on the scope: a new
     /// file, which is only interesting to `commit`.
     UntrackedInHome,
+
+    /// This machine and the remote each moved the scope and changed this file
+    /// differently, so the scope's head holds a conflict here. Nothing can say
+    /// what home should hold at it until the merge is resolved, and the
+    /// commands that write stop at that merge anyway.
+    AwaitingMerge,
 
     /// Added on another machine and not in home yet. Not drift — sync writes
     /// it.
@@ -160,7 +166,7 @@ impl FileState {
     pub fn is_incoming(self) -> bool {
         matches!(
             self,
-            Self::IncomingNew | Self::StaleNotYours | Self::RemovedFromRepo
+            Self::IncomingNew | Self::StaleNotYours | Self::RemovedFromRepo | Self::AwaitingMerge
         )
     }
 
@@ -181,6 +187,7 @@ impl FileState {
                 | Self::IncomingNew
                 | Self::RemovedFromRepo
                 | Self::IncomingNewCollidesWithUntrackedHome
+                | Self::AwaitingMerge
         )
     }
 
@@ -207,6 +214,9 @@ impl FileState {
             Self::IncomingNewCollidesWithUntrackedHome => {
                 "never synced here, and the repo has just added a file at this path that will not merge with it"
             }
+            Self::AwaitingMerge => {
+                "changed here and on another machine, on a scope whose merge is still waiting"
+            }
             Self::IncomingNew => "added on another machine",
             Self::StaleNotYours => "changed on another machine, and not edited here",
             Self::RemovedFromRepo => "removed on another machine",
@@ -229,6 +239,7 @@ impl FileState {
             Self::DivergedEdit => "conflicted",
             Self::DivergedEditThatMerges => "modified_changed_in_repo",
             Self::IncomingNewCollidesWithUntrackedHome => "untracked_collision",
+            Self::AwaitingMerge => "awaiting_merge",
             Self::IncomingNew => "incoming_add",
             Self::StaleNotYours => "incoming_update",
             Self::RemovedFromRepo => "incoming_delete",
@@ -337,7 +348,9 @@ pub(crate) fn classify_managed_trees(
 ) -> Result<BTreeMap<PathBuf, ClassifiedPath>, DotsyncError> {
     let mark = collect_managed_tree_entries(mark)?;
     let snapshot = collect_managed_tree_entries(snapshot)?;
-    let head = collect_managed_tree_entries(head)?;
+    // The head is the one side that can be conflicted: a contested scope head
+    // is the merge of what this machine has and what the remote published.
+    let head = managed_tree_entries(head)?;
 
     let domain: BTreeSet<PathBuf> = mark
         .keys()
@@ -355,18 +368,25 @@ pub(crate) fn classify_managed_trees(
             .path_value(repo_path_of(&relative)?.as_ref())
             .map_err(|err| jj_error(format!("read merged {}: {err}", relative.display())))?
             .is_resolved();
-        let state = classify(
-            mark.get(&relative),
-            snapshot.get(&relative),
-            head.get(&relative),
-            merge_reconciles,
-        );
+        let tip = head.get(&relative).cloned().flatten();
+        let state = match head.get(&relative) {
+            // The scope's own two sides disagree here, so what this machine
+            // should hold is not a question anything can answer until the
+            // merge is resolved.
+            Some(None) => FileState::AwaitingMerge,
+            _ => classify(
+                mark.get(&relative),
+                snapshot.get(&relative),
+                tip.as_ref(),
+                merge_reconciles,
+            ),
+        };
         classified.insert(
             relative.clone(),
             ClassifiedPath {
                 state,
                 home: snapshot.get(&relative).cloned(),
-                tip: head.get(&relative).cloned(),
+                tip,
             },
         );
     }

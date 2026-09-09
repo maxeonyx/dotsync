@@ -201,6 +201,10 @@ fn change_marker(state: FileState) -> &'static str {
         FileState::DivergedEditThatMerges => "M",
         FileState::DeletedInHome | FileState::DeletedInHomeTipAlsoChanged => "D",
         FileState::DivergedEdit | FileState::IncomingNewCollidesWithUntrackedHome => "C",
+        // The same marker, for the same reason: two versions of this file are
+        // waiting for somebody to choose. This one is on a scope rather than
+        // between home and a scope.
+        FileState::AwaitingMerge => "C",
         FileState::IncomingNew => "A",
         FileState::StaleNotYours => "U",
         FileState::RemovedFromRepo => "R",

@@ -8,7 +8,7 @@ use crate::drift::{changed_paths, FileState};
 use crate::error::{jj_error, DotsyncError};
 use crate::home::Home;
 use crate::paths::DotsyncPaths;
-use crate::repo::{collect_managed_tree_entries, read_tree_entry_bytes, scope_head_tree};
+use crate::repo::{managed_tree_entries, read_tree_entry_bytes, scope_head_tree};
 use crate::session::{in_session, Run, Session};
 use crate::status::MachineState;
 use crate::sync::{classify_home_against_machine_scope, file_drift, finishing, FileDrift};
@@ -172,13 +172,14 @@ fn scope_list(session: &Session) -> Vec<ScopeInfo> {
 }
 
 /// The files one scope holds. A scope the graph names and the repo has no head
-/// for holds none — `view` describes the state it is in rather than refusing
-/// to describe it, which is the whole of what it is for.
+/// for holds none, and a path its two sides disagree about is still a path it
+/// holds — `view` describes the state a scope is in rather than refusing to
+/// describe it, which is the whole of what it is for.
 async fn scope_files(session: &Session, scope: &str) -> Result<Vec<PathBuf>, DotsyncError> {
     let Some(tree) = scope_head_tree(session.repo().as_ref(), scope).await? else {
         return Ok(Vec::new());
     };
-    let entries = collect_managed_tree_entries(&tree)?;
+    let entries = managed_tree_entries(&tree)?;
     Ok(entries.into_keys().collect())
 }
 
