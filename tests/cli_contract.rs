@@ -93,9 +93,9 @@ fn clap_usage_errors_emit_the_json_contract() {
     }
 }
 
-/// Every error payload carries the same three collections, so error handling
-/// has one shape — PLAN says so. Usage errors carried none of them, which is
-/// the one error an agent hits before it has learned anything else.
+/// Every error payload carries the same collections, so error handling has one
+/// shape — PLAN says so. Usage errors carried none of them, which is the one
+/// error an agent hits before it has learned anything else.
 #[test]
 fn a_usage_error_has_the_same_shape_as_every_other_error() {
     let harness = TestHarness::new();
@@ -104,7 +104,7 @@ fn a_usage_error_has_the_same_shape_as_every_other_error() {
     let output = machine.run_expecting("dotsync --output json bogus", 2);
 
     let json = parse_stdout_json(&output);
-    for field in ["current_state", "drifts"] {
+    for field in ["current_state", "conflicts"] {
         assert_eq!(
             json[field].as_array().map(Vec::len),
             Some(0),

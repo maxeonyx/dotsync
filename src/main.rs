@@ -1093,24 +1093,20 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
             success.exit_code
         }
         OutputKind::Error(error) => {
-            let exit_code = if error.paused_scope().is_some() { 3 } else { 1 };
-            eprintln!("{}", render::render_error_human(&error, invocation));
-            let error_report = error.to_error_report();
-            // After the teaching message and set apart from it: these are the
-            // files the run stopped on, not more instructions.
-            if !error_report.drifts.is_empty() {
-                eprintln!("\nChanged files:");
-                for line in render::render_drifts_human(&error_report.drifts) {
-                    eprintln!("{line}");
-                }
-            }
+            let explanation = error.explain(invocation);
+            let exit_code = if explanation.paused_cascade.is_some() {
+                3
+            } else {
+                1
+            };
+            eprintln!("{}", render::render_error_human(&explanation));
             // The conflict itself, after the teaching block and apart from it,
             // because it is the material to work from rather than more
             // instructions — and because it is what dotsync hands over
             // *instead* of writing markers into the file.
-            if !error_report.conflicts.is_empty() {
+            if !explanation.conflicts.is_empty() {
                 eprintln!("\nConflicted files:");
-                for line in render::render_conflicts_human(&error_report.conflicts) {
+                for line in render::render_conflicts_human(&explanation.conflicts) {
                     eprintln!("{line}");
                 }
             }
@@ -1118,7 +1114,7 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
                 println!(
                     "{}",
                     render::with_remote_state(
-                        render::render_error_json(&error_report),
+                        render::render_error_json(&explanation),
                         unreachable_remote.as_ref()
                     )
                 );
