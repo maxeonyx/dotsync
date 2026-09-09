@@ -67,8 +67,14 @@ fn init_reports_no_drift() {
 /// unusable and `dotsync view` broke on every machine in the fleet.
 ///
 /// Usable means usable from another machine, which is why this ends on a
-/// second machine reading the file: a scope only earns its name by carrying
-/// config to the machines under it.
+/// machine that had nothing to do with any of it reading the file: a scope
+/// only earns its name by carrying config to the machines under it.
+///
+/// The machine that creates a scope cannot seed it, and that is the two
+/// standing decisions meeting: the graph is append-only, so creating
+/// `hyprland` moves no existing machine under it, and a commit may only name a
+/// scope this machine holds. So a new scope is for the machines that join
+/// under it afterwards, and the first of those is what puts config on it.
 #[test]
 fn a_scope_created_on_one_machine_is_usable_from_another() {
     let harness = TestHarness::new();
@@ -76,8 +82,6 @@ fn a_scope_created_on_one_machine_is_usable_from_another() {
     machine_a.init_ok();
 
     machine_a.run_ok("dotsync create-scope hyprland --parent linux -m 'wayland compositor config'");
-    machine_a.write_file(".config/hypr/hyprland.conf", "monitor = eDP-1\n");
-    machine_a.run_ok("dotsync commit hyprland -m 'seed hyprland' -- .config/hypr/hyprland.conf");
 
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
     let init_b = machine_b.init_with("--parent hyprland");
@@ -86,11 +90,21 @@ fn a_scope_created_on_one_machine_is_usable_from_another() {
         "a machine has to be able to join under a scope somebody created\n{}",
         render_output(&init_b)
     );
+    machine_b.write_file(".config/hypr/hyprland.conf", "monitor = eDP-1\n");
+    machine_b.run_ok("dotsync commit hyprland -m 'seed hyprland' -- .config/hypr/hyprland.conf");
+
+    let machine_c = harness.machine("machine-c", "linux", "goof-c");
+    let init_c = machine_c.init_with("--parent hyprland");
+    assert!(
+        init_c.status.success(),
+        "and so has the next one\n{}",
+        render_output(&init_c)
+    );
     assert_eq!(
-        machine_b.read_file(".config/hypr/hyprland.conf"),
+        machine_c.read_file(".config/hypr/hyprland.conf"),
         "monitor = eDP-1\n",
         "and the config on that scope has to reach it\n{}",
-        render_output(&init_b)
+        render_output(&init_c)
     );
 }
 

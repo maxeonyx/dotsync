@@ -161,31 +161,32 @@ async fn commit_in_session(
     // *of something* rather than a bare assertion about bytes.
     let mark = home.mark().await?;
 
-    // Whether this commit's bytes reach this machine at all. When the target
-    // scope is an ancestor of the machine scope the cascade carries them down
-    // into home, so home has a version of the target scope it started from —
-    // the mark descends from it. When it is not — another machine's leaf, a
-    // sibling branch of the DAG — that is not true, and the merge base below
-    // falls back to the scope's own head. Whether such commits should be
-    // allowed without an explicit per-path force is still open (PLAN.md §1.5,
-    // D6).
-    let cascades_into_home = graph
+    // The target has to be a scope this machine holds (Max, 2026-08-13). What
+    // a commit records is home, and home was built from this machine's own
+    // scopes — so for anything else there is no version of the target this
+    // machine can claim to have started from, and what it wrote there would
+    // overwrite rather than build on whatever that machine has. Refusing it
+    // is also what makes the merge base below unconditional.
+    if !graph
         .ancestors_and_self(&machine_scope)
         .iter()
-        .any(|scope| scope.name == options.scope);
+        .any(|scope| scope.name == options.scope)
+    {
+        return Err(DotsyncError::CommitOutsideAncestry {
+            shared_ancestor: graph
+                .nearest_shared_ancestor(&machine_scope, &options.scope)
+                .map(str::to_string),
+            scope: options.scope.clone(),
+            machine_scope,
+        });
+    }
 
     let repo = session.repo().clone();
     let mut tx = repo.start_transaction();
     let base_commit = scope_head_commit(tx.repo_mut().base_repo().as_ref(), &options.scope)?;
 
-    let merge_base_tree = commit_merge_base_tree(
-        tx.repo_mut(),
-        cascades_into_home,
-        &options.scope,
-        &base_commit,
-        &mark,
-    )
-    .await?;
+    let merge_base_tree =
+        commit_merge_base_tree(tx.repo_mut(), &options.scope, &base_commit, &mark).await?;
     let mut builder = MergedTreeBuilder::new(merge_base_tree.clone());
     for relative in &selected_paths {
         builder.set_or_remove(repo_path_of(relative)?, home.entry(relative)?);
@@ -317,15 +318,10 @@ async fn commit_in_session(
 /// of it this machine can claim to have started from.
 async fn commit_merge_base_tree(
     mut_repo: &mut jj_lib::repo::MutableRepo,
-    cascades_into_home: bool,
     target_scope: &str,
     target_head: &jj_lib::commit::Commit,
     mark: &jj_lib::commit::Commit,
 ) -> Result<jj_lib::merged_tree::MergedTree, DotsyncError> {
-    if !cascades_into_home {
-        return Ok(target_head.tree());
-    }
-
     let base_ids = mut_repo
         .index()
         .common_ancestors(&[target_head.id().clone()], &[mark.id().clone()])

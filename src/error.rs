@@ -388,6 +388,16 @@ pub enum DotsyncError {
     ScopeCreationConflict { scope: String, files: Vec<String> },
     #[error("scope `{scope}` does not exist")]
     InvalidScope { scope: String },
+    /// A commit aimed at a scope this machine does not descend from.
+    #[error("scope `{scope}` is not one this machine is on")]
+    CommitOutsideAncestry {
+        scope: String,
+        machine_scope: String,
+        /// The deepest scope both this machine and the target reach, which is
+        /// where material they should share belongs. `None` when they share
+        /// nothing at all.
+        shared_ancestor: Option<String>,
+    },
     /// `commit -m ""`. Omitting `-m` is already a hard error, so this is a
     /// hole in a rule that exists rather than a new one: what it lands is a
     /// commit in shared history with nothing to say what it was for.
@@ -649,6 +659,33 @@ impl DotsyncError {
         // scopes rather than about whichever command the reader happened to be
         // running: `view --scope` used to get a bare one-liner for the mistake
         // `commit` explained in full.
+        Self::CommitOutsideAncestry {
+            scope,
+            machine_scope,
+            shared_ancestor,
+        } => Explanation::stop("commit_outside_ancestry", self)
+            .state(vec![match shared_ancestor {
+                Some(shared) => format!(
+                    "this machine is `{machine_scope}`; it and `{scope}` share `{shared}`"
+                ),
+                None => format!(
+                    "this machine is `{machine_scope}`; it and `{scope}` share no scope at all"
+                ),
+            }])
+            .teaching(Teaching::new(
+                "that scope is not one this machine is on",
+                THE_SCOPE_GRAPH,
+                &format!("This commit flow was about to record your home files on `{scope}`, which is neither `{machine_scope}` nor a scope it inherits from."),
+                "It expects the scope you name to be one this machine holds, because what a commit records is home, and home was built from this machine's own scopes.",
+                &format!("There is no version of `{scope}` this machine can claim to have started from, so what dotsync recorded there would overwrite rather than build on whatever that machine has."),
+                &[
+                    &match shared_ancestor {
+                        Some(shared) => format!("put the shared material on `{shared}`: `dotsync commit {shared} -m \"message\" -- <paths...>`. The cascade carries it into `{scope}` and into this machine alike."),
+                        None => format!("put the shared material on a scope both machines reach; `dotsync view` shows which scopes there are, and `{scope}` shares none of them with this machine yet."),
+                    },
+                    &format!("write down, on that same scope, the pattern an agent on `{scope}` should follow when it adds that machine's own version — a commit here cannot make that decision for it."),
+                ],
+            )),
         Self::EmptyCommitMessage { scope } => Explanation::stop("empty_commit_message", self)
             .teaching(Teaching::new(
                 "that commit has no message",

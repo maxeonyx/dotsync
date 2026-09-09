@@ -17,7 +17,7 @@
     "dotsync::commit_and_cascade$commit_modifies_existing_file_on_scope": "passing",
     "dotsync::commit_and_cascade$commit_noop_when_no_changes": "passing",
     "dotsync::commit_and_cascade$commit_to_machine_scope_does_not_cascade": "passing",
-    "dotsync::commit_and_cascade$committing_to_a_scope_this_machine_is_not_on_is_refused": "pending",
+    "dotsync::commit_and_cascade$committing_to_a_scope_this_machine_is_not_on_is_refused": "passing",
     "dotsync::commit_and_cascade$explicit_commit_command_adds_file_to_scope_and_syncs": "passing",
     "dotsync::commit_and_cascade$history_says_which_machine_made_a_change": "passing",
     "dotsync::commit_and_cascade$multiple_machines_can_contribute_to_all_without_losing_changes": "passing",
