@@ -42,7 +42,7 @@ use crate::machine::machine_signature;
 use crate::paths::DotsyncPaths;
 use crate::repo::{collect_managed_tree_entries, read_entry_bytes, scope_head_commit, PushReport};
 use crate::session::{in_session, Run, Session};
-use crate::status::FileChange;
+use crate::status::{FileChange, PausedCascade};
 use crate::sync::{
     classify_home_against_head, conflicted_versions, finishing, LocalChanges, SyncReport,
 };
@@ -199,6 +199,21 @@ pub(crate) async fn present(
     merged: &jj_lib::merged_tree::MergedTree,
     scope: &str,
 ) -> Result<DotsyncError, DotsyncError> {
+    Ok(DotsyncError::CascadePaused {
+        borrowed_from: borrowed_from(session, machine_scope, scope),
+        scope: scope.to_string(),
+        files: conflicted_files(session, merged, scope).await?,
+    })
+}
+
+/// Every file a merge could not resolve, with the base and both sides. Read by
+/// the stop that presents it and by the read-only command that reprints it, so
+/// the two cannot describe the same pause differently.
+pub(crate) async fn conflicted_files(
+    session: &Session,
+    merged: &jj_lib::merged_tree::MergedTree,
+    scope: &str,
+) -> Result<Vec<ConflictedFile>, DotsyncError> {
     let mut files = Vec::new();
     for relative in conflicted_paths_of(merged, scope)? {
         let Some(versions) = conflicted_versions(session, merged, &relative, scope).await? else {
@@ -210,11 +225,7 @@ pub(crate) async fn present(
             versions,
         });
     }
-    Ok(DotsyncError::CascadePaused {
-        borrowed_from: borrowed_from(session, machine_scope, scope),
-        scope: scope.to_string(),
-        files,
-    })
+    Ok(files)
 }
 
 pub(crate) fn conflicted_paths_of(
@@ -325,11 +336,10 @@ fn holds_conflict_markers(bytes: &[u8]) -> bool {
 
 pub async fn continue_after_conflict(
     paths: &DotsyncPaths,
-    discard_local: bool,
 ) -> Run<Result<ContinueReport, DotsyncError>> {
     in_session(paths, async |session, paths| {
         let mut home = Home::acquire(session, paths).await?;
-        let outcome = continue_in_session(session, &mut home, discard_local).await;
+        let outcome = continue_in_session(session, &mut home).await;
         finishing(home, session, outcome).await
     })
     .await
@@ -344,13 +354,11 @@ pub async fn continue_after_conflict(
 async fn continue_in_session(
     session: &mut Session,
     home: &mut Home,
-    discard_local: bool,
 ) -> Result<ContinueReport, DotsyncError> {
     let recorded = load_paused_run(session.paths())?;
     if let Some(paused_commit) = recorded.as_ref().and_then(|run| run.paused_commit.clone()) {
         let checkpoint = recorded.map(|run| run.checkpoint).unwrap_or_default();
-        return finish_the_paused_commit(session, home, paused_commit, checkpoint, discard_local)
-            .await;
+        return finish_the_paused_commit(session, home, paused_commit, checkpoint).await;
     }
     let Some(pause) =
         converge::pending_pause(session.repo(), session.graph(), session.machine_scope()).await?
@@ -360,7 +368,7 @@ async fn continue_in_session(
     let checkpoint = recorded
         .map(|run| run.checkpoint)
         .unwrap_or_else(|| converge::checkpoint(session.repo().as_ref(), session.graph()));
-    finish_the_paused_convergence(session, home, pause, checkpoint, discard_local).await
+    finish_the_paused_convergence(session, home, pause, checkpoint).await
 }
 
 /// The pass again, with home's bytes as the answer at exactly the paths it
@@ -375,7 +383,6 @@ async fn finish_the_paused_convergence(
     home: &mut Home,
     pause: converge::Pause,
     checkpoint: BTreeMap<String, String>,
-    discard_local: bool,
 ) -> Result<ContinueReport, DotsyncError> {
     let machine_scope = session.machine_scope().to_string();
     let conflicted = conflicted_paths_of(&pause.merged, &pause.scope)?;
@@ -405,7 +412,7 @@ async fn finish_the_paused_convergence(
     }
     remove_paused_run(session.paths())?;
     let push = publish_or_pause(session, home, &checkpoint).await?;
-    finished_resolving(session, home, pause.scope, conflicted, discard_local, push).await
+    finished_resolving(session, home, pause.scope, conflicted, push).await
 }
 
 /// The `commit` whose own merge stopped it, finished: merge its parent again,
@@ -420,7 +427,6 @@ async fn finish_the_paused_commit(
     home: &mut Home,
     paused: PausedCommit,
     checkpoint: BTreeMap<String, String>,
-    discard_local: bool,
 ) -> Result<ContinueReport, DotsyncError> {
     let repo = session.repo().clone();
     let parent = load_commit_by_hex(repo.as_ref(), &paused.parent_commit_id)?;
@@ -464,7 +470,7 @@ async fn finish_the_paused_commit(
     remove_paused_run(session.paths())?;
     converge_or_pause(session, home, &checkpoint).await?;
     let push = publish_or_pause(session, home, &checkpoint).await?;
-    finished_resolving(session, home, paused.scope, conflicted, discard_local, push).await
+    finished_resolving(session, home, paused.scope, conflicted, push).await
 }
 
 /// The end both resolutions share: home stops holding the answer, because the
@@ -480,15 +486,12 @@ async fn finished_resolving(
     home: &mut Home,
     scope: String,
     conflicted: Vec<PathBuf>,
-    discard_local: bool,
     push: PushReport,
 ) -> Result<ContinueReport, DotsyncError> {
     let borrowed_from = borrowed_from(session, home.machine_scope(), &scope);
-    let local = match discard_local {
-        true => LocalChanges::Discard,
-        false => LocalChanges::DiscardAt(conflicted),
-    };
-    let sync = crate::sync::sync_home_to_machine_scope(session, home, local).await?;
+    let sync =
+        crate::sync::sync_home_to_machine_scope(session, home, LocalChanges::DiscardAt(conflicted))
+            .await?;
     Ok(ContinueReport {
         resumed: Resumed::Cascade {
             borrowed_from,
@@ -574,9 +577,10 @@ async fn abort_in_session(
 ) -> Result<AbortReport, DotsyncError> {
     let machine_scope = session.machine_scope().to_string();
     let recorded = load_paused_run(session.paths())?;
-    let Some(stopped_at) = paused_scope(session, &machine_scope, recorded.as_ref()).await? else {
+    let Some(paused) = pending_pause(session, &machine_scope, recorded.as_ref()).await? else {
         return Err(DotsyncError::NoPausedCascade);
     };
+    let stopped_at = paused.scope;
 
     // Every scope this run moved goes back where it was. There may be nothing
     // to move: a conflict that came from the remote is not something this
@@ -608,16 +612,16 @@ async fn abort_in_session(
     // exactly what abort exists to discard, so it cannot also be a reason to
     // refuse. Drift outside the paused selection goes the same way, which is
     // what DESIGN.md's "reverts all the config files" says and what the old
-    // selective restore quietly did not do. That is the same discarding sync
-    // `dotsync --force` runs, which is why `abort` refuses the flag: it has
-    // already made that choice.
+    // selective restore quietly did not do.
     let sync =
         crate::sync::sync_home_to_machine_scope(session, home, LocalChanges::Discard).await?;
 
     Ok(AbortReport {
         paused_scope: stopped_at,
         sync,
-        still_paused: paused_scope(session, &machine_scope, None).await?,
+        still_paused: pending_pause(session, &machine_scope, None)
+            .await?
+            .map(|paused| paused.scope),
     })
 }
 
@@ -629,19 +633,26 @@ async fn abort_in_session(
 /// dotsync keeps beside its repo cannot change the answer for a convergence
 /// pause, and `dotsync abort` cannot make one look resolved by deleting a
 /// file.
-pub(crate) async fn paused_scope(
+pub(crate) async fn pending_pause(
     session: &Session,
     machine_scope: &str,
     recorded: Option<&PausedRun>,
-) -> Result<Option<String>, DotsyncError> {
+) -> Result<Option<PausedCascade>, DotsyncError> {
     if let Some(paused_commit) = recorded.and_then(|run| run.paused_commit.as_ref()) {
-        return Ok(Some(paused_commit.scope.clone()));
+        return Ok(Some(PausedCascade {
+            scope: paused_commit.scope.clone(),
+            conflicts: Vec::new(),
+        }));
     }
-    Ok(
-        converge::pending_pause(session.repo(), session.graph(), machine_scope)
-            .await?
-            .map(|pause| pause.scope),
-    )
+    let Some(pause) =
+        converge::pending_pause(session.repo(), session.graph(), machine_scope).await?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(PausedCascade {
+        conflicts: conflicted_files(session, &pause.merged, &pause.scope).await?,
+        scope: pause.scope,
+    }))
 }
 
 fn paused_run_path(paths: &DotsyncPaths) -> PathBuf {
@@ -653,7 +664,11 @@ pub(crate) fn save_paused_run(paths: &DotsyncPaths, run: &PausedRun) -> Result<(
     let contents = serde_json::to_vec_pretty(run).map_err(|err| DotsyncError::Jj {
         message: format!("serialize the paused run: {err}"),
     })?;
-    fs::write(&path, contents).map_err(|source| DotsyncError::Io { path, source })
+    fs::write(&path, contents).map_err(|source| DotsyncError::Io {
+        doing: "write",
+        path,
+        source,
+    })
 }
 
 pub(crate) fn load_paused_run(paths: &DotsyncPaths) -> Result<Option<PausedRun>, DotsyncError> {
@@ -661,7 +676,13 @@ pub(crate) fn load_paused_run(paths: &DotsyncPaths) -> Result<Option<PausedRun>,
     let contents = match fs::read_to_string(&path) {
         Ok(contents) => contents,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => return Err(DotsyncError::Io { path, source }),
+        Err(source) => {
+            return Err(DotsyncError::Io {
+                doing: "read",
+                path,
+                source,
+            })
+        }
     };
     serde_json::from_str(&contents)
         .map(Some)
@@ -675,7 +696,11 @@ fn remove_paused_run(paths: &DotsyncPaths) -> Result<(), DotsyncError> {
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(DotsyncError::Io { path, source }),
+        Err(source) => Err(DotsyncError::Io {
+            doing: "remove",
+            path,
+            source,
+        }),
     }
 }
 
@@ -691,8 +716,10 @@ pub(crate) async fn reject_commit_if_paused(
     machine_scope: &str,
 ) -> Result<(), DotsyncError> {
     let recorded = load_paused_run(session.paths())?;
-    match paused_scope(session, machine_scope, recorded.as_ref()).await? {
-        Some(scope) => Err(DotsyncError::PausedCascadeInProgress { scope }),
+    match pending_pause(session, machine_scope, recorded.as_ref()).await? {
+        Some(paused) => Err(DotsyncError::PausedCascadeInProgress {
+            scope: paused.scope,
+        }),
         None => Ok(()),
     }
 }

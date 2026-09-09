@@ -52,8 +52,12 @@ fn status_diff_sync_and_commit_each_reach_the_remote_once() {
         "dotsync status",
         "dotsync diff",
         "dotsync",
+        "dotsync discard .bashrc",
         "dotsync commit all -m 'add bashrc' -- .bashrc",
     ] {
+        // Each command needs something to do, and `discard` needs a change to
+        // throw away in particular.
+        machine.write_file(".bashrc", "export DOTSYNC=1\n");
         let (output, fetches) = machine.fetches_during(command);
         assert_eq!(
             fetches,
@@ -206,9 +210,9 @@ fn work_done_offline_reaches_the_remote_on_the_next_online_run() {
 
 /// A run that stops still has to say which state it stopped against. A
 /// conflict is the stop a sync can reach, and one of the things it offers is
-/// `--force` — overwrite home with what the scope holds — so a reader who is
-/// not told the scope snapshot is however old this machine's last fetch was
-/// cannot judge that advice.
+/// `dotsync discard <path>` — overwrite home with what the scope holds — so a
+/// reader who is not told the scope snapshot is however old this machine's
+/// last fetch was cannot judge that advice.
 #[test]
 fn a_run_that_stops_offline_still_says_the_remote_was_out_of_reach() {
     let harness = TestHarness::new();

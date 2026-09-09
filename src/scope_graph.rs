@@ -129,6 +129,22 @@ impl ScopeGraph {
         ordered
     }
 
+    /// The deepest scope both of these reach — where config they should share
+    /// belongs. `None` when they share nothing, which a derived graph only
+    /// allows for scopes with separate roots.
+    pub(crate) fn nearest_shared_ancestor(&self, one: &str, other: &str) -> Option<&str> {
+        let reached: HashSet<&str> = self
+            .ancestors_and_self(other)
+            .iter()
+            .map(|scope| scope.name.as_str())
+            .collect();
+        self.ancestors_and_self(one)
+            .into_iter()
+            .map(|scope| scope.name.as_str())
+            .filter(|name| reached.contains(name))
+            .max_by_key(|name| self.depth(name))
+    }
+
     /// How far a scope is from a root, which is the order the DAG reads in.
     pub(crate) fn depth(&self, scope: &str) -> usize {
         self.get(scope)

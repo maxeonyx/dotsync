@@ -8,7 +8,7 @@ use crate::drift::{changed_paths, FileState};
 use crate::error::{jj_error, DotsyncError};
 use crate::home::Home;
 use crate::paths::DotsyncPaths;
-use crate::repo::{collect_managed_tree_entries, read_tree_entry_bytes, scope_head_tree};
+use crate::repo::{managed_tree_entries, read_tree_entry_bytes, scope_head_tree};
 use crate::session::{in_session, Run, Session};
 use crate::status::MachineState;
 use crate::sync::{classify_home_against_machine_scope, file_drift, finishing, FileDrift};
@@ -48,8 +48,18 @@ pub enum ViewAnswer {
     },
     /// Every file one scope holds.
     Scope { scope: String, files: Vec<PathBuf> },
-    /// Every scope that holds one file.
-    FileScopes { file: PathBuf, scopes: Vec<String> },
+    /// Every scope that holds one file, and the one that owns it.
+    FileScopes {
+        file: PathBuf,
+        scopes: Vec<String>,
+        /// The rootmost scope holding the file, which is the one it was
+        /// committed to: every other scope in the list has it because the
+        /// cascade carried it down. `None` when no scope holds the file at
+        /// all. Answered rather than left to be derived, because deriving it
+        /// takes exactly the knowledge of how the graph propagates that an
+        /// agent is running `view` to acquire.
+        owner: Option<String>,
+    },
     /// One file's contents on one scope.
     FileContents {
         scope: String,
@@ -60,7 +70,6 @@ pub enum ViewAnswer {
 
 #[derive(Debug, Clone)]
 pub struct DiffReport {
-    pub machine_scope: String,
     /// `diff` answers `status`'s question in more detail, so it owes the same
     /// qualifications.
     pub machine: MachineState,
@@ -109,6 +118,9 @@ pub async fn view(
                 }
                 ViewAnswer::FileScopes {
                     file: file.to_path_buf(),
+                    // The scopes are collected parents-before-children, so the
+                    // first one to hold the file is the rootmost.
+                    owner: scopes.first().cloned(),
                     scopes,
                 }
             }
@@ -160,13 +172,14 @@ fn scope_list(session: &Session) -> Vec<ScopeInfo> {
 }
 
 /// The files one scope holds. A scope the graph names and the repo has no head
-/// for holds none — `view` describes the state it is in rather than refusing
-/// to describe it, which is the whole of what it is for.
+/// for holds none, and a path its two sides disagree about is still a path it
+/// holds — `view` describes the state a scope is in rather than refusing to
+/// describe it, which is the whole of what it is for.
 async fn scope_files(session: &Session, scope: &str) -> Result<Vec<PathBuf>, DotsyncError> {
     let Some(tree) = scope_head_tree(session.repo().as_ref(), scope).await? else {
         return Ok(Vec::new());
     };
-    let entries = collect_managed_tree_entries(&tree)?;
+    let entries = managed_tree_entries(&tree)?;
     Ok(entries.into_keys().collect())
 }
 
@@ -213,7 +226,6 @@ pub async fn diff_home(paths: &DotsyncPaths) -> Run<Result<DiffReport, DotsyncEr
 
 async fn diff_report(session: &mut Session, home: &mut Home) -> Result<DiffReport, DotsyncError> {
     session.fetch().await?;
-    let machine_scope = home.machine_scope().to_string();
 
     // The same changes `status` reports, with the two sides shown. A remote
     // advance this machine has not applied yet is not one of them, so `diff`
@@ -225,7 +237,6 @@ async fn diff_report(session: &mut Session, home: &mut Home) -> Result<DiffRepor
     }
 
     Ok(DiffReport {
-        machine_scope,
         machine: MachineState::read(session).await?,
         drifts,
     })

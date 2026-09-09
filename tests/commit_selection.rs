@@ -1,6 +1,5 @@
 // What a `dotsync commit` selects and what it refuses: named paths, named
-// directories, paths that are not the caller's to record, and what `--force`
-// changes about those answers.
+// directories, and paths that are not the caller's to record.
 
 use std::fs;
 
@@ -636,11 +635,19 @@ fn a_stale_home_file_cannot_be_committed_over_another_machines_change() {
         "the refused commit must leave the other machine's published change alone"
     );
 
-    // The taught recovery works: sync, then edit, then commit.
+    // The taught recovery works, and it is the only route: sync, then edit,
+    // then commit. Reverting another machine's change deliberately is that
+    // same sequence, so what reaches the scope is a version somebody looked at.
     machine_a.run_ok("dotsync");
     assert_eq!(
         machine_a.read_file(".apprc"),
         "ui_theme = dark\nfont = mono\nsize = 14\n"
+    );
+    machine_a.write_file(".apprc", "ui_theme = dark\nfont = mono\n");
+    machine_a.run_ok("dotsync commit all -m 'revert on purpose' -- .apprc");
+    assert_eq!(
+        remote_branch_file_contents(&machine_a, "all", ".apprc"),
+        "ui_theme = dark\nfont = mono\n"
     );
 }
 
@@ -683,162 +690,6 @@ fn committing_a_path_another_machine_deleted_is_refused() {
     assert_eq!(
         remote_branch_file_contents(&machine_b, "all", ".apprc"),
         "ui_theme = dark\nfont = mono\n"
-    );
-}
-
-#[test]
-fn commit_force_applies_to_the_named_paths_and_not_to_unrelated_drift() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    seed_remote_scope_file(&machine, "mx-xps-cy", ".gitconfig", "[user]\nname = Repo\n");
-    seed_remote_scope_file(&machine, "mx-xps-cy", ".config/app.conf", "setting = one\n");
-    machine.run_ok("dotsync");
-
-    machine.write_file(".gitconfig", "[user]\nname = Drifted\n");
-    machine.write_file(".config/app.conf", "setting = two\n");
-
-    let commit_output =
-        machine.run("dotsync commit mx-xps-cy -m 'update app' --force -- .config/app.conf");
-    assert_eq!(
-        commit_output.status.code(),
-        Some(0),
-        "a change the commit did not name is an input to its home sync rather than a wall in front of it\n{}",
-        render_output(&commit_output)
-    );
-    assert_eq!(
-        read_bookmark_file_contents(&machine, "mx-xps-cy", ".config/app.conf"),
-        "setting = two\n",
-        "the named change is still recorded"
-    );
-
-    // The unnamed change went neither way: not reverted, and not recorded on
-    // the authority of a `--force` that named something else.
-    assert_eq!(
-        machine.read_file(".gitconfig"),
-        "[user]\nname = Drifted\n",
-        "`--force` on a commit must not revert a file the commit never named"
-    );
-    assert_eq!(
-        read_bookmark_file_contents(&machine, "mx-xps-cy", ".gitconfig"),
-        "[user]\nname = Repo\n",
-        "and must not record it either"
-    );
-    let status = machine.run_ok("dotsync status --output json");
-    let payload = parse_stdout_json(&status);
-    let changed: Vec<&str> = payload["changes"]
-        .as_array()
-        .expect("status answers with a changes array")
-        .iter()
-        .filter_map(|change| change["path"].as_str())
-        .collect();
-    assert_eq!(
-        changed,
-        [".gitconfig"],
-        "so it is still this machine's to decide about, and still reported as such\n{}",
-        render_output(&status)
-    );
-}
-
-#[test]
-fn forcing_a_stale_commit_records_what_it_overwrote() {
-    let harness = TestHarness::new();
-    let (machine_a, machine_b) = two_synced_machines(&harness);
-    seed_shared_apprc(&machine_a, &machine_b);
-
-    machine_b.write_file(".apprc", "ui_theme = dark\nfont = mono\nsize = 14\n");
-    machine_b.run_ok("dotsync commit all -m 'add size' -- .apprc");
-
-    machine_a.run_ok("dotsync status");
-
-    let commit_a = machine_a
-        .run_ok("dotsync --output json commit all -m 'revert on purpose' --force -- .apprc");
-
-    let json = parse_stdout_json(&commit_a);
-    assert_eq!(
-        json["forced_overwrites"]
-            .as_array()
-            .expect("forced_overwrites should be an array"),
-        &vec![serde_json::Value::from(".apprc")],
-        "a forced overwrite of an incoming change has to be on the record\n{}",
-        render_output(&commit_a)
-    );
-    assert_eq!(
-        remote_branch_file_contents(&machine_a, "all", ".apprc"),
-        "ui_theme = dark\nfont = mono\n"
-    );
-}
-
-#[test]
-fn a_successful_forced_commit_says_what_it_overwrote() {
-    let harness = TestHarness::new();
-    let (machine_a, machine_b) = two_synced_machines(&harness);
-    seed_shared_apprc(&machine_a, &machine_b);
-
-    machine_b.write_file(".apprc", "ui_theme = dark\nfont = mono\nsize = 14\n");
-    machine_b.run_ok("dotsync commit all -m 'add size' -- .apprc");
-
-    machine_a.run_ok("dotsync status");
-
-    // Succeeding is not a reason to stay quiet. A run that reverted another
-    // machine's published change has to say so on the way past, exactly as it
-    // does when it goes on to fail — the successful one is the commoner case.
-    let commit_a = machine_a.run_ok("dotsync commit all -m 'revert on purpose' --force -- .apprc");
-    assert_stderr_snapshot(
-        &commit_a,
-        "\
-dotsync: recorded 1 file(s) over an incoming change, because you passed `--force`
-- .apprc
-dotsync: committed all and synced 1 file(s)
-",
-    );
-}
-
-#[test]
-fn a_forced_overwrite_is_reported_even_when_the_run_then_fails() {
-    let harness = TestHarness::new();
-    let (machine_a, machine_b) = two_synced_machines(&harness);
-    seed_shared_apprc(&machine_a, &machine_b);
-
-    machine_a.write_file(".config/other.conf", "other = base\n");
-    machine_a.run_ok("dotsync commit all -m 'add other' -- .config/other.conf");
-    machine_b.run_ok("dotsync");
-
-    machine_b.write_file(".apprc", "ui_theme = dark\nfont = mono\nsize = 14\n");
-    machine_b.write_file(".config/other.conf", "other = from b\n");
-    machine_b.run_ok("dotsync commit all -m 'add size, change other' -- .apprc .config/other.conf");
-
-    // A forces the revert of `.apprc`, and separately holds its own edit to a
-    // file B changed differently — so the commit's own home sync meets a
-    // conflict it cannot resolve, after the forced history has been written and
-    // pushed.
-    machine_a.run_ok("dotsync status");
-    machine_a.write_file(".config/other.conf", "other = from a\n");
-
-    let commit_a =
-        machine_a.run("dotsync --output json commit all -m 'revert apprc' --force -- .apprc");
-    assert_eq!(
-        commit_a.status.code(),
-        Some(1),
-        "a home file that conflicts with what the scope holds still stops the home sync\n{}",
-        render_output(&commit_a)
-    );
-    assert_eq!(
-        remote_branch_file_contents(&machine_a, "all", ".apprc"),
-        "ui_theme = dark\nfont = mono\n",
-        "the forced overwrite really did happen before the run stopped"
-    );
-
-    let json = parse_stdout_json(&commit_a);
-    assert_eq!(
-        json["forced_overwrites"]
-            .as_array()
-            .expect("forced_overwrites should be an array on the error path too"),
-        &vec![serde_json::Value::from(".apprc")],
-        "a run that overwrote someone else's change must say so whether or not it then finished\n{}",
-        render_output(&commit_a)
     );
 }
 

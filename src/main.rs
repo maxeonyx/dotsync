@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
-    abort_paused_cascade, commit_and_sync, continue_after_conflict, create_scope, diff_home, init,
-    status, sync, view, CommitFailure, CommitOptions, DiffReport, DotsyncError, DotsyncPaths,
-    MachineState, Resumed, Run, UnreachableRemote, ViewAnswer,
+    abort_paused_cascade, commit_and_sync, continue_after_conflict, create_scope, diff_home,
+    discard, init, status, sync, view, CommitOptions, DiffReport, DotsyncError, DotsyncPaths,
+    Explanation, MachineState, Resumed, Run, UnreachableRemote, ViewAnswer,
 };
 mod render;
 use serde_json::json;
@@ -24,11 +24,10 @@ Basic workflow:
 
 const TOP_LEVEL_AFTER_HELP: &str = "Exit codes:
   0  the command did what it says
-  1  dotsync stopped, or `dotsync diff` found changes — with `--output json`,
-     `status` is \"error\" for a stop and \"ok\" for changes `diff` found
-  2  the command line was wrong
-  3  a paused cascade is waiting; resolve the conflicted files in home and run
-     `dotsync continue`, or run `dotsync abort` to discard it
+  1  it did not, or `dotsync diff` found changes. Which of those, and what kind
+     of stop it was, is in `--output json`: `status` is \"error\" for a stop and
+     \"ok\" for the changes `diff` found, and `error` names the kind — including
+     `cascade_paused`, the one that means a merge is waiting for you
 
 Examples:
   $ dotsync
@@ -75,11 +74,15 @@ dotsync compares three sides of every path: what it last synced to this machine,
 
 Naming a directory records what this machine changed under it, adds what is new under it, and steps around what another machine changed. Omitting the paths records only changes to files dotsync already tracks — it never adds anything, which is why a new file has to be opted into by naming it or the directory it is in.
 
-A run reports both halves of what that came to: `newly_tracked` for the files it put on the scope for the first time, and `skipped_paths` for the files under a named directory it left alone. Both appear in `--output json` and as notes on stderr, alongside `forced_overwrites`.
+A run reports both halves of what that came to: `newly_tracked` for the files it put on the scope for the first time, and `skipped_paths` for the files under a named directory it left alone. Both appear in `--output json` and as notes on stderr.";
 
-`--force` means \"home wins anyway\", and on `commit` it applies only to the paths you name. That is deliberately different from `--force` on plain `dotsync` and on `continue`, which name no paths and so overwrite every drifted file. So `dotsync commit linux -m msg --force -- .bashrc` overwrites `.bashrc` and nothing else, while `dotsync --force` overwrites everything that drifted.
+const DISCARD_ABOUT: &str = "Throw away the local changes at the paths you name";
 
-Forced paths are listed in the run's `--output json` under `forced_overwrites`.";
+const DISCARD_LONG_ABOUT: &str = "PATHS are home-relative files whose local changes to throw away: dotsync writes the scope's version of each one into home instead, and syncs as usual.
+
+This is the other way a local change ends. `dotsync commit` makes it everybody's; `dotsync discard` decides against it. Deleting the file yourself is neither — a deletion is a local change too, so home would come back empty rather than canonical.
+
+Every path must be one of the changes `dotsync status` lists. Naming anything else is a stop rather than a run that discarded nothing, because discarding cannot be undone.";
 
 const CONTINUE_ABOUT: &str = "Continue a paused merge cascade after resolving conflicts";
 const ABORT_ABOUT: &str = "Abort a paused merge cascade and restore the pre-pause state";
@@ -106,18 +109,11 @@ struct Cli {
     /// Output format
     #[arg(long = "output", value_enum, default_value = "human", global = true)]
     output_format: OutputFormat,
-
-    /// Overwrite drifted home files: every one on plain `dotsync` and
-    /// `continue`, only the paths you name on `commit`
-    #[arg(long, global = true)]
-    force: bool,
 }
 
 #[derive(Debug, Clone)]
 enum Action {
-    Sync {
-        force: bool,
-    },
+    Sync,
     Init {
         remote_url: InitRemote,
         parents: Vec<String>,
@@ -130,12 +126,12 @@ enum Action {
     Commit {
         scope: String,
         message: String,
-        force: bool,
         paths: Vec<PathBuf>,
     },
-    Continue {
-        force: bool,
+    Discard {
+        paths: Vec<PathBuf>,
     },
+    Continue,
     Abort,
     Status,
     Diff,
@@ -180,6 +176,12 @@ enum Command {
 
         /// Home-relative file or directory paths to commit; omit to commit
         /// every managed file this machine has changed
+        paths: Vec<PathBuf>,
+    },
+    #[command(about = DISCARD_ABOUT, long_about = DISCARD_LONG_ABOUT)]
+    Discard {
+        /// Home-relative paths whose local changes to throw away
+        #[arg(required = true)]
         paths: Vec<PathBuf>,
     },
     #[command(about = CONTINUE_ABOUT)]
@@ -265,15 +267,13 @@ impl SuccessOutput {
         }
     }
 
+    /// Adds to what this run has to say rather than replacing it: a run that
+    /// overwrote a file and also has something to explain about why owes the
+    /// reader both.
     fn with_notes(mut self, notes: Vec<String>) -> Self {
-        self.notes = notes;
+        self.notes.extend(notes);
         self
     }
-}
-
-#[derive(Debug, Clone)]
-struct UsageError {
-    message: String,
 }
 
 /// What to print, and what the run that produced it could not do.
@@ -305,8 +305,9 @@ struct CliOutput {
 #[derive(Debug)]
 enum OutputKind {
     Success(SuccessOutput),
-    Error(ErrorOutput),
-    Usage(UsageError),
+    Error(DotsyncError),
+    /// The command line was wrong, so there was never a run to explain.
+    Usage(Explanation),
 }
 
 impl CliOutput {
@@ -323,7 +324,7 @@ impl CliOutput {
 
 /// Turns a finished run into output, carrying what the run could not do onto
 /// whichever arm it ended in. The one place that decision is made.
-fn output_of<T, E: Into<ErrorOutput>>(
+fn output_of<T, E: Into<DotsyncError>>(
     invocation: &'static str,
     run: Run<Result<T, E>>,
     render: impl FnOnce(T) -> SuccessOutput,
@@ -342,34 +343,6 @@ fn output_of<T, E: Into<ErrorOutput>>(
     }
 }
 
-/// A run that stopped, plus anything it had already done that the error alone
-/// would not say.
-#[derive(Debug)]
-struct ErrorOutput {
-    error: DotsyncError,
-    forced_overwrites: Vec<PathBuf>,
-}
-
-impl From<DotsyncError> for ErrorOutput {
-    fn from(error: DotsyncError) -> Self {
-        Self {
-            error,
-            forced_overwrites: Vec::new(),
-        }
-    }
-}
-
-impl From<CommitFailure> for ErrorOutput {
-    /// A commit that stopped after writing history has to say what it
-    /// overwrote on the way past.
-    fn from(failure: CommitFailure) -> Self {
-        Self {
-            error: *failure.error,
-            forced_overwrites: failure.forced_overwrites,
-        }
-    }
-}
-
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     if try_handle_version_json_request() {
@@ -383,14 +356,16 @@ async fn main() {
     let output_format = output_format_of(&cli);
     let outcome = match Action::try_from_cli(cli, detect_cli_context()) {
         Ok(action) => dispatch(action).await,
-        Err(error) => Ok(CliOutput::without_run(OutputKind::Usage(error))),
+        Err(message) => Ok(CliOutput::without_run(OutputKind::Usage(usage_error(
+            &message,
+        )))),
     };
 
     let exit_code = match outcome {
         Ok(output) => emit_output(&output_format, output),
         Err(error) => emit_output(
             &output_format,
-            CliOutput::without_run(OutputKind::Error(error.into())),
+            CliOutput::without_run(OutputKind::Error(error)),
         ),
     };
     std::process::exit(exit_code);
@@ -448,10 +423,10 @@ fn emit_clap_error(error: clap::Error) -> i32 {
     if matches!(output_format_from_args(), OutputFormat::Json) {
         println!(
             "{}",
-            render::render_usage_error_json(&usage_error(message.trim_end()))
+            render::render_error_json(&usage_error(message.trim_end()))
         );
     }
-    error.exit_code()
+    1
 }
 
 /// Which format this run answers in, including when clap could not tell.
@@ -484,13 +459,12 @@ fn output_format_from_args() -> OutputFormat {
 }
 
 impl Action {
-    fn try_from_cli(cli: Cli, context: CliContext) -> Result<Self, UsageError> {
+    fn try_from_cli(cli: Cli, context: CliContext) -> Result<Self, String> {
         match cli.command {
             Some(Command::Init {
                 remote_url,
                 parents,
             }) => {
-                reject_force_before(cli.force, "init")?;
                 let remote_url = init_remote_from_args(remote_url, context)?;
                 Ok(Self::Init {
                     remote_url,
@@ -501,31 +475,17 @@ impl Action {
                 scope,
                 parents,
                 description,
-            }) => {
-                reject_force_before(cli.force, "create-scope")?;
-                Ok(Self::CreateScope {
-                    scope,
-                    parents,
-                    description,
-                })
-            }
-            Some(Command::Continue) => Ok(Self::Continue { force: cli.force }),
-            Some(Command::Abort) => {
-                reject_force_before(cli.force, "abort")?;
-                Ok(Self::Abort)
-            }
-            Some(Command::Status) => {
-                reject_force_before(cli.force, "status")?;
-                Ok(Self::Status)
-            }
-            Some(Command::Diff) => {
-                reject_force_before(cli.force, "diff")?;
-                Ok(Self::Diff)
-            }
-            Some(Command::View { scope, file }) => {
-                reject_force_before(cli.force, "view")?;
-                Ok(Self::View { scope, file })
-            }
+            }) => Ok(Self::CreateScope {
+                scope,
+                parents,
+                description,
+            }),
+            Some(Command::Discard { paths }) => Ok(Self::Discard { paths }),
+            Some(Command::Continue) => Ok(Self::Continue),
+            Some(Command::Abort) => Ok(Self::Abort),
+            Some(Command::Status) => Ok(Self::Status),
+            Some(Command::Diff) => Ok(Self::Diff),
+            Some(Command::View { scope, file }) => Ok(Self::View { scope, file }),
             Some(Command::Commit {
                 scope,
                 message,
@@ -533,18 +493,15 @@ impl Action {
             }) => Ok(Self::Commit {
                 scope,
                 message,
-                force: cli.force,
                 paths,
             }),
             Some(Command::Unknown(args)) => {
-                // `--force` is checked per command below, and an unknown
-                // command has no behavior to force.
                 let command = args.first().map(String::as_str).unwrap_or("<empty>");
-                Err(usage_error(&format!(
+                Err(format!(
                     "unknown command `{command}`; run `dotsync --help` for supported commands"
-                )))
+                ))
             }
-            None => Ok(Self::Sync { force: cli.force }),
+            None => Ok(Self::Sync),
         }
     }
 }
@@ -552,7 +509,7 @@ impl Action {
 fn init_remote_from_args(
     remote_url: Option<String>,
     context: CliContext,
-) -> Result<InitRemote, UsageError> {
+) -> Result<InitRemote, String> {
     if let Some(remote_url) = remote_url {
         return Ok(InitRemote::Provided(remote_url));
     }
@@ -561,18 +518,18 @@ fn init_remote_from_args(
         return Ok(InitRemote::Prompt);
     }
 
-    Err(usage_error(INIT_REMOTE_URL_USAGE))
+    Err(INIT_REMOTE_URL_USAGE.to_string())
 }
 
 async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
     match action {
-        Action::Sync { force } => run_sync(force).await,
+        Action::Sync => run_sync().await,
         Action::Commit {
             scope,
             message,
-            force,
             paths,
-        } => run_commit(scope, message, force, paths).await,
+        } => run_commit(scope, message, paths).await,
+        Action::Discard { paths } => run_discard(paths).await,
         Action::Init {
             remote_url,
             parents,
@@ -582,7 +539,7 @@ async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
             parents,
             description,
         } => run_create_scope(scope, parents, description).await,
-        Action::Continue { force } => run_continue(force).await,
+        Action::Continue => run_continue().await,
         Action::Abort => run_abort().await,
         Action::Status => run_status().await,
         Action::Diff => run_diff().await,
@@ -590,28 +547,17 @@ async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
     }
 }
 
-/// `--force` is global, like `--output`, so it parses in either position and
-/// one message explains it wherever it means nothing. Declaring it per command
-/// instead would hand the commands that reject it clap's generic 'unexpected
-/// argument' - and on `init`, clap's 'to pass --force as a value' tip, which
-/// would make the flag the remote URL. A command that never chooses whether to
-/// overwrite drifted home files has no meaning for it, and silently accepting
-/// it there would teach an agent that retrying with `--force` could change the
-/// answer. `init` and `abort` write home but never make that choice: `init`
-/// has nothing of yours to overwrite, and `abort` exists precisely to discard
-/// the home edit that started the cascade.
-fn reject_force_before(force: bool, command: &str) -> Result<(), UsageError> {
-    if !force {
-        return Ok(());
-    }
-    Err(usage_error(&format!(
-        "`--force` has no meaning for `{command}`; it only decides whether to overwrite drifted files in your home directory, which is a choice made by plain `dotsync`, `commit`, and `continue`"
-    )))
-}
-
-fn usage_error(message: &str) -> UsageError {
-    UsageError {
+/// A command line that never started a run is still a stop, and it reports in
+/// the shape every other stop has — so a caller that has learned to read one
+/// payload has learned to read the first error it is ever likely to meet.
+fn usage_error(message: &str) -> Explanation {
+    Explanation {
+        code: "usage",
         message: message.to_string(),
+        paused_cascade: None,
+        current_state: Vec::new(),
+        conflicts: Vec::new(),
+        teaching: None,
     }
 }
 
@@ -620,7 +566,11 @@ async fn run_init(remote_url: InitRemote, parents: Vec<String>) -> Result<CliOut
         InitRemote::Provided(remote_url) => remote_url,
         InitRemote::Prompt => match prompt_init_remote_url() {
             Ok(remote_url) => remote_url,
-            Err(error) => return Ok(CliOutput::without_run(OutputKind::Usage(error))),
+            Err(message) => {
+                return Ok(CliOutput::without_run(OutputKind::Usage(usage_error(
+                    &message,
+                ))))
+            }
         },
     };
     let paths = discover_paths()?;
@@ -664,28 +614,26 @@ async fn run_create_scope(
     }))
 }
 
-fn prompt_init_remote_url() -> Result<String, UsageError> {
+fn prompt_init_remote_url() -> Result<String, String> {
     eprint!("dotsync init remote URL: ");
     io::stderr()
         .flush()
-        .map_err(|err| usage_error(&format!("init could not write prompt: {err}")))?;
+        .map_err(|err| format!("init could not write prompt: {err}"))?;
 
     let mut remote_url = String::new();
     io::stdin()
         .read_line(&mut remote_url)
-        .map_err(|err| usage_error(&format!("init could not read remote URL: {err}")))?;
+        .map_err(|err| format!("init could not read remote URL: {err}"))?;
     let remote_url = remote_url.trim().to_string();
     if remote_url.is_empty() {
-        return Err(usage_error(INIT_REMOTE_URL_USAGE));
+        return Err(INIT_REMOTE_URL_USAGE.to_string());
     }
     Ok(remote_url)
 }
 
-async fn run_continue(force: bool) -> Result<CliOutput, DotsyncError> {
+async fn run_continue() -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    // `continue` names no paths, so its `--force` is necessarily blanket: it
-    // overwrites every locally changed file or none of them.
-    let run = continue_after_conflict(&paths, force).await;
+    let run = continue_after_conflict(&paths).await;
     Ok(output_of("dotsync continue", run, |report| {
         let synced = report.sync.synced_paths.len();
         let output = render::synced_output(
@@ -752,7 +700,9 @@ async fn run_abort() -> Result<CliOutput, DotsyncError> {
             return output;
         };
         output.json["paused_cascade"] = json!(scope);
-        output.exit_code = 3;
+        // The run did not do what it says on the tin: home went back, and the
+        // merge it was asked to end is still waiting.
+        output.exit_code = 1;
         output.notes.extend([
             format!("dotsync: the conflict at `{scope}` came from the remote rather than from anything this machine committed, so there was nothing to take back and it is still waiting"),
             "dotsync: aborting again will not clear it — edit the conflicted file(s) in home to the merged contents you want and run `dotsync continue`.".to_string(),
@@ -761,14 +711,32 @@ async fn run_abort() -> Result<CliOutput, DotsyncError> {
     }))
 }
 
-async fn run_sync(force: bool) -> Result<CliOutput, DotsyncError> {
+async fn run_sync() -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let run = sync(&paths, force).await;
+    let run = sync(&paths).await;
     Ok(output_of("dotsync", run, |report| {
         render::synced_output(
             "sync",
             format!(
                 "dotsync: synced {} file(s) for {}",
+                report.sync.synced_paths.len(),
+                report.sync.current_scope
+            ),
+            &report.sync,
+            Some(&report.push),
+        )
+    }))
+}
+
+async fn run_discard(discard_paths: Vec<PathBuf>) -> Result<CliOutput, DotsyncError> {
+    let paths = discover_paths()?;
+    let run = discard(&paths, &discard_paths).await;
+    Ok(output_of("dotsync discard", run, |report| {
+        render::synced_output(
+            "discard",
+            format!(
+                "dotsync: discarded {} local change(s) and synced {} file(s) for {}",
+                report.sync.drifts.len(),
                 report.sync.synced_paths.len(),
                 report.sync.current_scope
             ),
@@ -787,7 +755,6 @@ async fn run_status() -> Result<CliOutput, DotsyncError> {
                 json!({
                     "status": "ok",
                     "command": "status",
-                    "machine_scope": report.machine_scope,
                     "changes": render::changes_json(&report.changes),
                     "incoming": render::changes_json(&report.incoming),
                 }),
@@ -812,7 +779,6 @@ async fn run_diff() -> Result<CliOutput, DotsyncError> {
                 json!({
                     "status": "ok",
                     "command": "diff",
-                    "machine_scope": report.machine_scope,
                     "changes": report
                         .drifts
                         .iter()
@@ -857,14 +823,19 @@ async fn run_view(scope: Option<String>, file: Option<PathBuf>) -> Result<CliOut
                 }),
                 render_view_scope_stdout(&scope, &files),
             ),
-            ViewAnswer::FileScopes { file, scopes } => SuccessOutput::stdout(
+            ViewAnswer::FileScopes {
+                file,
+                scopes,
+                owner,
+            } => SuccessOutput::stdout(
                 json!({
                     "status": "ok",
                     "command": "view",
                     "file": render::display_path(&file),
                     "scopes": scopes,
+                    "owner": owner,
                 }),
-                render_view_file_scopes_stdout(&file, &scopes),
+                render_view_file_scopes_stdout(&file, &scopes, owner.as_deref()),
             ),
             ViewAnswer::Overview { scopes, files } => SuccessOutput::stdout(
                 json!({
@@ -877,38 +848,41 @@ async fn run_view(scope: Option<String>, file: Option<PathBuf>) -> Result<CliOut
                     })).collect::<Vec<_>>(),
                     "files": files.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
                 }),
-                render_view_overview_stdout(&scopes, &files),
+                render_view_overview_stdout(&scopes, &files, &machine.machine_scope),
             ),
         };
 
-        with_machine_state(answer, &machine)
+        with_machine_state(reprinting_any_conflict(answer, &machine), &machine)
     }))
 }
 
 async fn run_commit(
     scope: String,
     message: String,
-    force: bool,
     commit_paths: Vec<PathBuf>,
 ) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
+    // Whether the caller named anything, which decides what a commit that
+    // recorded nothing has to explain.
+    let named_paths = !commit_paths.is_empty();
     let run = commit_and_sync(
         &paths,
         CommitOptions {
             scope,
             message,
-            force,
             paths: commit_paths,
         },
     )
     .await;
-    Ok(output_of("dotsync commit", run, render_commit_success))
+    Ok(output_of("dotsync commit", run, |report| {
+        render_commit_success(report, named_paths)
+    }))
 }
 
 /// A commit has two outcomes and says which one it had, because they are not
 /// the same event: one wrote history and synced home, the other did neither.
 /// The fields that only one of them can honestly fill are only on that one.
-fn render_commit_success(report: dotsync::CommitReport) -> SuccessOutput {
+fn render_commit_success(report: dotsync::CommitReport, named_paths: bool) -> SuccessOutput {
     let mut json = json!({
         "status": "ok",
         "command": "commit",
@@ -921,6 +895,18 @@ fn render_commit_success(report: dotsync::CommitReport) -> SuccessOutput {
     let skipped = render::skipped_path_notes(&report.skipped);
 
     let Some(recorded) = report.recorded else {
+        // A commit that named nothing records only changes to files dotsync
+        // already tracks, so this is the answer an agent gets after writing a
+        // config file dotsync has never seen — and `status` did not list it
+        // either, for the same reason. Saying so here is the only place that
+        // reaches them.
+        let new_file_advice = match named_paths {
+            true => Vec::new(),
+            false => vec![
+                "dotsync: a file dotsync does not track yet is not a change to it, so a commit naming no paths never adds one. Name the file, or the directory it is in, to start tracking it."
+                    .to_string(),
+            ],
+        };
         return SuccessOutput::message(
             json,
             format!(
@@ -931,6 +917,7 @@ fn render_commit_success(report: dotsync::CommitReport) -> SuccessOutput {
         .with_notes(
             skipped
                 .into_iter()
+                .chain(new_file_advice)
                 .chain(render::push_notes(&report.push))
                 .collect(),
         );
@@ -938,7 +925,6 @@ fn render_commit_success(report: dotsync::CommitReport) -> SuccessOutput {
 
     json["synced_files"] = json!(render::display_paths(&recorded.sync.synced_paths));
     json["newly_tracked"] = json!(render::display_paths(&recorded.newly_tracked));
-    json["forced_overwrites"] = json!(render::display_paths(&recorded.forced_overwrites));
     SuccessOutput::message(
         json,
         format!(
@@ -951,13 +937,44 @@ fn render_commit_success(report: dotsync::CommitReport) -> SuccessOutput {
         render::newly_tracked_notes(&recorded.newly_tracked)
             .into_iter()
             .chain(skipped)
-            .chain(render::forced_overwrite_notes(&recorded.forced_overwrites))
             .chain(render::success_notes(
                 &recorded.sync.drifts,
                 Some(&report.push),
             ))
             .collect(),
     )
+}
+
+/// The conflict a machine is paused on, printed again by `view`.
+///
+/// Every version of every conflicted file exists nowhere else: dotsync writes
+/// no markers into home, and neither side is on a scope this machine syncs
+/// from. So the pause message is the only copy, and an agent that lost it — a
+/// new session, a scrolled terminal — needs somewhere to ask. `view` is that
+/// somewhere, because it already answers "what is checked in" and the pause is
+/// derived, so it is correct whenever it is asked.
+///
+/// `status` and `diff` name the pause and stop there. `status` is the concise
+/// one, and three versions of every conflicted file is not concise.
+fn reprinting_any_conflict(answer: SuccessOutput, machine: &MachineState) -> SuccessOutput {
+    let Some(paused) = &machine.paused_cascade else {
+        return answer;
+    };
+    if paused.conflicts.is_empty() {
+        return answer;
+    }
+    let mut json = answer.json;
+    json["conflicts"] = json!(paused
+        .conflicts
+        .iter()
+        .map(render::render_conflict_json)
+        .collect::<Vec<_>>());
+    let mut human = vec![format!(
+        "dotsync: the merge at `{}` is waiting on these file(s)",
+        paused.scope
+    )];
+    human.extend(render::render_conflicts_human(&paused.conflicts));
+    SuccessOutput { json, ..answer }.with_notes(human)
 }
 
 /// What `status`, `diff` and `view` say about the machine, whatever they were
@@ -972,13 +989,14 @@ fn render_commit_success(report: dotsync::CommitReport) -> SuccessOutput {
 /// to whoever reads that field.
 fn with_machine_state(answer: SuccessOutput, machine: &MachineState) -> SuccessOutput {
     let mut json = answer.json;
-    if let Some(scope) = &machine.paused_cascade {
-        json["paused_cascade"] = json!(scope);
+    json["machine_scope"] = json!(machine.machine_scope);
+    if let Some(paused) = &machine.paused_cascade {
+        json["paused_cascade"] = json!(paused.scope);
     }
     json["diverged_scopes"] = json!(machine.diverged_scopes);
     json["unpushed_scopes"] = json!(machine.unpushed_scopes);
     SuccessOutput { json, ..answer }.with_notes(
-        render::paused_cascade_notes(machine.paused_cascade.as_ref())
+        render::paused_cascade_notes(machine.paused_cascade.as_ref().map(|paused| &paused.scope))
             .into_iter()
             .chain(render::diverged_scope_notes(&machine.diverged_scopes))
             .chain(render::unpushed_scope_notes(&machine.unpushed_scopes))
@@ -1009,7 +1027,7 @@ fn render_status_human(report: &dotsync::StatusReport) -> String {
     if !report.changes.is_empty() {
         lines.push(changed_files_header(
             report.changes.len(),
-            &report.machine_scope,
+            &report.machine.machine_scope,
         ));
         lines.extend(
             report
@@ -1022,7 +1040,7 @@ fn render_status_human(report: &dotsync::StatusReport) -> String {
         lines.push(format!(
             "dotsync: {} incoming file(s) for {} — plain `dotsync` applies these",
             report.incoming.len(),
-            report.machine_scope
+            report.machine.machine_scope
         ));
         lines.extend(
             report
@@ -1033,7 +1051,7 @@ fn render_status_human(report: &dotsync::StatusReport) -> String {
     }
 
     if lines.is_empty() {
-        return format!("dotsync: no changes for {}", report.machine_scope);
+        return format!("dotsync: no changes for {}", report.machine.machine_scope);
     }
     lines.join("\n")
 }
@@ -1041,12 +1059,12 @@ fn render_status_human(report: &dotsync::StatusReport) -> String {
 /// `status`'s changed list, with each file's two sides shown under it.
 fn render_diff_human(report: &DiffReport) -> String {
     if report.drifts.is_empty() {
-        return format!("dotsync: no changes for {}", report.machine_scope);
+        return format!("dotsync: no changes for {}", report.machine.machine_scope);
     }
 
     let mut lines = vec![changed_files_header(
         report.drifts.len(),
-        &report.machine_scope,
+        &report.machine.machine_scope,
     )];
     for drift in &report.drifts {
         lines.push(render::render_change_line(&drift.repo_path, drift.state));
@@ -1055,10 +1073,18 @@ fn render_diff_human(report: &DiffReport) -> String {
     lines.join("\n")
 }
 
-fn render_view_overview_stdout(scopes: &[dotsync::ScopeInfo], files: &[PathBuf]) -> String {
+fn render_view_overview_stdout(
+    scopes: &[dotsync::ScopeInfo],
+    files: &[PathBuf],
+    machine_scope: &str,
+) -> String {
     render_lines(
         std::iter::once("Scopes".to_string())
-            .chain(scopes.iter().map(render_scope_line))
+            .chain(
+                scopes
+                    .iter()
+                    .map(|scope| render_scope_line(scope, machine_scope)),
+            )
             .chain([String::new(), "Files".to_string()])
             .chain(files.iter().map(|path| render::display_path(path))),
     )
@@ -1078,19 +1104,27 @@ fn render_view_scope_stdout(scope: &str, files: &[PathBuf]) -> String {
 /// Still exit 0: "no scope holds this" is an answer to the question asked.
 /// Asking for the *contents* of a file on a named scope is a different
 /// question, and having none to print is a stop.
-fn render_view_file_scopes_stdout(path: &std::path::Path, scopes: &[String]) -> String {
+fn render_view_file_scopes_stdout(
+    path: &std::path::Path,
+    scopes: &[String],
+    owner: Option<&str>,
+) -> String {
     let path = render::display_path(path);
-    if scopes.is_empty() {
+    let Some(owner) = owner else {
         return render_lines([
             format!("File {path}"),
             format!("No scope holds {path}."),
             "Run `dotsync view` to see every file the scopes do hold.".to_string(),
         ]);
-    }
+    };
     render_lines(
-        [format!("File {path}"), "Scopes".to_string()]
-            .into_iter()
-            .chain(scopes.iter().cloned()),
+        [
+            format!("File {path}"),
+            format!("Owned by {owner}; every other scope below has it from the cascade."),
+            "Scopes".to_string(),
+        ]
+        .into_iter()
+        .chain(scopes.iter().cloned()),
     )
 }
 
@@ -1100,10 +1134,19 @@ fn render_lines(lines: impl IntoIterator<Item = String>) -> String {
     lines.join("\n")
 }
 
-fn render_scope_line(scope: &dotsync::ScopeInfo) -> String {
+/// One scope, its parents, and whether it is the machine reading this.
+///
+/// The marker is the answer to "where am I?", which is the question `view`
+/// exists for and the one thing the list could not say: two machine scopes
+/// rendered identically apart from their names.
+fn render_scope_line(scope: &dotsync::ScopeInfo, machine_scope: &str) -> String {
+    let here = match scope.name == machine_scope {
+        true => "* ",
+        false => "  ",
+    };
     let mut line = match scope.parents.as_slice() {
-        [] => scope.name.clone(),
-        parents => format!("{} <- {}", scope.name, parents.join(", ")),
+        [] => format!("{here}{}", scope.name),
+        parents => format!("{here}{} <- {}", scope.name, parents.join(", ")),
     };
     // Only the scopes whose creator said what they are for carry this, so a
     // graph of self-evident names reads as a graph and nothing else.
@@ -1142,54 +1185,42 @@ fn emit_output(output_format: &OutputFormat, output: CliOutput) -> i32 {
             }
             success.exit_code
         }
-        OutputKind::Error(ErrorOutput {
-            error,
-            forced_overwrites,
-        }) => {
-            let exit_code = if error.paused_scope().is_some() { 3 } else { 1 };
-            for note in render::forced_overwrite_notes(&forced_overwrites) {
-                eprintln!("{note}");
-            }
-            eprintln!("{}", render::render_error_human(&error, invocation));
-            let mut error_report = error.to_error_report();
-            error_report.forced_overwrites = forced_overwrites;
-            // After the teaching message and set apart from it: these are the
-            // files the run stopped on, not more instructions.
-            if !error_report.drifts.is_empty() {
-                eprintln!("\nChanged files:");
-                for line in render::render_drifts_human(&error_report.drifts) {
-                    eprintln!("{line}");
-                }
-            }
-            // The conflict itself, after the teaching block and apart from it,
-            // because it is the material to work from rather than more
-            // instructions — and because it is what dotsync hands over
-            // *instead* of writing markers into the file.
-            if !error_report.conflicts.is_empty() {
-                eprintln!("\nConflicted files:");
-                for line in render::render_conflicts_human(&error_report.conflicts) {
-                    eprintln!("{line}");
-                }
-            }
-            if matches!(output_format, OutputFormat::Json) {
-                println!(
-                    "{}",
-                    render::with_remote_state(
-                        render::render_error_json(&error_report),
-                        unreachable_remote.as_ref()
-                    )
-                );
-            }
-            exit_code
-        }
-        OutputKind::Usage(error) => {
-            eprintln!("dotsync: {}", error.message);
-            if matches!(output_format, OutputFormat::Json) {
-                println!("{}", render::render_usage_error_json(&error));
-            }
-            2
+        OutputKind::Error(error) => emit_stop(
+            output_format,
+            error.explain(invocation),
+            unreachable_remote.as_ref(),
+        ),
+        OutputKind::Usage(explanation) => {
+            emit_stop(output_format, explanation, unreachable_remote.as_ref())
         }
     }
+}
+
+/// A run that stopped, or a command line that never started one: the teaching
+/// block, the conflict if there is one, the payload, and 1.
+fn emit_stop(
+    output_format: &OutputFormat,
+    explanation: Explanation,
+    unreachable_remote: Option<&UnreachableRemote>,
+) -> i32 {
+    eprintln!("{}", render::render_error_human(&explanation));
+    // The conflict itself, after the teaching block and apart from it,
+    // because it is the material to work from rather than more
+    // instructions — and because it is what dotsync hands over
+    // *instead* of writing markers into the file.
+    if !explanation.conflicts.is_empty() {
+        eprintln!("\nConflicted files:");
+        for line in render::render_conflicts_human(&explanation.conflicts) {
+            eprintln!("{line}");
+        }
+    }
+    if matches!(output_format, OutputFormat::Json) {
+        println!(
+            "{}",
+            render::with_remote_state(render::render_error_json(&explanation), unreachable_remote)
+        );
+    }
+    1
 }
 
 #[cfg(test)]

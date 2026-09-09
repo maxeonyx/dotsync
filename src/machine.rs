@@ -25,8 +25,7 @@ pub(crate) fn detect_machine() -> Result<MachineIdentity, DotsyncError> {
 }
 
 /// Every commit dotsync writes carries the machine that wrote it, so history
-/// can say where a change came from — the `author: ""` oversight PLAN §2.3
-/// step 2 retires. The machine scope is the name, because that is what machine
+/// can say where a change came from. The machine scope is the name, because that is what machine
 /// identity *is* here: a hostname matched against a leaf bookmark.
 pub(crate) fn machine_signature(machine_scope: &str) -> Signature {
     Signature {
@@ -60,6 +59,7 @@ pub(crate) fn detect_hostname() -> Result<String, DotsyncError> {
     let etc_hostname = Path::new("/etc/hostname");
     if etc_hostname.exists() {
         let hostname = fs::read_to_string(etc_hostname).map_err(|source| DotsyncError::Io {
+            doing: "read",
             path: etc_hostname.to_path_buf(),
             source,
         })?;

@@ -68,20 +68,68 @@ pub struct SyncCommandReport {
 
 /// Plain `dotsync`: bring home to this machine's scope.
 ///
-/// `discard_local` is `--force`: home loses instead of being merged. Without
-/// it a local edit is an input to the sync rather than a wall in front of it —
+/// A local edit is an input to the sync rather than a wall in front of it —
 /// the merge carries it across — and only a collision on the same file stops
 /// the run.
-pub async fn sync(
-    paths: &DotsyncPaths,
-    discard_local: bool,
-) -> Run<Result<SyncCommandReport, DotsyncError>> {
+pub async fn sync(paths: &DotsyncPaths) -> Run<Result<SyncCommandReport, DotsyncError>> {
     in_session(paths, async |session, paths| {
         let mut home = Home::acquire(session, paths).await?;
-        let outcome = sync_home(session, &mut home, discard_local).await;
+        let outcome = async {
+            session.fetch().await?;
+            sync_home(session, &mut home, LocalChanges::Carry).await
+        }
+        .await;
         finishing(home, session, outcome).await
     })
     .await
+}
+
+/// `dotsync discard <paths>`: the same sync, having decided against the change
+/// home holds at the paths it names.
+///
+/// The one way out of a local change other than committing it, and the reason
+/// it cannot simply be `rm` plus a sync: deleting a managed file is itself a
+/// local change, so home would come back empty rather than canonical.
+///
+/// It names paths because the two things it is used for are opposites — a
+/// stale config file you no longer want, and a resolution somebody is part-way
+/// through writing — and a run that could not tell them apart discarded both.
+pub async fn discard(
+    paths: &DotsyncPaths,
+    targets: &[PathBuf],
+) -> Run<Result<SyncCommandReport, DotsyncError>> {
+    in_session(paths, async |session, paths| {
+        let mut home = Home::acquire(session, paths).await?;
+        let outcome = discard_home(session, &mut home, targets).await;
+        finishing(home, session, outcome).await
+    })
+    .await
+}
+
+async fn discard_home(
+    session: &mut Session,
+    home: &mut Home,
+    targets: &[PathBuf],
+) -> Result<SyncCommandReport, DotsyncError> {
+    session.fetch().await?;
+    // Before anything moves. A path that holds no change of this machine's own
+    // is a path this command has nothing to do at, and a run that answered
+    // "discarded 0 file(s)" to a typo would leave the caller believing it had
+    // decided something.
+    let classified = classify_home_against_machine_scope(session, home).await?;
+    let changed = changed_paths(&classified, FileState::is_drift);
+    let nothing_to_discard: Vec<PathBuf> = targets
+        .iter()
+        .filter(|target| !changed.iter().any(|(path, _)| &path == target))
+        .cloned()
+        .collect();
+    if !nothing_to_discard.is_empty() {
+        return Err(DotsyncError::NothingToDiscard {
+            paths: nothing_to_discard,
+        });
+    }
+
+    sync_home(session, home, LocalChanges::DiscardAt(targets.to_vec())).await
 }
 
 /// Ends a run at the home boundary whichever way the run went.
@@ -103,48 +151,34 @@ pub(crate) async fn finishing<T, E: From<DotsyncError>>(
     Ok(value)
 }
 
+/// Converge, publish, and move home — the whole of what a run does once it has
+/// fetched. Its callers fetch, because a run fetches once.
 async fn sync_home(
     session: &mut Session,
     home: &mut Home,
-    discard_local: bool,
+    local: LocalChanges,
 ) -> Result<SyncCommandReport, DotsyncError> {
-    session.fetch().await?;
     let checkpoint = converge::checkpoint(session.repo().as_ref(), session.graph());
     converge_or_pause(session, home, &checkpoint).await?;
     // Publish before touching home: scope commits left behind by an
     // interrupted run must reach the remote even if the home sync stops.
     let push = publish_or_pause(session, home, &checkpoint).await?;
-    let sync = sync_home_to_machine_scope(session, home, LocalChanges::of(discard_local)).await?;
+    let sync = sync_home_to_machine_scope(session, home, local).await?;
     Ok(SyncCommandReport { sync, push })
 }
 
 /// What a sync does with the changes home is holding.
-///
-/// A three-way choice rather than a flag, because the third is not "force" in
-/// a smaller size: `Carry` and `Discard` are moods a whole run is in, and
-/// `DiscardAt` is a decision about named files. It is also the shape
-/// `discard <paths>` needs when `--force` becomes a command (PLAN §2.3 step 7).
 pub(crate) enum LocalChanges {
     /// Merged in: the ordinary sync, and the reason a local edit is an input
     /// rather than a wall.
     Carry,
-    /// Dropped whole: `--force`, and `init` and `abort`, which exist to take
-    /// the head's side.
+    /// Dropped whole: `init` and `abort`, which exist to take the head's side
+    /// and are given no choice about it.
     Discard,
-    /// Dropped at these paths, carried everywhere else: the end of a
-    /// resolution, where the conflicted files go back to being whatever this
-    /// machine's scope says they are.
+    /// Dropped at these paths, carried everywhere else: `discard`, and the end
+    /// of a resolution, where the conflicted files go back to being whatever
+    /// this machine's scope says they are.
     DiscardAt(Vec<PathBuf>),
-}
-
-impl LocalChanges {
-    /// What `--force` means, for the two commands that still take it.
-    pub(crate) fn of(discard_local: bool) -> Self {
-        match discard_local {
-            true => LocalChanges::Discard,
-            false => LocalChanges::Carry,
-        }
-    }
 }
 
 /// The home sync itself: `merge(home, mark, head)` and what it came to.

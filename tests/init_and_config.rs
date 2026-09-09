@@ -61,14 +61,20 @@ fn init_reports_no_drift() {
 }
 
 /// Creating a scope is the whole of what can be done to the graph, and the
-/// test the graph work has owed since PLAN §2.3 step 1: a run that reports it
+/// test the graph work has owed since the rewrite began: a run that reports it
 /// created a scope means the scope exists and can be used. Declaring one in
 /// `config.toml` reported success and created no bookmark, so the scope was
 /// unusable and `dotsync view` broke on every machine in the fleet.
 ///
 /// Usable means usable from another machine, which is why this ends on a
-/// second machine reading the file: a scope only earns its name by carrying
-/// config to the machines under it.
+/// machine that had nothing to do with any of it reading the file: a scope
+/// only earns its name by carrying config to the machines under it.
+///
+/// The machine that creates a scope cannot seed it, and that is the two
+/// standing decisions meeting: the graph is append-only, so creating
+/// `hyprland` moves no existing machine under it, and a commit may only name a
+/// scope this machine holds. So a new scope is for the machines that join
+/// under it afterwards, and the first of those is what puts config on it.
 #[test]
 fn a_scope_created_on_one_machine_is_usable_from_another() {
     let harness = TestHarness::new();
@@ -76,8 +82,6 @@ fn a_scope_created_on_one_machine_is_usable_from_another() {
     machine_a.init_ok();
 
     machine_a.run_ok("dotsync create-scope hyprland --parent linux -m 'wayland compositor config'");
-    machine_a.write_file(".config/hypr/hyprland.conf", "monitor = eDP-1\n");
-    machine_a.run_ok("dotsync commit hyprland -m 'seed hyprland' -- .config/hypr/hyprland.conf");
 
     let machine_b = harness.machine("machine-b", "linux", "goof-b");
     let init_b = machine_b.init_with("--parent hyprland");
@@ -86,11 +90,21 @@ fn a_scope_created_on_one_machine_is_usable_from_another() {
         "a machine has to be able to join under a scope somebody created\n{}",
         render_output(&init_b)
     );
+    machine_b.write_file(".config/hypr/hyprland.conf", "monitor = eDP-1\n");
+    machine_b.run_ok("dotsync commit hyprland -m 'seed hyprland' -- .config/hypr/hyprland.conf");
+
+    let machine_c = harness.machine("machine-c", "linux", "goof-c");
+    let init_c = machine_c.init_with("--parent hyprland");
+    assert!(
+        init_c.status.success(),
+        "and so has the next one\n{}",
+        render_output(&init_c)
+    );
     assert_eq!(
-        machine_b.read_file(".config/hypr/hyprland.conf"),
+        machine_c.read_file(".config/hypr/hyprland.conf"),
         "monitor = eDP-1\n",
         "and the config on that scope has to reach it\n{}",
-        render_output(&init_b)
+        render_output(&init_c)
     );
 }
 
@@ -156,7 +170,7 @@ fn init_without_remote_noninteractive_matches_full_recovery_message() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
-    let init_output = machine.run_expecting("dotsync init", 2);
+    let init_output = machine.run_expecting("dotsync init", 1);
 
     let stderr = String::from_utf8_lossy(&init_output.stderr);
     let expected = "dotsync: init needs the repo remote URL
@@ -214,7 +228,7 @@ fn status_before_init_json_matches_recovery_message() {
 
     let status_output = machine.run_expecting("dotsync --output json status", 1);
 
-    let expected = r#"{"conflicts":[],"current_state":["expected repo path: {repo}; standard location: ~/.local/share/dotsync/repo"],"drifts":[],"error":"not_initialized","forced_overwrites":[],"message":"Dotsync could not find its hidden repo at {repo}. Run `dotsync init <remote-url>` from this home directory first.","status":"error"}
+    let expected = r#"{"conflicts":[],"current_state":["expected repo path: {repo}; standard location: ~/.local/share/dotsync/repo"],"error":"not_initialized","message":"Dotsync could not find its hidden repo at {repo}. Run `dotsync init <remote-url>` from this home directory first.","status":"error"}
 "#
     .replace("{repo}", &machine.repo_dir.display().to_string());
     let stdout = String::from_utf8_lossy(&status_output.stdout);

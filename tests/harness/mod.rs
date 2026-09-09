@@ -1147,7 +1147,7 @@ pub fn pause_a_conflict_on_linux(harness: &TestHarness) -> (MachineEnvironment, 
 /// its own path and the resolution is its own config. `goof-a` is the *other*
 /// machine's leaf scope: the cascade from `all` still has to merge into it, so
 /// the same collision happens, but the paused machine does not descend from it
-/// and the resolution is not its config. PLAN item 3: "Every conflict test in
+/// and the resolution is not its config. The standing rule: "every conflict test in
 /// the suite today pauses on a scope the machine descends from, which is why
 /// this survived three waves."
 ///
@@ -1163,7 +1163,7 @@ pub fn pause_a_conflict_on(
     let init_a = machine_a.init();
     assert!(init_a.status.success(), "{}", render_output(&init_a));
     machine_b.init_ok_under("linux");
-    let sync_a_after_join = machine_a.run("dotsync --force");
+    let sync_a_after_join = machine_a.run("dotsync");
     assert!(
         sync_a_after_join.status.success(),
         "{}",
@@ -1199,7 +1199,7 @@ pub fn pause_a_conflict_on(
         machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
     assert_eq!(
         conflict.status.code(),
-        Some(3),
+        Some(1),
         "{}",
         render_output(&conflict)
     );
@@ -1233,15 +1233,22 @@ pub fn dotsync_args(command: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut quote = None;
+    // A quoted empty string is an argument. Dropping it silently is how
+    // `dotsync commit all -m '' -- .apprc` reached the binary as `-m .apprc`.
+    let mut quoted = false;
 
     for character in command.chars() {
         match (quote, character) {
-            (Some(active), character) if character == active => quote = None,
+            (Some(active), character) if character == active => {
+                quote = None;
+                quoted = true;
+            }
             (Some(_), character) => current.push(character),
             (None, '\'' | '"') => quote = Some(character),
             (None, character) if character.is_whitespace() => {
-                if !current.is_empty() {
+                if !current.is_empty() || quoted {
                     parts.push(std::mem::take(&mut current));
+                    quoted = false;
                 }
             }
             (None, character) => current.push(character),
@@ -1249,7 +1256,7 @@ pub fn dotsync_args(command: &str) -> Vec<String> {
     }
 
     assert!(quote.is_none(), "unterminated quote in command: {command}");
-    if !current.is_empty() {
+    if !current.is_empty() || quoted {
         parts.push(current);
     }
 
@@ -1269,7 +1276,7 @@ pub fn two_synced_machines(harness: &TestHarness) -> (MachineEnvironment, Machin
     assert!(init_a.status.success(), "{}", render_output(&init_a));
     let init_b = machine_b.init_with("--parent linux");
     assert!(init_b.status.success(), "{}", render_output(&init_b));
-    let sync_a = machine_a.run("dotsync --force");
+    let sync_a = machine_a.run("dotsync");
     assert!(sync_a.status.success(), "{}", render_output(&sync_a));
 
     (machine_a, machine_b)
@@ -1327,7 +1334,7 @@ pub fn quoted_dotsync_invocations(text: &str) -> Vec<String> {
 /// both came from. Anything less and the agent is asked to merge something it
 /// can only see part of.
 ///
-/// **Where** it reaches the agent is deliberately open. PLAN §2.3 step 6:
+/// **Where** it reaches the agent is deliberately open. The rewrite settled it:
 /// "Conflict presentation is not settled and is decided by the agent
 /// validation loop, not here" — writing `<<<<<<<` into live config is one
 /// answer and describing the conflict without touching the file is another,

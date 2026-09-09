@@ -1,7 +1,7 @@
-use crate::{HumanOutput, SuccessOutput, UsageError};
+use crate::{HumanOutput, SuccessOutput};
 use dotsync::{
-    ConflictedFile, DotsyncError, ErrorReport, FileChange, FileDrift, FileState, PushReport,
-    SkipReason, SkippedCommitPath, SyncReport, UnreachableRemote,
+    ConflictedFile, Explanation, FileChange, FileDrift, FileState, PushReport, SkipReason,
+    SkippedCommitPath, SyncReport, UnreachableRemote,
 };
 use serde_json::json;
 use similar::TextDiff;
@@ -30,9 +30,7 @@ pub(crate) fn synced_output(
         // reached this report is a drift the run was allowed to overwrite —
         // anything else stopped it — so this is exactly the home content this
         // run discarded. Named for what happened to the file rather than for
-        // the flag, because `init` and `abort` do it without one, and because
-        // `commit`'s `forced_overwrites` is the opposite direction: paths
-        // recorded over another machine's change.
+        // the command, because `discard`, `init` and `abort` all do it.
         "overwritten_files": display_paths(
             &sync.drifts.iter().map(|drift| drift.repo_path.clone()).collect::<Vec<_>>(),
         ),
@@ -203,6 +201,10 @@ fn change_marker(state: FileState) -> &'static str {
         FileState::DivergedEditThatMerges => "M",
         FileState::DeletedInHome | FileState::DeletedInHomeTipAlsoChanged => "D",
         FileState::DivergedEdit | FileState::IncomingNewCollidesWithUntrackedHome => "C",
+        // The same marker, for the same reason: two versions of this file are
+        // waiting for somebody to choose. This one is on a scope rather than
+        // between home and a scope.
+        FileState::AwaitingMerge => "C",
         FileState::IncomingNew => "A",
         FileState::StaleNotYours => "U",
         FileState::RemovedFromRepo => "R",
@@ -217,20 +219,18 @@ fn change_marker(state: FileState) -> &'static str {
     }
 }
 
-pub(crate) fn render_error_json(error: &ErrorReport) -> serde_json::Value {
+pub(crate) fn render_error_json(explanation: &Explanation) -> serde_json::Value {
     let mut json = json!({
         "status": "error",
-        "error": error.code,
-        "message": error.message,
-        "drifts": error.drifts.iter().map(render_drift_json).collect::<Vec<_>>(),
-        "conflicts": error.conflicts.iter().map(render_conflict_json).collect::<Vec<_>>(),
-        "forced_overwrites": error.forced_overwrites.iter().map(|path| display_path(path)).collect::<Vec<_>>(),
-        "current_state": error.current_state,
+        "error": explanation.code,
+        "message": explanation.message,
+        "conflicts": explanation.conflicts.iter().map(render_conflict_json).collect::<Vec<_>>(),
+        "current_state": explanation.current_state,
     });
     // Present only when the run met the state, under the name `status`, `diff`
     // and `view` already answer with — an agent that reads it off a successful
     // report reads it off a stop the same way.
-    if let Some(scope) = &error.paused_cascade {
+    if let Some(scope) = &explanation.paused_cascade {
         json["paused_cascade"] = json!(scope);
     }
     json
@@ -289,24 +289,6 @@ pub(crate) fn render_conflicts_human(files: &[ConflictedFile]) -> Vec<String> {
     lines
 }
 
-/// A usage error in the shape every other error has.
-///
-/// The three collections are always empty here — a run that never started
-/// found no state, overwrote nothing and stopped on no drift — but they are
-/// present, because "every error payload has one shape" is only useful to a
-/// caller if it is true of the first error it ever meets.
-pub(crate) fn render_usage_error_json(error: &UsageError) -> serde_json::Value {
-    json!({
-        "status": "error",
-        "error": "usage",
-        "message": error.message,
-        "current_state": Vec::<String>::new(),
-        "drifts": Vec::<serde_json::Value>::new(),
-        "conflicts": Vec::<serde_json::Value>::new(),
-        "forced_overwrites": Vec::<String>::new(),
-    })
-}
-
 /// A changed file with the two sides shown. Exactly the object `status`
 /// reports for the same file, plus the diff — which is the whole of what
 /// `diff` adds to `status`.
@@ -348,395 +330,36 @@ fn drift_side_text(bytes: Option<&[u8]>) -> Option<String> {
     }
 }
 
-/// The facts a stop found, as one block for a person to read. Empty means the
-/// error's own message is all there is to say.
-fn current_state_text(report: &ErrorReport) -> String {
-    if report.current_state.is_empty() {
-        report.message.clone()
-    } else {
-        report.current_state.join("\n")
-    }
-}
-
-/// `invocation` is what the user typed, when they typed something dotsync
-/// recognises — the words, not the name the payload uses for the command. A
-/// stop that ends by naming the command to rerun has to name theirs, and has
-/// to name one that runs: before this, every one of them said `dotsync
-/// status`, and the first fix said `dotsync sync`, which is not a command.
-pub(crate) fn render_error_human(error: &DotsyncError, invocation: Option<&str>) -> String {
-    let error_report = error.to_error_report();
-
-    match error {
-        DotsyncError::SyncConflict { scope, files } => render_structured_error(
-            if files.len() == 1 {
-                "home and this machine's scope both changed the same file"
-            } else {
-                "home and this machine's scope both changed the same files"
-            },
-            "Dotsync keeps its hidden repo as the source of truth for your home-directory config, and a sync merges what the scopes hold now with whatever you have edited in home since the last one. An edit dotsync can merge around is carried across the sync; nothing has to be committed first.",
-            "This sync flow merged three versions of every managed file: the version this machine last synced, the version in home now, and the version the scope holds now.",
-            "It expects at most one of home and the scope to have changed each file — or, where both did, to have changed different lines of it.",
-            &current_state_text(&error_report),
-            "Both sides changed the same part of the same file, so there is no merged version dotsync can work out on its own. Nothing was written: home is untouched, and the incoming changes to every other file are held back with it, because home is derived from one commit and a home built half from each side would make the next run read those incoming changes as edits of yours undoing them.",
-            &[
-                "read the three versions of each file below, decide what the file should hold, and write that into the file at its real path in home.",
-                &format!(
-                    "then record your decision on a scope: `dotsync commit {scope} -m \"message\" -- <path>`. That is what makes it everybody's version, and it leaves this sync nothing left to merge."
-                ),
-                "or, if the version the scope already holds is the one you want, rerun with `dotsync --force`; that discards what is in home for every changed file, so check `dotsync status` first.",
-            ],
-        ),
-        DotsyncError::CascadePaused {
-            scope,
-            borrowed_from,
-            files,
-        } => render_structured_error(
-            &format!(
-                "paused at scope `{scope}`: two histories changed the same {} differently",
-                if files.len() == 1 { "file" } else { "files" }
-            ),
-            "Dotsync layers scopes down to each machine: a change recorded on one scope is merged into the scopes below it, and a change another machine published is merged into what this one holds. Both of those are the same merge, and it runs over the whole scope graph on every command that writes.",
-            &format!("This run was merging everything that reaches `{scope}` — what this machine has, what other machines have published, and what its parent scopes now hold — into one new version of it."),
-            "It expects at most one of those histories to have changed each file, or, where more than one did, to have changed different lines of it.",
-            &current_state_text(&error_report),
-            &match borrowed_from {
-                None => "More than one of them changed the same part of the same file, so there is no merged version dotsync can work out on its own. Nothing was written: the scope's head has not moved and no other machine can see this state.".to_string(),
-                // The mode switch, stated where the reader cannot miss it and
-                // before it starts editing: the file in home is about to stop
-                // being this machine's config.
-                Some(machine_scope) => format!("More than one of them changed the same part of the same file, so there is no merged version dotsync can work out on its own. Nothing was written: the scope's head has not moved and no other machine can see this state.\n\nThis machine is `{machine_scope}`, which does not descend from `{scope}`, so what you are resolving is not this machine's config — the file in home is a scratch buffer for `{scope}`'s merge. `{machine_scope}`'s own version comes back after `dotsync continue` or `dotsync abort`."),
-            },
-            &[
-                "read the versions of each file below, decide what it should hold, and write that into the file at its real path in home; take out any marker lines you paste in.",
-                "run `dotsync continue` from the same machine to record your decision and finish converging. Leaving a file exactly as it is says you decided on the version already there.",
-                "or run `dotsync abort` from the same machine to discard it; that reverts the conflicted files in home to this machine's scope state, so save anything you want to keep outside home first.",
-            ],
-        ),
-        DotsyncError::UnresolvedConflict { scope, paths } => render_structured_error(
-            "conflict markers left in the resolution",
-            "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config. Where two branches changed one file differently, the cascade pauses and asks you for the merged contents.",
-            "This continue flow reads each conflicted file back out of your home directory and records what it finds there as the resolution.",
-            "It expects to find config: whatever you decided the file should hold.",
-            &current_state_text(&error_report),
-            &format!(
-                "The file below still has conflict markers in it, so it is a resolution somebody stopped half way through. Recorded as the merged contents they would cascade into every scope below `{scope}` and every other machine would then sync `<<<<<<<` into its live config."
-            ),
-            &[
-                &format!(
-                    "the versions to choose between are the ones the pause printed; `dotsync view --scope {scope} --file {}` prints the one on the scope again.",
-                    paths
-                        .first()
-                        .map(|path| display_path(path))
-                        .unwrap_or_default()
-                ),
-                "take the marker lines out, leave the contents you want, then run `dotsync continue`.",
-                "or run `dotsync abort` to discard the merge; that reverts the conflicted files in home to this machine's scope state, so save anything you want to keep outside home first.",
-                "if the file is genuinely meant to contain lines of `<<<<<<<` and `>>>>>>>`, `continue` cannot record it: abort, and commit it to the scope directly instead.",
-            ],
-        ),
-        DotsyncError::PausedCascadeInProgress { .. } => render_structured_error(
-            "paused cascade in progress",
-            "Dotsync records a home edit on one scope, then cascades that scope through descendant scope branches so every machine receives the right final config.",
-            "This commit flow was about to start a new scoped commit, but a previous cascade is still paused for conflict resolution.",
-            "It expects exactly one cascade to be active at a time so commit history, conflict resolution, and home sync state stay aligned.",
-            &current_state_text(&error_report),
-            "Dotsync stopped before fetching, committing, or syncing because starting another commit would hide the real paused-cascade task and may mutate unrelated scope state.",
-            &[
-                "edit each conflicted file at its real path in home so it holds the merged contents you want; take out any marker lines you paste in.",
-                "run `dotsync continue` to finish the paused cascade.",
-                "or run `dotsync abort` to discard the paused cascade; that reverts the conflicted files in home to this machine's scope state.",
-                "after `dotsync continue` succeeds, rerun the new commit if it is still needed.",
-            ],
-        ),
-        DotsyncError::UnusableCommitPaths { scope, rejected } => {
-            let mut steps = vec![format!(
-                "name paths relative to your home directory: `dotsync commit {scope} -m \"message\" -- .config/fish/config.fish`."
-            )];
-            steps.push(
-                "do not use `~/`, absolute paths, or `..`; dotsync resolves every path against your home directory already, and records it verbatim.".to_string(),
-            );
-            if rejected.iter().any(|rejected| rejected.is_home_root()) {
-                steps.push(
-                    "name the directories or files you actually mean: `dotsync commit <scope> -m \"message\" -- .config/fish/ .bashrc`. Dotsync will not sweep a whole home directory onto a scope."
-                        .to_string(),
-                );
-            }
-            if rejected.iter().any(|rejected| rejected.is_dotsync_state()) {
-                steps.push(
-                    "commit the config files you edited instead; dotsync's hidden repo is not config and cannot travel on a scope."
-                        .to_string(),
-                );
-                steps.push(
-                    "to add a scope, run `dotsync create-scope <name> --parent <scope>`; scopes are branches in dotsync's own repo, not files in home."
-                        .to_string(),
-                );
-            }
-            steps.push("run `dotsync status` to see which managed files changed.".to_string());
-
-            render_structured_error(
-                if rejected.len() == 1 {
-                    "cannot commit that path"
-                } else {
-                    "cannot commit those paths"
-                },
-                "Dotsync records the home files you name onto a scope branch, then cascades that scope so every machine sharing it receives the change. Every file on a scope is written back into home on each of those machines.",
-                "This commit flow resolves each path you name against your home directory, checks that it is a config file dotsync may record, and commits the ones that changed.",
-                "It expects every path you name to be a config file inside your home directory, named relative to it, and to exist either in home or on the target scope already.",
-                &current_state_text(&error_report),
-                "Dotsync stopped before recording anything. A commit records every path you named or none of them, so fixing the paths above and rerunning the same command is safe.",
-                &steps.iter().map(String::as_str).collect::<Vec<_>>(),
-            )
-        }
-        DotsyncError::StaleCommitPaths { scope, refused } => render_structured_error(
-            if refused.len() == 1 {
-                "cannot commit a file this machine has not changed"
-            } else {
-                "cannot commit files this machine has not changed"
-            },
-            "Dotsync records the home files you name onto a scope branch and cascades them to every machine sharing it. Plain `dotsync` goes the other way, writing what the scopes hold back into home.",
-            "This commit flow reads each path you named across three sides: what dotsync last synced to this machine, what is in home now, and what the scopes hold now.",
-            "It expects the paths you name to hold a change you made in home since the last sync.",
-            &current_state_text(&error_report),
-            "Recording these would put older bytes back on the scope and cascade them, silently reverting whoever published the change that is already there.",
-            &[
-                "run `dotsync` to bring this machine up to date; the incoming change is written into home, and an incoming deletion removes the file.",
-                "then edit the file in home if you still want a change of your own, and commit it. To bring back a file another machine deleted, recreate it in home after syncing and commit that.",
-                &format!(
-                    "if you really do mean to overwrite the incoming change with what is in home, rerun with `--force`: `dotsync commit {scope} -m \"message\" --force -- <paths...>`. On `commit`, `--force` applies only to the paths you name."
-                ),
-            ],
-        ),
-        // Raised by every command that takes a scope name, so it teaches about
-        // scopes rather than about whichever command the reader happened to be
-        // running: `view --scope` used to get a bare one-liner for the mistake
-        // `commit` explained in full.
-        DotsyncError::InvalidScope { .. } => render_structured_error(
-            "invalid scope",
-            "Dotsync stores dotfiles in a scope DAG so shared config can live on shared ancestor scopes and machine-specific config can stay isolated on leaf scopes.",
-            "This flow resolves the scope you named against the scope graph, which dotsync reads off its own repo: every scope is a branch, created once and never moved.",
-            "It expects the scope you name to be one of them.",
-            &error_report.message,
-            "Dotsync stopped because there is no such scope: it can neither place a change on one nor show you what one holds.",
-            &[
-                "run `dotsync view` to list the scopes that do exist.",
-                "then name one of those. For a commit, pick the root-est appropriate ancestor scope that should own the change.",
-            ],
-        ),
-        DotsyncError::NotARegularFile { .. } => render_structured_error(
-            "that is not a regular file",
-            "Dotsync records the bytes it finds at a path and writes those same bytes back to that path on every machine sharing the scope.",
-            "This flow read your home directory to see what each managed path holds now.",
-            "It expects every path it reads to be a regular file, or a link to one.",
-            &error_report.message,
-            "There are no bytes to read: a fifo, a socket or a device is a thing to talk to, not a thing to copy. Dotsync stops rather than opening it, because opening one waits forever for something that is never going to write to it.",
-            &[
-                "leave it out of the commit, or move it out of the directory you named. A directory selection steps around one on its own and says so.",
-                "if this path is one dotsync already tracks, put the real file back — or commit the deletion once it is gone.",
-            ],
-        ),
-        DotsyncError::FileNotOnScope { .. } => render_structured_error(
-            "that file is not on that scope",
-            "Dotsync stores dotfiles in a scope DAG, and a file lives on the scope it was committed to. Every scope below that one inherits it through the cascade, so the same file is visible on many scopes and absent from the ones above it.",
-            "This view flow reads the file out of the tree that one scope holds.",
-            "It expects that scope to hold the file — the scope it was committed to, or one below it.",
-            &error_report.message,
-            "Dotsync stopped rather than printing nothing: empty output would read exactly like an empty file.",
-            &[
-                "run `dotsync view --file <path>` to see which scopes hold it.",
-                "run `dotsync view --scope <scope>` to see what that scope does hold.",
-            ],
-        ),
-        // Every other command carries on against the last state it fetched
-        // and says so in a note. `init` is the one whose whole job is to reach
-        // the remote, so for it this really is a stop.
-        DotsyncError::RemoteUnreachable { reason } => render_structured_error(
-            "could not reach the remote",
-            "Dotsync keeps your config in a hidden repo and shares it between your machines through a git remote, so every machine starts from what the others have already published.",
-            "This init flow clones that remote into the hidden repo, works out which scopes this machine belongs to, and syncs them into home.",
-            "It expects the remote URL you gave it to be reachable from this machine now.",
-            reason,
-            "Dotsync stopped rather than starting from an empty history: scopes created here would collide with the ones already on the remote the first time this machine reached it.",
-            &[
-                "check the remote URL, this machine's network, and your credentials for that remote.",
-                "then run `dotsync init <remote-url>` again.",
-            ],
-        ),
-        // The original failure is what there is to fix, so it renders in full;
-        // the leftover directory is the extra step the retry now needs.
-        DotsyncError::PartialInitLeftBehind {
-            path,
-            source,
-            original,
-        } => format!(
-            "{}\n\nAlso:\nDotsync could not remove the partly created repo at {}: {source}. Delete that directory before running `dotsync init` again.",
-            render_error_human(original, invocation),
-            path.display()
-        ),
-        DotsyncError::NotInitialized { .. } => render_structured_error(
-            "not initialized",
-            "Dotsync keeps your config in a hidden repo at ~/.local/share/dotsync/repo and syncs the scopes this machine belongs to into your home directory. Every command works against that repo.",
-            "This flow opened that repo to find out what this machine's scopes hold.",
-            "It expects `dotsync init <remote-url>` to have been run in this home directory already, which is what creates the repo.",
-            &current_state_text(&error_report),
-            "There is nothing to compare your home directory against, so dotsync cannot answer for it.",
-            &[
-                "run `dotsync init <remote-url>` from this home directory. The remote URL is the git remote that stores your dotsync repo.",
-                &format!("then rerun `{}`.", invocation.unwrap_or("dotsync")),
-            ],
-        ),
-        // Naming the repo path in the summary would be pointing an agent at
-        // the one directory it is told never to touch; what it needs is that
-        // this machine is already set up, and which command does the thing it
-        // was reaching for.
-        DotsyncError::RepoAlreadyExists { .. } => render_structured_error(
-            "already initialized",
-            "Dotsync keeps your config in a hidden repo at ~/.local/share/dotsync/repo, created once per machine by `dotsync init` and used by every command after that.",
-            "This init flow clones the remote into that repo and works out which scopes this machine belongs to.",
-            "It expects to be the thing that creates the repo, so it refuses to run over one that exists.",
-            &error_report.message,
-            "Cloning over an existing repo would discard whatever this machine has committed but not published.",
-            &[
-                "run `dotsync` to sync this machine, which is what `init` would have finished by doing.",
-                "run `dotsync status` to see what this machine has changed, and `dotsync view` to see the scopes it knows about.",
-                "to point this machine at a different remote, move the existing repo aside by hand first — dotsync has no command for that yet.",
-            ],
-        ),
-        DotsyncError::NoSuchParentScope { .. } => render_structured_error(
-            "that scope is not in the repo",
-            THE_SCOPE_GRAPH,
-            "This flow was about to create a scope, hanging it off the scopes you named.",
-            "It expects every parent you name to be a scope this repo already has, because a scope is created where its parents are and cannot be moved afterwards.",
-            &current_state_text(&error_report),
-            "A scope hung off a name nothing answers to would receive nothing and reach nothing.",
-            &[
-                "run `dotsync view` to see the scopes there are.",
-                "then name the one this config should come from: the root-est scope whose machines should all share it.",
-                "to create the parent itself first, run `dotsync create-scope <name> --parent <scope>`.",
-            ],
-        ),
-        DotsyncError::ParentScopeRequired { scope, .. } => render_structured_error(
-            "say where this scope hangs",
-            THE_SCOPE_GRAPH,
-            "This flow was about to create a scope, and a scope is created where its parents are.",
-            "It expects at least one `--parent`, because that is what decides which config this scope receives and which machines a change on it reaches.",
-            &current_state_text(&error_report),
-            "Nothing else says it. A hostname cannot tell a `home-linux` from a `work-linux`, and the graph is append-only, so a scope put in the wrong place cannot be moved afterwards — this is the only moment the answer can be given.",
-            &[
-                "run `dotsync view` on a machine that is already set up to see the scopes there are.",
-                &format!(
-                    "then name the one this config should come from: `--parent <scope>`, or several for a `{scope}` that inherits from more than one."
-                ),
-            ],
-        ),
-        DotsyncError::MachineScopeIsShared { scope, children } => render_structured_error(
-            "that scope is shared with other machines",
-            THE_SCOPE_GRAPH,
-            "This init flow was about to adopt the scope named after this machine's hostname as the scope only this machine holds.",
-            "It expects that scope to be a leaf: nothing else hanging off it, so nothing it holds reaches anywhere else.",
-            &current_state_text(&error_report),
-            &format!(
-                "`{scope}` is what `{}` inherit from, so config committed to it would reach them as well — which is the opposite of what a machine's own scope is for.",
-                children.join("` and `")
-            ),
-            &[
-                "set DOTSYNC_HOSTNAME to a name that is this machine's alone, then run `dotsync init <remote-url> --parent <scope>` again.",
-                "run `dotsync view` to see which scopes exist and what hangs off them.",
-            ],
-        ),
-        DotsyncError::MachineScopeAlreadyPlaced { .. } => render_structured_error(
-            "this machine's scope already exists",
-            THE_SCOPE_GRAPH,
-            "This init flow looked for the scope named after this machine's hostname, and found it.",
-            "It expects to be told where to hang a scope it is creating, and nothing when it is adopting one that exists.",
-            &current_state_text(&error_report),
-            "Where a scope hangs was decided when it was created, and the graph is append-only, so `--parent` here could only be ignored or wrong.",
-            &[
-                "run `dotsync init <remote-url>` without `--parent` to adopt this machine's scope as it stands.",
-                "run `dotsync view` to see where it hangs.",
-            ],
-        ),
-        DotsyncError::MachineScopeMissing { scope, root, .. } => render_structured_error(
-            "this machine has no scope",
-            THE_SCOPE_GRAPH,
-            "This flow looked for the scope named after this machine's hostname, which is the one this machine syncs into home.",
-            "It expects that scope to be in the repo: `dotsync init` creates it when the machine joins.",
-            &current_state_text(&error_report),
-            "Without it there is nothing that says what belongs on this machine, so there is nothing to sync, and nowhere to record a change of its own.",
-            &[
-                "run `dotsync view` to see the scopes there are.",
-                &format!(
-                    "give this machine a scope again with `dotsync create-scope {scope} --parent <the scope its config should come from>`."
-                ),
-                &match root {
-                    Some(root) => format!(
-                        "if you do not know which, `dotsync create-scope {scope} --parent {root}` hangs it off the root scope: everything every machine shares, and nothing else."
-                    ),
-                    None => "this repo has no scopes at all, so there is nothing to hang one off — `dotsync init <remote-url>` against the remote that has them.".to_string(),
-                },
-                "if this machine is meant to be called something else, set DOTSYNC_HOSTNAME and rerun.",
-            ],
-        ),
-        DotsyncError::ScopeNameTaken { scope } => render_structured_error(
-            "that name is taken",
-            THE_SCOPE_GRAPH,
-            "This flow was about to create a scope, which means creating a branch of that name in dotsync's repo.",
-            "It expects the name to be free, on this machine and on the remote.",
-            &error_report.message,
-            &format!(
-                "Something already answers to `{scope}` — a scope somebody created, or a branch pushed by something that is not dotsync. Writing over it would take it away from whoever is using it."
-            ),
-            &[
-                "run `dotsync view` to see whether it is already a scope, in which case there is nothing to create.",
-                "otherwise pick another name.",
-            ],
-        ),
-        DotsyncError::ScopeCreationConflict { files, .. } => render_structured_error(
-            "those parent scopes disagree",
-            THE_SCOPE_GRAPH,
-            "This flow was about to create a scope holding everything its parents hold, which for more than one parent means merging what they hold.",
-            "It expects the parents to agree about every file they share, or to have changed different lines of it.",
-            &current_state_text(&error_report),
-            &format!(
-                "The new scope's first commit would be a conflict in {} that nobody asked for and no command is waiting to resolve.",
-                files.join(", ")
-            ),
-            &[
-                "run `dotsync view --file <path>` to see which scopes hold the file and what each of them says.",
-                "commit one agreed version to a scope both parents inherit from, let it cascade, then create the scope.",
-                "or create the scope under one parent for now.",
-            ],
-        ),
-        DotsyncError::HomeNotSet
-        | DotsyncError::NonUtf8Path { .. }
-        | DotsyncError::GitSubmodule { .. }
-        | DotsyncError::NoPausedCascade
-        | DotsyncError::Io { .. }
-        | DotsyncError::ScopeNotInRepo { .. }
-        | DotsyncError::MissingHostname
-        | DotsyncError::Jj { .. } => format!("dotsync: {}", error_report.message),
-    }
-}
-
-/// What dotsync does, for every stop about the shape of the graph.
-const THE_SCOPE_GRAPH: &str = "Dotsync stores dotfiles in a DAG of scopes, and a machine holds everything its own scope holds plus everything the scopes above it hold. Every scope is a branch in dotsync's hidden repo, created once, where its parents are.";
-
-pub(crate) fn render_structured_error(
-    summary: &str,
-    what_dotsync_does: &str,
-    this_flow: &str,
-    expected: &str,
-    current_state: &str,
-    why_stopped: &str,
-    correct_flow_steps: &[&str],
-) -> String {
-    let correct_flow = correct_flow_steps
+/// A stop, rendered for a person: the teaching block if the error has one, and
+/// its one line if it does not.
+///
+/// A formatter and nothing else. What each stop says is the error's own, so
+/// there is no per-variant knowledge here to fall out of step with the payload
+/// beside it.
+pub(crate) fn render_error_human(explanation: &Explanation) -> String {
+    let Some(teaching) = &explanation.teaching else {
+        return format!("dotsync: {}", explanation.message);
+    };
+    let correct_flow = teaching
+        .next_steps
         .iter()
         .map(|step| format!("- {step}"))
         .collect::<Vec<_>>()
         .join("\n");
+    // The facts a stop found, as one block. No facts means the error's own
+    // message is all there is to say.
+    let current_state = match explanation.current_state.is_empty() {
+        true => explanation.message.clone(),
+        false => explanation.current_state.join("\n"),
+    };
 
     format!(
-        "dotsync: {summary}\n\nWhat dotsync does:\n{what_dotsync_does}\n\nThis flow:\n{this_flow}\n\nExpected:\n{expected}\n\nCurrent state found:\n{current_state}\n\nWhy dotsync stopped:\n{why_stopped}\n\nCorrect flow:\n{correct_flow}"
+        "dotsync: {}\n\nWhat dotsync does:\n{}\n\nThis flow:\n{}\n\nExpected:\n{}\n\nCurrent state found:\n{current_state}\n\nWhy dotsync stopped:\n{}\n\nCorrect flow:\n{correct_flow}",
+        teaching.summary,
+        teaching.what_dotsync_does,
+        teaching.this_flow,
+        teaching.expected,
+        teaching.why_stopped,
     )
 }
 
@@ -768,26 +391,6 @@ pub(crate) fn with_remote_state(
         json["remote_unreachable"] = json!(unreachable.reason);
     }
     json
-}
-
-/// What a run overwrote under `--force`, said out loud. A forced overwrite is
-/// the one thing a run can do that discards somebody else's work, so both
-/// exits report it: the run that stopped afterwards, and the run that
-/// finished and left the revert standing on the remote.
-pub(crate) fn forced_overwrite_notes(forced_overwrites: &[std::path::PathBuf]) -> Vec<String> {
-    if forced_overwrites.is_empty() {
-        return Vec::new();
-    }
-    let mut notes = vec![format!(
-        "dotsync: recorded {} file(s) over an incoming change, because you passed `--force`",
-        forced_overwrites.len()
-    )];
-    notes.extend(
-        forced_overwrites
-            .iter()
-            .map(|path| format!("- {}", path.display())),
-    );
-    notes
 }
 
 /// What a commit put on the scope for the first time.

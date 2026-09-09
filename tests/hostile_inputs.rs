@@ -1,7 +1,7 @@
 // Dotsync's inputs rather than its workflows: the hand-edited scope graph and
 // the environment a machine identifies itself from.
 //
-// PLAN §2.2: "the defects were found by driving states dotsync knows about;
+// The heuristic these came from: "the defects were found by driving states dotsync knows about;
 // the disasters were found by attacking things dotsync accepts." Every other
 // scenario file drives a workflow. Everything in here hands dotsync something
 // and asks what it does with it.
@@ -20,7 +20,7 @@ use harness::*;
 /// `config.toml`: from where the renamer is standing everything is fine, and
 /// the machine that was renamed is the one that pays.
 ///
-/// Reproduced by hand on v0.3.25 and recorded in PLAN §2.2: the renamed
+/// Reproduced by hand on v0.3.25 and on v0.3.25: the renamed
 /// machine got exit 1 out of every command, one line each, no teaching block
 /// and nothing to do next — `view` said the scope had no history, `abort` and
 /// `continue` said there was no paused cascade, `init` said already
@@ -43,13 +43,13 @@ fn a_machine_whose_scope_the_fleet_renamed_has_a_route_back() {
 /// every machine in it — including the machine that made the change, whose run
 /// reported success a moment earlier.
 ///
-/// Reproduced by hand on v0.3.25 and recorded in PLAN §2.2: declaring a scope
+/// Reproduced by hand on v0.3.25 and on v0.3.25: declaring a scope
 /// in `config.toml` the way `docs/SKILL.md` instructed created no bookmark, at
 /// commit or at sync, and from then on `view` exited 1 with "scope `hyprland`
 /// is configured, but this machine's repo has no history for it" wherever the
 /// config reached.
 ///
-/// PLAN §2.3 step 3 is what this pins: `status`, `diff` and `view` "must work
+/// What this pins: `status`, `diff` and `view` "must work
 /// on any repo state". A read-only command that refuses to describe the state
 /// it is in is refusing to do the one thing it is for — and a machine that had
 /// nothing to do with the change has lost the command it would use to find out
@@ -99,7 +99,7 @@ fn view_still_answers_on_every_machine_after_a_scope_joins_the_graph() {
 /// linux", `dotsync status` answers `"machine_scope":"linux"`, and from then
 /// on the scope this machine is told is its own is the shared OS scope.
 ///
-/// Reproduced by hand on v0.3.25 and recorded in PLAN §2.2. A file committed
+/// Reproduced by hand on v0.3.25 and on v0.3.25. A file committed
 /// to it — which the agent has every reason to believe reaches this machine
 /// and no other, because that is what a machine scope is — lands in the other
 /// linux machine's home on its next ordinary sync, exit 0 at both ends and
@@ -120,7 +120,7 @@ fn a_machine_named_after_a_shared_scope_does_not_publish_its_private_config() {
 
     machine_a.init_ok();
     named_after_a_shared_scope.init();
-    machine_a.run("dotsync --force");
+    machine_a.run("dotsync");
 
     if let Some(own_scope) = machine_scope_reported_by(&named_after_a_shared_scope) {
         named_after_a_shared_scope.write_file(
@@ -144,7 +144,7 @@ fn a_machine_named_after_a_shared_scope_does_not_publish_its_private_config() {
 /// The remote is a git remote, so anything with git can push to it, and a
 /// branch nobody's scope is named after is the commonest thing it will push.
 /// Dotsync follows every ref the remote has while modelling only scopes
-/// (PLAN §2.2), and the branch's own owner deleting it is what that costs:
+/// and the branch's own owner deleting it is what that costs:
 /// jj abandons the commits nothing reaches any more, and the fetch
 /// transaction that abandoned them is committed without rebasing the
 /// descendants jj recorded — every command that fetches panics from then on,

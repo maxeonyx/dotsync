@@ -114,14 +114,14 @@ fn an_untracked_home_file_is_not_overwritten_by_an_incoming_add() {
         "dotsync must not silently overwrite home content it has never seen"
     );
 
-    machine_a.run_ok("dotsync --force");
+    machine_a.run_ok("dotsync discard .newfile");
     assert_eq!(machine_a.read_file(".newfile"), "theirs\n");
 }
 
 /// Deleting a managed file from home is a local change like any other: `diff`
 /// shows what it would discard, an ordinary sync carries it rather than
 /// stopping on it or quietly putting the file back, `commit` records it, and
-/// `--force` is how you change your mind.
+/// and `dotsync discard` is how you change your mind.
 #[test]
 fn deleting_a_managed_file_is_a_change_the_sync_carries_and_commit_records() {
     let harness = TestHarness::new();
@@ -163,9 +163,9 @@ fn deleting_a_managed_file_is_a_change_the_sync_carries_and_commit_records() {
         "and the deletion is still this machine's to decide about"
     );
 
-    // Changing your mind: `--force` discards the deletion with every other
-    // local change.
-    machine.run_ok("dotsync --force");
+    // Changing your mind: the deletion is a local change like any other, so
+    // discarding it is what puts the file back.
+    machine.run_ok("dotsync discard .bashrc");
     assert_eq!(machine.read_file(".bashrc"), "export DOTSYNC=repo\n");
 
     machine.delete_file(".bashrc");
@@ -273,17 +273,22 @@ dotsync: 1 incoming file(s) for goof-a — plain `dotsync` applies these
     );
 }
 
-/// A forced sync is the one thing plain `dotsync` does that cannot be undone:
-/// it throws away what is in home. The notes on stderr said so and the payload
-/// did not, so the machine-readable half of the run was the less honest one.
+/// Changing your mind about one file, named.
+///
+/// `--force` was a mood a whole run was in: every local change lost, and no
+/// way to say which one was meant — so it could not tell a stale config file
+/// from a resolution being written. `discard` is the same escape hatch as a
+/// decision about paths.
 #[test]
-fn a_forced_sync_says_which_home_files_it_overwrote() {
+fn discarding_a_named_change_takes_the_scopes_version() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     machine.init_ok();
-
     seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".vimrc", "set number\n");
+    machine.run_ok("dotsync");
+
     let clean = machine.run_ok("dotsync --output json");
     assert_eq!(
         parse_stdout_json(&clean)["overwritten_files"]
@@ -295,15 +300,66 @@ fn a_forced_sync_says_which_home_files_it_overwrote() {
     );
 
     machine.write_file(".bashrc", "export DOTSYNC=mine\n");
-    let forced = machine.run_ok("dotsync --force --output json");
-    let json = parse_stdout_json(&forced);
+    machine.write_file(".vimrc", "set nonumber\n");
+
+    let discarded = machine.run_ok("dotsync discard .bashrc --output json");
     assert_eq!(
-        json["overwritten_files"],
+        parse_stdout_json(&discarded)["overwritten_files"],
         serde_json::json!([".bashrc"]),
         "the file whose contents this run discarded has to be in the payload\n{}",
-        render_output(&forced)
+        render_output(&discarded)
     );
     assert_eq!(machine.read_file(".bashrc"), "export DOTSYNC=repo\n");
+
+    assert_eq!(
+        machine.read_file(".vimrc"),
+        "set nonumber\n",
+        "a change the run did not name is not the run's to discard\n{}",
+        render_output(&discarded)
+    );
+    let status = machine.run_ok("dotsync status --output json");
+    assert_eq!(
+        parse_stdout_json(&status)["changes"],
+        serde_json::json!([{
+            "path": ".vimrc",
+            "state": "modified",
+            "reason": "edited here since the last sync",
+        }]),
+        "and it is still this machine's to decide about\n{}",
+        render_output(&status)
+    );
+}
+
+/// Naming a path that holds nothing of yours is a mistake, and a run that
+/// answered "discarded 0 file(s)" to a typo would be the same silent no-op
+/// `dotsync commit typo.conf` was fixed for.
+#[test]
+fn discarding_a_path_that_holds_no_change_of_yours_is_refused() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    machine.init_ok();
+    seed_remote_scope_file(&machine, "mx-xps-cy", ".bashrc", "export DOTSYNC=repo\n");
+    machine.run_ok("dotsync");
+
+    let typo = machine.run_expecting("dotsync discard .bashrcc", 1);
+    let stderr = String::from_utf8_lossy(&typo.stderr).into_owned();
+    assert!(
+        stderr.contains(".bashrcc"),
+        "the stop names the path it could not act on\n{stderr}"
+    );
+
+    let unchanged = machine.run_expecting("dotsync discard .bashrc", 1);
+    assert!(
+        String::from_utf8_lossy(&unchanged.stderr).contains(".bashrc"),
+        "a managed file with no change of yours is nothing to discard either\n{}",
+        render_output(&unchanged)
+    );
+    assert_eq!(
+        machine.read_file(".bashrc"),
+        "export DOTSYNC=repo\n",
+        "and the run that refused wrote nothing"
+    );
 }
 
 /// One value, one field. `scope` and `machine_scope` used to be byte-identical
@@ -342,7 +398,7 @@ fn every_command_that_only_syncs_names_the_machine_scope_once() {
 }
 
 /// Home is the working copy and its parent is the mark, so a sync is
-/// `merge(home, mark, new head)` (PLAN §2.3 step 2; `spike.ignore/README.md`,
+/// `merge(home, mark, new head)` (`spike.ignore/README.md`,
 /// "Implications for the real step 2": "if the in-memory merge is resolved,
 /// create the new wc commit ... carrying non-conflicting local edits across
 /// the sync"). An edit to one file and an incoming change to another is that
@@ -526,12 +582,12 @@ fn an_edit_here_and_a_change_elsewhere_in_the_same_file_combine_instead_of_confl
 }
 
 /// The live fleet migrates by upgrading the binary and running `dotsync`
-/// (PLAN §2.6, "The live fleet"), and every machine in it is carrying a
+/// (the rewrite's own migration requirement), and every machine in it is carrying a
 /// `sync-state.json` written by the release before. That file holds exactly
 /// `machine_scope` and `last_synced_revision` — a hand-rolled record of what
 /// jj's own view already says — so step 2 dissolves it: `spike.ignore/README.md`,
 /// "Migration for the live fleet: first run of the new binary creates the wc
-/// commit ..., snapshots home ..., deletes `sync-state.json`." PLAN §2.6,
+/// commit ..., snapshots home ..., deletes `sync-state.json`." The rewrite's end state,
 /// "On-disk, per machine": "Two things: the home files, and the hidden repo.
 /// Nothing else — no sync state file, no pause file, no `config.toml`."
 ///

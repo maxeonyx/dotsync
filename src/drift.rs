@@ -6,7 +6,7 @@ use jj_lib::merged_tree::MergedTree;
 
 use crate::error::{jj_error, DotsyncError};
 use crate::home::repo_path_of;
-use crate::repo::collect_managed_tree_entries;
+use crate::repo::{collect_managed_tree_entries, managed_tree_entries};
 
 /// Where one managed path stands across the three sides dotsync knows about:
 ///
@@ -50,6 +50,12 @@ pub enum FileState {
     /// Present in home only. Never synced here and not on the scope: a new
     /// file, which is only interesting to `commit`.
     UntrackedInHome,
+
+    /// This machine and the remote each moved the scope and changed this file
+    /// differently, so the scope's head holds a conflict here. Nothing can say
+    /// what home should hold at it until the merge is resolved, and the
+    /// commands that write stop at that merge anyway.
+    AwaitingMerge,
 
     /// Added on another machine and not in home yet. Not drift — sync writes
     /// it.
@@ -138,7 +144,7 @@ pub enum FileState {
 impl FileState {
     /// Home holds a change of this machine's own: something dotsync neither put
     /// there nor has a record of. These are what `status` and `diff` report as
-    /// changes, what a plain sync carries across and a forced one discards, and
+    /// changes, what a plain sync carries across, what `discard` drops, and
     /// what the home sync at the end of a commit stops on.
     pub fn is_drift(self) -> bool {
         matches!(
@@ -160,15 +166,15 @@ impl FileState {
     pub fn is_incoming(self) -> bool {
         matches!(
             self,
-            Self::IncomingNew | Self::StaleNotYours | Self::RemovedFromRepo
+            Self::IncomingNew | Self::StaleNotYours | Self::RemovedFromRepo | Self::AwaitingMerge
         )
     }
 
     /// Home holds no change of this machine's own at this path, so recording
     /// home's bytes here would overwrite someone else's change rather than
-    /// contribute one. `commit` refuses these unless the same command forces
-    /// the path, which is what makes "a machine that is merely behind reverts
-    /// another machine's work" unrepresentable rather than merely unlikely.
+    /// contribute one. `commit` refuses these, which is what makes "a machine
+    /// that is merely behind reverts another machine's work" unrepresentable
+    /// rather than merely unlikely.
     ///
     /// The two states where home *and* the tip both moved are not here, because
     /// `commit` does not write home's bytes over the tip: it merges them against
@@ -181,16 +187,8 @@ impl FileState {
                 | Self::IncomingNew
                 | Self::RemovedFromRepo
                 | Self::IncomingNewCollidesWithUntrackedHome
+                | Self::AwaitingMerge
         )
-    }
-
-    /// Forcing this path decided something. Without `--force` the commit would
-    /// have been refused, or it would have merged home's bytes with a change
-    /// that arrived from another machine rather than writing them over it — and
-    /// a forced commit does write over it, so a run that forced this owes the
-    /// reader the path.
-    pub fn forcing_decides_something(self) -> bool {
-        self.blocks_commit() || matches!(self, Self::DivergedEdit | Self::DivergedEditThatMerges)
     }
 
     /// What happened, naming every side that moved. The remedy depends on
@@ -216,6 +214,9 @@ impl FileState {
             Self::IncomingNewCollidesWithUntrackedHome => {
                 "never synced here, and the repo has just added a file at this path that will not merge with it"
             }
+            Self::AwaitingMerge => {
+                "changed here and on another machine, on a scope whose merge is still waiting"
+            }
             Self::IncomingNew => "added on another machine",
             Self::StaleNotYours => "changed on another machine, and not edited here",
             Self::RemovedFromRepo => "removed on another machine",
@@ -238,6 +239,7 @@ impl FileState {
             Self::DivergedEdit => "conflicted",
             Self::DivergedEditThatMerges => "modified_changed_in_repo",
             Self::IncomingNewCollidesWithUntrackedHome => "untracked_collision",
+            Self::AwaitingMerge => "awaiting_merge",
             Self::IncomingNew => "incoming_add",
             Self::StaleNotYours => "incoming_update",
             Self::RemovedFromRepo => "incoming_delete",
@@ -314,7 +316,7 @@ fn edited_in_home(home: &TreeValue, tip: &TreeValue) -> FileState {
 ///
 /// Tree entries rather than content: an id and a mode are all the
 /// classification compares, and the renderings that do want content — `diff`,
-/// and a forced sync saying what it discarded — read it from these for the few
+/// and a sync saying what it discarded — read it from these for the few
 /// paths they show. Reading it here instead would read every managed file
 /// twice on every `status`.
 #[derive(Debug, Clone)]
@@ -346,7 +348,9 @@ pub(crate) fn classify_managed_trees(
 ) -> Result<BTreeMap<PathBuf, ClassifiedPath>, DotsyncError> {
     let mark = collect_managed_tree_entries(mark)?;
     let snapshot = collect_managed_tree_entries(snapshot)?;
-    let head = collect_managed_tree_entries(head)?;
+    // The head is the one side that can be conflicted: a contested scope head
+    // is the merge of what this machine has and what the remote published.
+    let head = managed_tree_entries(head)?;
 
     let domain: BTreeSet<PathBuf> = mark
         .keys()
@@ -364,18 +368,25 @@ pub(crate) fn classify_managed_trees(
             .path_value(repo_path_of(&relative)?.as_ref())
             .map_err(|err| jj_error(format!("read merged {}: {err}", relative.display())))?
             .is_resolved();
-        let state = classify(
-            mark.get(&relative),
-            snapshot.get(&relative),
-            head.get(&relative),
-            merge_reconciles,
-        );
+        let tip = head.get(&relative).cloned().flatten();
+        let state = match head.get(&relative) {
+            // The scope's own two sides disagree here, so what this machine
+            // should hold is not a question anything can answer until the
+            // merge is resolved.
+            Some(None) => FileState::AwaitingMerge,
+            _ => classify(
+                mark.get(&relative),
+                snapshot.get(&relative),
+                tip.as_ref(),
+                merge_reconciles,
+            ),
+        };
         classified.insert(
             relative.clone(),
             ClassifiedPath {
                 state,
                 home: snapshot.get(&relative).cloned(),
-                tip: head.get(&relative).cloned(),
+                tip,
             },
         );
     }

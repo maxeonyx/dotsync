@@ -4,6 +4,36 @@
 mod harness;
 use harness::*;
 
+/// Omitting `-m` is already a hard error, so `-m ""` is a hole in a rule that
+/// exists rather than a new policy: it lands a commit with an empty subject in
+/// shared history, where nothing can ever say what it was for.
+#[test]
+fn a_commit_with_an_empty_message_is_refused() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    machine.init_ok();
+    machine.write_file(".apprc", "ui = dark\n");
+
+    let empty = machine.run_expecting("dotsync commit all -m '' -- .apprc", 1);
+    let blank = machine.run_expecting("dotsync commit all -m '   ' -- .apprc", 1);
+    for refused in [&empty, &blank] {
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("message"),
+            "the stop says what was missing\n{}",
+            render_output(refused)
+        );
+    }
+    assert!(
+        !bookmark_has_file(&machine, "all", ".apprc"),
+        "a refused commit records nothing\n{}",
+        render_output(&empty)
+    );
+
+    machine.run_ok("dotsync commit all -m 'add apprc' -- .apprc");
+    assert!(bookmark_has_file(&machine, "all", ".apprc"));
+}
+
 #[test]
 fn explicit_commit_command_adds_file_to_scope_and_syncs() {
     let harness = TestHarness::new();
@@ -199,10 +229,13 @@ fn noop_commit_names_the_scope_it_targeted() {
     // it did not carry the scope the agent had just named - and the message
     // interpolated the empty string into "committed  and synced". It now names
     // the scope, and says what it did instead of claiming a commit.
+    // A bare commit also says why it might have found nothing: the commonest
+    // reason is a file dotsync does not track yet, which `status` does not
+    // list either.
     let commit_output = machine.run_expecting("dotsync commit mx-xps-cy -m noop", 0);
     assert_stderr_snapshot(
         &commit_output,
-        "dotsync: nothing to record on `mx-xps-cy`; no commit was made and home was not synced\n",
+        "dotsync: a file dotsync does not track yet is not a change to it, so a commit naming no paths never adds one. Name the file, or the directory it is in, to start tracking it.\ndotsync: nothing to record on `mx-xps-cy`; no commit was made and home was not synced\n",
     );
 }
 
@@ -329,7 +362,7 @@ fn multiple_machines_can_contribute_to_all_without_losing_changes() {
 
     machine_a.init_ok();
     machine_b.init_ok_under("linux");
-    machine_a.run_ok("dotsync --force");
+    machine_a.run_ok("dotsync");
 
     machine_a.write_file(".config/shared-a.conf", "from machine a\n");
     machine_a.run_ok("dotsync commit all -m 'add shared a' -- .config/shared-a.conf");
@@ -370,7 +403,7 @@ fn multiple_machines_can_contribute_to_all_without_losing_changes() {
     );
 }
 
-/// History has to be able to say which machine made a change (PLAN §2.3 step 2;
+/// History has to be able to say which machine made a change (the working-copy rewrite;
 /// Max: "just an oversight from how we're using JJ I guess, but yeah a good one
 /// to fix"). Every commit dotsync writes on this machine's behalf carries the
 /// machine, and there are two kinds of them: the commit that records what you

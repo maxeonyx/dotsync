@@ -277,9 +277,9 @@ fn view_summarizes_checked_in_scopes_and_files() {
         &view_output,
         "\
 Scopes
-all
-linux <- all
-mx-xps-cy <- linux
+  all
+  linux <- all
+* mx-xps-cy <- linux
 
 Files
 .gitconfig
@@ -326,6 +326,7 @@ fn view_file_shows_scopes_and_scoped_file_content() {
         &file_scopes_output,
         "\
 File .gitconfig
+Owned by all; every other scope below has it from the cascade.
 Scopes
 all
 linux
@@ -654,6 +655,77 @@ fn status_names_the_scopes_this_machine_has_not_published() {
         Some(0),
         "the remote has everything now\n{}",
         render_output(&after)
+    );
+}
+
+/// The conflicting twin of the divergence test above, and the state that
+/// showed the requirement was only half met: when the two sides of a diverged
+/// scope collide over a file, the merge every read-only command computes to
+/// answer with is itself conflicted — and reading a file out of a conflicted
+/// tree threw `dotsync could not complete an internal repository operation:
+/// tree entry .config/app.conf is conflicted during sync`, exit 1, from
+/// `status`, `diff` and `view` alike.
+///
+/// That is the state where an agent most needs to be told where it stands, and
+/// plain `dotsync` tells it: the run stops at the merge and prints every
+/// version. The read-only commands have to answer too. What they say about the
+/// file itself is left open here — it is a path whose fate no command can
+/// state until the merge is resolved — so this pins that they answer at all,
+/// that they name the pause, and that resolving is not blocked by any of it.
+#[test]
+fn read_only_commands_answer_when_the_diverged_merge_conflicts() {
+    let harness = TestHarness::new();
+    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
+
+    machine.init_ok();
+
+    // Unpushed commits on every scope, then another machine publishes a
+    // different version of the same file: every scope diverges, and every
+    // merge collides.
+    interrupt_push_after_cascade(&machine, ".config/app.conf", "setting = \"mine\"\n");
+    seed_remote_scope_file(
+        &machine,
+        "all",
+        ".config/app.conf",
+        "setting = \"theirs\"\n",
+    );
+
+    let status = machine.run("dotsync status --output json");
+    assert_eq!(
+        status.status.code(),
+        Some(0),
+        "`dotsync status` always exits 0: a merge it cannot resolve is something it found in the world\n{}",
+        render_output(&status)
+    );
+    let payload = parse_stdout_json(&status);
+    assert_eq!(
+        payload["paused_cascade"],
+        "all",
+        "{}",
+        render_output(&status)
+    );
+
+    for command in ["dotsync diff", "dotsync view"] {
+        let output = machine.run(command);
+        assert_ne!(
+            output.status.code(),
+            Some(1),
+            "`{command}` has to answer on this machine rather than refuse\n{}",
+            render_output(&output)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("all"),
+            "and name the merge that is waiting\n{}",
+            render_output(&output)
+        );
+    }
+
+    // And none of it is a wedge: the way through is the one the run advises.
+    machine.write_file(".config/app.conf", "setting = \"agreed\"\n");
+    machine.run_ok("dotsync continue");
+    assert_stderr_snapshot(
+        &machine.run_ok("dotsync status"),
+        "dotsync: no changes for mx-xps-cy\n",
     );
 }
 

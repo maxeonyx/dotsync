@@ -91,11 +91,13 @@ async fn create_repo_and_join(
 ) -> Result<InitReport, DotsyncError> {
     if let Some(parent) = paths.repo_root.parent() {
         std::fs::create_dir_all(parent).map_err(|source| DotsyncError::Io {
+            doing: "create",
             path: parent.to_path_buf(),
             source,
         })?;
     }
     std::fs::create_dir_all(&paths.repo_root).map_err(|source| DotsyncError::Io {
+        doing: "create",
         path: paths.repo_root.clone(),
         source,
     })?;
@@ -232,7 +234,7 @@ async fn join_the_fleet(
 /// A scope is created once and never renamed, reparented or deleted, which is
 /// what lets the graph be read off the repo's structure — every edge is a
 /// commit's parent, and commits do not change. Rearranging a graph is still an
-/// open question (PLAN §2.7); the shape it replaces reported success for a
+/// open question (`PLAN.md`); the shape it replaces reported success for a
 /// scope it had not created.
 pub async fn create_scope(
     paths: &DotsyncPaths,
