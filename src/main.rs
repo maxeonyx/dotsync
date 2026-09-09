@@ -111,36 +111,6 @@ struct Cli {
     output_format: OutputFormat,
 }
 
-#[derive(Debug, Clone)]
-enum Action {
-    Sync,
-    Init {
-        remote_url: InitRemote,
-        parents: Vec<String>,
-    },
-    CreateScope {
-        scope: String,
-        parents: Vec<String>,
-        description: Option<String>,
-    },
-    Commit {
-        scope: String,
-        message: String,
-        paths: Vec<PathBuf>,
-    },
-    Discard {
-        paths: Vec<PathBuf>,
-    },
-    Continue,
-    Abort,
-    Status,
-    Diff,
-    View {
-        scope: Option<String>,
-        file: Option<PathBuf>,
-    },
-}
-
 #[derive(Debug, Subcommand)]
 enum Command {
     #[command(about = INIT_ABOUT, long_about = INIT_LONG_ABOUT)]
@@ -204,12 +174,6 @@ enum Command {
     },
     #[command(external_subcommand)]
     Unknown(Vec<String>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum InitRemote {
-    Provided(String),
-    Prompt,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -354,12 +318,7 @@ async fn main() {
         Err(error) => std::process::exit(emit_clap_error(error)),
     };
     let output_format = output_format_of(&cli);
-    let outcome = match Action::try_from_cli(cli, detect_cli_context()) {
-        Ok(action) => dispatch(action).await,
-        Err(message) => Ok(CliOutput::without_run(OutputKind::Usage(usage_error(
-            &message,
-        )))),
-    };
+    let outcome = dispatch(cli.command, detect_cli_context()).await;
 
     let exit_code = match outcome {
         Ok(output) => emit_output(&output_format, output),
@@ -458,92 +417,42 @@ fn output_format_from_args() -> OutputFormat {
     }
 }
 
-impl Action {
-    fn try_from_cli(cli: Cli, context: CliContext) -> Result<Self, String> {
-        match cli.command {
-            Some(Command::Init {
-                remote_url,
-                parents,
-            }) => {
-                let remote_url = init_remote_from_args(remote_url, context)?;
-                Ok(Self::Init {
-                    remote_url,
-                    parents,
-                })
-            }
-            Some(Command::CreateScope {
-                scope,
-                parents,
-                description,
-            }) => Ok(Self::CreateScope {
-                scope,
-                parents,
-                description,
-            }),
-            Some(Command::Discard { paths }) => Ok(Self::Discard { paths }),
-            Some(Command::Continue) => Ok(Self::Continue),
-            Some(Command::Abort) => Ok(Self::Abort),
-            Some(Command::Status) => Ok(Self::Status),
-            Some(Command::Diff) => Ok(Self::Diff),
-            Some(Command::View { scope, file }) => Ok(Self::View { scope, file }),
-            Some(Command::Commit {
-                scope,
-                message,
-                paths,
-            }) => Ok(Self::Commit {
-                scope,
-                message,
-                paths,
-            }),
-            Some(Command::Unknown(args)) => {
-                let command = args.first().map(String::as_str).unwrap_or("<empty>");
-                Err(format!(
-                    "unknown command `{command}`; run `dotsync --help` for supported commands"
-                ))
-            }
-            None => Ok(Self::Sync),
-        }
-    }
-}
-
-fn init_remote_from_args(
-    remote_url: Option<String>,
+/// Bare `dotsync` is the sync, so the command is optional; every other arm
+/// hands clap's own parse straight to the run that answers it.
+async fn dispatch(
+    command: Option<Command>,
     context: CliContext,
-) -> Result<InitRemote, String> {
-    if let Some(remote_url) = remote_url {
-        return Ok(InitRemote::Provided(remote_url));
-    }
-
-    if context.interactive_terminal {
-        return Ok(InitRemote::Prompt);
-    }
-
-    Err(INIT_REMOTE_URL_USAGE.to_string())
-}
-
-async fn dispatch(action: Action) -> Result<CliOutput, DotsyncError> {
-    match action {
-        Action::Sync => run_sync().await,
-        Action::Commit {
-            scope,
-            message,
-            paths,
-        } => run_commit(scope, message, paths).await,
-        Action::Discard { paths } => run_discard(paths).await,
-        Action::Init {
+) -> Result<CliOutput, DotsyncError> {
+    match command {
+        None => run_sync().await,
+        Some(Command::Init {
             remote_url,
             parents,
-        } => run_init(remote_url, parents).await,
-        Action::CreateScope {
+        }) => run_init(remote_url, parents, context).await,
+        Some(Command::CreateScope {
             scope,
             parents,
             description,
-        } => run_create_scope(scope, parents, description).await,
-        Action::Continue => run_continue().await,
-        Action::Abort => run_abort().await,
-        Action::Status => run_status().await,
-        Action::Diff => run_diff().await,
-        Action::View { scope, file } => run_view(scope, file).await,
+        }) => run_create_scope(scope, parents, description).await,
+        Some(Command::Commit {
+            scope,
+            message,
+            paths,
+        }) => run_commit(scope, message, paths).await,
+        Some(Command::Discard { paths }) => run_discard(paths).await,
+        Some(Command::Continue) => run_continue().await,
+        Some(Command::Abort) => run_abort().await,
+        Some(Command::Status) => run_status().await,
+        Some(Command::Diff) => run_diff().await,
+        Some(Command::View { scope, file }) => run_view(scope, file).await,
+        // Clap's `external_subcommand`, so that an unknown command is refused
+        // in dotsync's words and in the output format that was asked for.
+        Some(Command::Unknown(args)) => {
+            let command = args.first().map(String::as_str).unwrap_or("<empty>");
+            Ok(usage_output(&format!(
+                "unknown command `{command}`; run `dotsync --help` for supported commands"
+            )))
+        }
     }
 }
 
@@ -561,17 +470,24 @@ fn usage_error(message: &str) -> Explanation {
     }
 }
 
-async fn run_init(remote_url: InitRemote, parents: Vec<String>) -> Result<CliOutput, DotsyncError> {
+fn usage_output(message: &str) -> CliOutput {
+    CliOutput::without_run(OutputKind::Usage(usage_error(message)))
+}
+
+async fn run_init(
+    remote_url: Option<String>,
+    parents: Vec<String>,
+    context: CliContext,
+) -> Result<CliOutput, DotsyncError> {
     let remote_url = match remote_url {
-        InitRemote::Provided(remote_url) => remote_url,
-        InitRemote::Prompt => match prompt_init_remote_url() {
+        Some(remote_url) => remote_url,
+        // A terminal can be asked for the URL. A script cannot, so it gets
+        // the usage text instead — before anything opens the repo.
+        None if context.interactive_terminal => match prompt_init_remote_url() {
             Ok(remote_url) => remote_url,
-            Err(message) => {
-                return Ok(CliOutput::without_run(OutputKind::Usage(usage_error(
-                    &message,
-                ))))
-            }
+            Err(message) => return Ok(usage_output(&message)),
         },
+        None => return Ok(usage_output(INIT_REMOTE_URL_USAGE)),
     };
     let paths = discover_paths()?;
     let run = init(&paths, &remote_url, &parents).await;

@@ -1,34 +1,29 @@
 # dotsync - Agent Instructions
 
-This repository is self-contained for development. A standalone clone must
-build, test, and release without an `agent-tools` checkout.
+This repository is self-contained for development. A standalone clone must build, test, and release without an `agent-tools` checkout.
 
 ## TDD ratchet — read before testing
 
-Run `cargo ratchet`, not plain `cargo test`. A new test must be red when first introduced and committed as `pending`; that expected red test keeps CI green. A new test must not pass when first introduced—doing so makes the ratchet and CI red. Implement only after the red commit, then rerun the ratchet and commit the promotion to `passing`.
+Run `cargo ratchet`, not plain `cargo test`. A new test must be red when first introduced and committed as `pending`; that expected red test keeps CI green. A new test must not pass when first introduced—doing so makes the ratchet and CI red. Push the red implementation commit, then wait for the trusted ledger workflow's ledger-only bot commit before implementing the fix. After implementation, rerun the ratchet, push the green commit, and again wait for the bot commit that records the promotion to `passing`.
 
 **The tests encode the design, so a design change changes them** (Max): _"the tests encode the design - they are derived from the design. If the design changes, the tests thus change. No questions needed."_ Rewrite or delete such a test in the same commit as the behaviour change, and say why in the message. Never work around a test you believe is wrong, and never silently delete one.
 
-**Don't run `cargo ratchet` from a git hook.** It fails there: git's `GIT_DIR`/`GIT_WORK_TREE` leak into the test processes, so every test that shells out to git resolves against the wrong repository ([tdd-ratchet-rs#4](https://github.com/maxeonyx/tdd-ratchet-rs/issues/4)).
+**[tdd-ratchet](https://tdd-ratchet.maxeonyx.com)'s ledger, `.test-status.json`, is bot-written output.** Never commit it by hand. Declare a deliberate rename or removal under `renames` or `removals` in `.tdd-ratchet.json`, commit that alongside the change, and delete the instruction file in the next commit — a leftover instruction fails every later ratchet run with `removal target is not present in committed status`. Renames are the common case here: nextest ids carry the module path, so moving a test renames it, and commit `39f73c6` moved all 146 scenarios out of `tests/user_flows.rs` into eleven area files.
 
-**Run the ratchet once, then commit what it wrote.** It rewrites `.test-status.json` itself — consuming a `removals` list, applying a `renames` bridge, flipping a promotion — and running it again before committing that rewrite reports the removals as tests missing from the run.
+**Don't run `cargo ratchet` from a git hook.** It fails there: git's `GIT_DIR`/`GIT_WORK_TREE` leak into the test processes, so every test that shells out to git resolves against the wrong repository ([tdd-ratchet-rs#4](https://github.com/maxeonyx/tdd-ratchet-rs/issues/4)).
 
 ## Integration workflow
 
-Run `devenv test` before committing and pushing; it includes `actionlint`, so
-workflow syntax is checked offline. Source CI does not run on push. Open a pull
-request, merge current `main` into the feature branch, mark the pull request
-ready — the run's own merge step fails with `Pull Request is still a draft`
-otherwise, after spending ten minutes building — then explicitly dispatch:
+Run `devenv test` before committing and pushing; it includes `actionlint`, so workflow syntax is checked offline. Source CI does not run on push. Open a pull request, merge current `main` into the feature branch, mark the pull request ready — the run's own merge step fails with `Pull Request is still a draft` otherwise, after spending ten minutes building — then explicitly dispatch:
 
 ```bash
 gh pr ready <number>
 gh workflow run ci.yml --ref <feature-branch> -f pr_number=<number>
 ```
 
-The repository-serialized run records the required `Ready` check, builds the
-release artifacts, auto-merges the pull request, publishes those same artifacts,
-and records `integrated-ci` on the exact merge commit.
+The repository-serialized run records the required `Ready` check, builds the release artifacts, auto-merges the pull request, publishes those same artifacts, and records `integrated-ci` on the exact merge commit.
+
+The trusted ledger workflow runs on every push to an open pull request and commits even when the ledger is unchanged, so every ledger run moves the head SHA. Dispatch only once the ledger run for that push has finished. Dispatch first and the bot's commit lands after `Ready` was recorded, leaving the required status on a commit that is no longer the head, so auto-merge waits for a check that will never arrive and the Merge job fails.
 
 ## Start Here
 
@@ -64,33 +59,15 @@ Home is jj's working copy through dotsync's own `WorkingCopy` implementation; th
 - `docs/index.html`: read when updating the public landing page content or style
 - `docs/SKILL.md`: read when refining end-user agent instructions for dotfiles edits
 
-## TDD Ratchet
-
-This project uses strict TDD via [tdd-ratchet](https://tdd-ratchet.maxeonyx.com). See `.test-status.json` for current test states.
-
-**Renaming or deleting a test is supported — use the `renames` and `removals` entries in `.test-status.json`.** `renames` maps **new name to old name**; the ratchet takes the old name's recorded state, moves it onto the new name, and requires that the old name is tracked, the new name is not yet tracked, and the run saw the new name and not the old one. It reads the applied renames back out of the commit's history snapshot afterwards, so the entry is a one-commit bridge: drop it in the next commit or every future run warns that it is stale. Commits `1deeb74` and `39f73c6` both used it — the second moved all 146 scenarios out of `tests/user_flows.rs` into eleven area files, since nextest ids carry the module path and moving a test therefore renames it.
-
-`removals` is a list of tracked names, and the thing to know is what to commit. Leave the entries in `tests` and add the list; `cargo ratchet` then passes and **rewrites the file itself**, dropping both the entries and the list. Commit that rewrite. Editing the entries out by hand instead fails with "tracked test missing from run", because the removal is checked against the working tree's `tests` map, and committing the pre-rewrite file leaves every later run reporting the same thing — the run reads the baseline from the commit. The same is true of a status flip: run the ratchet and commit what it writes, rather than editing states by hand.
-
 ## CI and Release
 
 PRs in this repo can be merged without approval (Max, 2026-08-12).
 
-Single explicitly dispatched `ci.yml` integration workflow: PR/base validation,
-actionlint, release-guard tests, format, lint, the test ratchet, Linux and
-Windows builds, auto-merge, GitHub Release, Pages, then an `integrated-ci`
-status on the exact merge commit.
+Single explicitly dispatched `ci.yml` integration workflow: PR/base validation, actionlint, release-guard tests, format, lint, the test ratchet, Linux and Windows builds, auto-merge, GitHub Release, Pages, then an `integrated-ci` status on the exact merge commit.
 
-Each integration run publishes a fresh release, so its PR must use a new version
-in `Cargo.toml`, `Cargo.lock`, and `docs/version.json`. The existing release
-guard still verifies that artifact-changing work actually moved these versions
-together. `docs/version.json` is deployed verbatim to Pages and read by the
-agent-tools umbrella.
+Each integration run publishes a fresh release, so its PR must use a new version in `Cargo.toml`, `Cargo.lock`, and `docs/version.json`. The existing release guard still verifies that artifact-changing work actually moved these versions together. `docs/version.json` is deployed verbatim to Pages and read by the agent-tools umbrella.
 
-CI compares the PR head with `origin/main` in `range` mode and runs
-`scripts/test_check_main_version_bump.py`. The repo-local pre-push hook remains
-an early version check; `devenv test` is the full offline actionlint, format,
-clippy, and ratchet gate.
+CI compares the PR head with `origin/main` in `range` mode and runs `scripts/test_check_main_version_bump.py`. The repo-local pre-push hook remains an early version check; `devenv test` is the full offline actionlint, format, clippy, and ratchet gate.
 
 When preparing a clone for local release work, set `git config core.hooksPath .githooks` so the repo-local `pre-push` hook actually runs.
 
