@@ -306,10 +306,7 @@ struct CliOutput {
 enum OutputKind {
     Success(SuccessOutput),
     Error(DotsyncError),
-    /// The command line was wrong, so there was never a run. It reports in the
-    /// same shape as everything else: `Explanation` is what a stop is, and a
-    /// caller that has learned to read one has learned to read the first error
-    /// it is ever likely to meet.
+    /// The command line was wrong, so there was never a run to explain.
     Usage(Explanation),
 }
 
