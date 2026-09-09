@@ -7,9 +7,9 @@ Use this skill when editing dotfiles on a machine managed by dotsync.
 1. Run `dotsync` first to pick up anything other machines have published.
 2. Edit config files directly at `~/` (their real locations).
 3. Run `dotsync status` to see what changed.
-4. Run `dotsync commit <scope> -m "message" -- <paths>` to commit specific files, or `dotsync commit <scope> -m "message"` to commit all changed managed files.
+4. Run `dotsync commit <scope> -m "message" -- <paths>` to commit specific files, or `dotsync commit <scope> -m "message"` to commit every changed managed file.
 5. Choose the root-est appropriate scope for the change (the highest scope that still semantically owns the edit).
-6. To discover available scopes, run `dotsync view`. It lists every scope with the scopes it inherits from, and what a scope is for where whoever created it said.
+6. To see the scopes there are, run `dotsync view`. It lists each one with the scopes it inherits from, marks the one this machine is, and shows what a scope is for where whoever created it said.
 
 ## Choosing a scope
 
@@ -20,18 +20,32 @@ Use this skill when editing dotfiles on a machine managed by dotsync.
 
 Always choose the **highest (most general) scope** that makes sense. If a change applies to all linux machines, use `linux`, not the machine scope.
 
-There may be no scope for what you are holding — config shared by some machines and not others, with nothing in the graph that means "those machines". `dotsync create-scope <name> --parent <scope> -m "what belongs here"` makes one. It only carries config to machines that join under it with `dotsync init --parent <name>`, though: nothing moves an existing machine onto a new scope, so a scope created now is for machines set up later. Prefer an existing scope.
+The scope has to be one this machine is on — its own or one above it. Config for a machine family you are not on goes on the scope you share with it, together with the pattern an agent over there should follow when it adds that machine's own version; committing straight onto another machine's scope is refused, and the refusal names the scope to use instead.
 
-## When a cascade pauses
+There may be no scope for what you are holding — config shared by some machines and not others, with nothing in the graph that means "those machines". `dotsync create-scope <name> --parent <scope> -m "what belongs here"` makes one. It only carries config to machines that join under it with `dotsync init --parent <name>`, though: nothing moves an existing machine onto a new scope, so a scope created now is for machines set up later, and the first of those is what puts config on it. Prefer an existing scope.
 
-A commit merges the change through every descendant scope. Where two scopes changed the same file differently, the run stops with **exit code 3** and names the conflicted files. That is not a failure to retry: it is a question. Edit the named files in `~/` to the merged contents you want, then run `dotsync continue`; dotsync reads the resolution back out of the file, so leaving one exactly as it is says you decided on the version already there. `continue` refuses a file that still holds conflict markers, since those would cascade to every other machine's live config. Run `dotsync abort` instead to discard what this machine committed, including the home edit that started it — and note what it cannot do: when the change you collided with came from another machine, there is nothing of yours in the way, so home goes back and the merge is still waiting (exit 3 again, saying so). Resolving is the only way through that one. Until you do one of those, `dotsync commit` refuses to start another cascade — also with exit 3 — and nothing this machine has committed is published. `dotsync status` and `dotsync diff` say so whenever a cascade is paused, so that is where to look if you have lost the original message.
+## Ending a local change
+
+A file you edited in `~/` stays yours until you do one of two things with it. `dotsync commit` makes it everybody's. `dotsync discard <paths>` throws it away and writes the scope's version back into home. Deleting the file yourself is neither — a deletion is a local change too, so home comes back empty rather than canonical.
+
+Every path `discard` takes has to be one of the changes `dotsync status` lists. Anything else is a stop, because discarding cannot be undone and a mistyped path is likelier than a change of mind.
+
+## When a merge is waiting
+
+A commit merges the change through every descendant scope, and a sync merges what other machines published into what this one holds. Where two sides changed the same file differently, the run stops and prints every version of every file it could not merge: the one both sides started from, and each side, labelled with where it came from. Nothing is written into the file itself, so the config it holds stays valid while you work on it.
+
+That is not a failure to retry. It is a question. Decide what each file should hold, write that into it at its real path in `~/`, and run `dotsync continue`. Dotsync reads the resolution back out of the file, so leaving one exactly as it is says you decided on the version already there. `continue` refuses a file that still holds conflict markers, since those would cascade to every other machine's live config.
+
+`dotsync abort` is the other way out: it discards what this machine committed, including the home edit that started it. Note what it cannot do — when the change you collided with came from another machine, there is nothing of yours in the way, so home goes back and the merge is still waiting. Resolving is the only way through that one.
+
+Until you do one of those, `dotsync commit` refuses to start another cascade and nothing this machine has committed is published. `dotsync status` and `dotsync diff` say so; `dotsync view` prints the whole conflict again, which is where to go if the original message has scrolled away — those versions exist nowhere else.
 
 ## Exit codes
 
 - `0` — the command did what it says.
-- `1` — dotsync stopped, or `dotsync diff` found changes. Under `--output json`, `status` is `"error"` for a stop and `"ok"` for the changes `diff` found.
-- `2` — the command line was wrong.
-- `3` — a paused cascade is waiting.
+- `1` — it did not, or `dotsync diff` found changes.
+
+Under `--output json`, `status` is `"error"` for a stop and `"ok"` for the changes `diff` found, and `error` names the kind of stop — `cascade_paused` for a merge waiting on you, `usage` for a command line dotsync could not parse.
 
 ## Notes
 
@@ -39,12 +53,10 @@ A commit merges the change through every descendant scope. Where two scopes chan
 - After committing, dotsync cascades the change through all descendant scopes and syncs the result back to `~/`.
 - `dotsync status` separates two things. Files it lists as **changed** were changed here and need a decision from you. Files it lists as **incoming** were changed on another machine and home has not caught up — plain `dotsync` applies those, and `dotsync commit` refuses one you name, because committing it would revert whoever published it.
 - Naming a directory (`-- .config/fish/`) records what this machine changed under it, adds what is new under it, and steps around what another machine changed — listing what it left alone. Naming no paths at all records only changes to files dotsync already tracks; it never adds a new file, so a new file has to be opted into by naming it or the directory it is in. Only a path you name exactly is refused. Naming your whole home directory (`.`) is refused outright — name the directories you mean.
-- `dotsync diff` is `dotsync status`'s changed list with the diffs shown; it exits 1 when it finds any. `dotsync view` shows what is checked in: `--scope <scope>` for a scope's files, `--file <path>` for the scopes holding a file, both for that file's contents on that scope.
+- `dotsync diff` is `dotsync status`'s changed list with the diffs shown; it exits 1 when it finds any. `dotsync view` shows what is checked in: `--scope <scope>` for a scope's files, `--file <path>` for the scopes holding a file and which one owns it, both for that file's contents on that scope.
 - Dotsync records what it finds at the path you name, kind and all: an executable script stays executable on every machine, and a symlink is recorded as a symlink whose content is its target. A link is never followed, so naming a link to a directory records one link rather than everything under it. What is refused is a path that reaches its file *through* a link (`.config/nvim/init.lua` where `.config/nvim` is a link): what dotsync would read is not what you named, and the other machines have no such link. Config kept outside home and linked into place is committable as the link, and the file it points at is not managed.
 - A commit reports the files it put on a scope for the first time (`newly_tracked`). Every machine sharing that scope gets them written into its home directory, so it is worth reading that line.
+- A sync merges rather than gates. A file you edited that nothing else changed is carried across and reported as `carried_changes` — it stays yours to commit, and you do not have to deal with it before receiving anything else. Only a file that home and the scope both changed stops the run, and then the run stops whole: nothing is written, not even the incoming changes to other files, because home is derived from one commit.
 - When the remote cannot be reached, every command still works against the state this machine last fetched and says so; commits stay local until a run that reaches the remote publishes them. Only `dotsync init` needs the remote to be up.
-- A sync merges rather than gates. A file you edited in `~/` that nothing else changed is carried across the sync and reported as `carried_changes` — it stays yours to commit, and you do not have to deal with it before receiving anything else. Only a file that home and the scope both changed stops the run, and then the run stops whole: nothing is written, not even the incoming changes to other files, because home is derived from one commit.
-- A stop like that prints all three versions of each file it could not merge — the one both sides started from, plus each side's, each labelled with where it came from — on stderr and under `conflicts` in the JSON. Nothing is written into the file itself, so the config it holds stays valid while you work on it. Decide what the file should hold and write that into it in `~/`, then run `dotsync continue`: that takes your version as the answer and delivers the incoming changes the stop withheld. The resolution is an ordinary local change afterwards — commit it to a scope to make it everybody's version. `dotsync --force` is the other way out, and it discards your version instead.
-- `--force` has two shapes. On plain `dotsync` and `continue` it means home loses: every local change to a managed file is discarded, the scope's version is written, and the run reports them as `overwritten_files`. On `commit` it applies only to the paths you name, and the run reports them as `forced_overwrites`.
 - There is no `~/dotfiles/` directory. The repo is hidden at `~/.local/share/dotsync/repo/`. Never interact with it directly.
 - `dotsync --output json <command>` gives structured output for programmatic use.

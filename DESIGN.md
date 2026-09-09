@@ -1,6 +1,8 @@
 # dotsync — Design Story
 
-**This document describes the target design, not the shipped state.** Things described here in the present tense may not be built yet — conflicts-as-commits and the convergence pass are the current examples. `PLAN.md` tracks what exists, what is in progress, and in what order the rest lands; when the two disagree about what dotsync does today, `PLAN.md` is right.
+This document describes dotsync as it is: the model, why it is that model, and
+the contract its commands keep. `PLAN.md` is where anything not yet built is
+written down.
 
 ## The problem
 
@@ -97,9 +99,7 @@ and dotsync neither reads, cascades nor publishes it.
 
 Everything above this section describes what dotsync _does_. This section describes what can _exist_.
 
-That distinction is worth a section of its own because a design which only ever specifies workflows leaves each implementation site to fill the gap on its own. Concretely: a scope's head can be in three states, this document never wrote down that it has states at all, and six places in the code each ended up deciding independently what the third one meant. They produced five different answers, two of which were to silently skip the scope. Nobody was careless — there was no definition to conform to, so each site invented one, and five independent inventions had no reason to agree.
-
-The standard the rest of this section is held to is **make invalid states unrepresentable**, and that is only achievable if the valid states are written down first.
+It is worth a section of its own because a design that specifies only workflows leaves every implementation site to invent the missing states for itself, and independent inventions have no reason to agree. The standard the rest of this section is held to is **make invalid states unrepresentable**, which is only achievable if the valid states are written down first.
 
 Written abstractly, on purpose. What the code calls each of these is a separate, explicitly non-authoritative mapping at the end of the section, so that renaming a type or restructuring a module is never a change to this document.
 
@@ -151,7 +151,7 @@ The markers are a _rendering_ of the object, not the object. That matters twice 
 
 ### A non-authoritative map to the code
 
-The names below are where these states lived in the code as of v0.4.0. This table is a reading aid, not a specification. Refactoring is free to move any of it without an edit to this document, and where it disagrees with the abstract states above, the abstract states are right and this table is stale.
+A reading aid, not a specification: refactoring may move any of it without an edit to this document, and where the two disagree the abstract states above are right.
 
 | State | Where it lives today |
 | --- | --- |
@@ -212,11 +212,11 @@ A sync is one three-way merge — `merge(home, mark, tip)` — computed in memor
 
 The row that carries the most weight is **incoming update**: home holds exactly what was last synced, and the tip has moved on. A two-sided comparison of home against the tip cannot tell it apart from a local edit, so `status` reports it as a change and a `commit` naming that path re-records the older bytes and cascades them — silently reverting whoever published the change. Naming the class is what makes that unrepresentable: `status` files it under incoming rather than changed, and `commit` refuses it, pointing at plain `dotsync`.
 
-When a sync stops on a conflict it touches nothing: home is one coherent derivation of the mark, and a home written partly from the mark and partly from the tip would make any single answer to "what did this machine last sync?" a lie. The stop presents the base and both sides in dotsync's own output (never as markers in the live file), and the way out is to write the resolved content into the file at its real path and run `dotsync continue` — or `dotsync --force` to take the repo's side. Nothing about the stop is stored; a rerun recomputes the same merge from the same three trees.
+When a sync stops on a conflict it touches nothing: home is one coherent derivation of the mark, and a home written partly from the mark and partly from the tip would make any single answer to "what did this machine last sync?" a lie. The stop presents the base and both sides in dotsync's own output (never as markers in the live file), and the way out is to write the resolved content into the file at its real path and run `dotsync continue` — or `dotsync discard <path>` to take the repo's side. Nothing about the stop is stored; a rerun recomputes the same merge from the same three trees.
 
 On a machine with no working-copy record yet — a fresh `init`, or the first run after upgrading from a release that kept a state file — the working-copy commit is created as an empty-diff child of the machine scope's bookmark, and whatever home actually holds surfaces as ordinary local changes on the first snapshot. Nothing is removed from home and no missing file is read as a deletion, because there is no record of having put anything there.
 
-**`--force` has two shapes, because the commands asking it do not all have something to scope the answer to.** Plain `dotsync` and `continue` name no paths, so their `--force` is blanket: materialize the repo's side whole, dropping every local change. `commit` names paths, and its `--force` rides that same list — it overrides the refusal for exactly those paths, takes home's side for them, and leaves every other local change alone. `dotsync commit linux -m msg --force -- .bashrc` overwrites `.bashrc` and nothing else; `dotsync --force` overwrites everything. Paths recorded on that authority are reported as `forced_overwrites`. `init` and `abort` refuse the flag: neither ever makes the choice, because `init` has nothing of yours to overwrite and `abort` exists to discard home edits.
+**A local change ends in one of two ways, and both name paths.** `dotsync commit <scope> -- <paths>` makes it everybody's; `dotsync discard <paths>` decides against it, writing the scope's version into home instead. Deleting the file yourself is neither, because a deletion is a local change too — home would come back empty rather than canonical, which is why discarding needs a command of its own. Naming a path that holds no change of yours is a stop rather than a run that discarded nothing: discarding cannot be undone, and a mistyped path is likelier than a change of mind. What a run discarded is reported as `overwritten_files`, the same field `init` and `abort` use, because all three take the head's side of something.
 
 ## The jj decision
 
@@ -230,11 +230,9 @@ jj is also git-compatible — the repo is a valid git repo, pushable to GitHub, 
 
 One risk: jj is newer and less well-known than git. AI agents may not have strong intuitions for jj commands and concepts. So **hide jj from the user interface**: agents interact only with `dotsync` commands, never run `jj` directly, and never need to learn what a bookmark is.
 
-That is an instruction about the interface. It is not an instruction about the code, and it is worth saying so explicitly, because an earlier version of this document said only that dotsync "abstracts jj away entirely" and that turned out to read as both. The cheapest way to abstract a rich type is to narrow it where you first touch it — read the one case you care about out of it and pass that along — so that is what happened. A bookmark position, which jj models as absent, single, _or_ contested, was read out through a helper that answers only the single case; the five sites downstream then each decided what the missing answer meant, and one of them says the scope is not in the repo when in fact the scope is in the repo and contested. The message is wrong because the type it was derived from could not hold the truth.
+That is an instruction about the interface, and it is emphatically not one about the code: **do not narrow jj's types — or, where a narrower type is genuinely wanted, prove it can hold everything the wider one could.** The cheapest way to abstract a rich type is to read the one case you care about out of it at the boundary, and every site downstream then has to invent an answer for the cases that were dropped. A bookmark position is the example that cost the most: jj models it as absent, single _or_ contested, and a helper answering only the single case turned "contested" into "this scope is not in the repo", which is false.
 
-The corrected instruction: **hide jj from the user; do not narrow jj's types in the code — or, where a narrower type is genuinely wanted, prove it can hold everything the wider one could.**
-
-The same rule read from the other direction: wherever dotsync builds its own model of something jj already models, dotsync's copy is the lossier one. A managed file's content carried without its kind is a parallel copy of jj's tree value with the executable bit and the symlink case dropped. A cache of scope heads is a parallel copy of the repo's bookmarks that has to be kept in step by convention. "The state space" above lists the states these copies have to be able to hold, and its last table is the map from those states to the jj types that already hold them.
+The same rule from the other direction: wherever dotsync builds its own model of something jj already models, dotsync's copy is the lossier one — content without its kind loses the executable bit and the symlink case; a cache of scope heads has to be kept in step by convention. "The state space" above lists the states these copies would have to hold, and its last table is the map to the jj types that already hold them.
 
 **Requirement: dotsync must never depend on the jj CLI binary at runtime.** jj is linked in as a library (jj-lib); user machines do not have and must not need jj installed. The library link is functional, not just packaging: dotsync needs operations the CLI doesn't expose, like computing a merge in memory to report would-be conflicts without creating commits or moving bookmarks. Known caveat: jj-lib's supported fetch/push mechanism shells out to a `git` subprocess, so a `git` binary on PATH is currently a runtime dependency for network operations. That's acceptable for now and recorded here so nobody assumes full self-containment.
 
@@ -266,7 +264,7 @@ Two things they do write, worth stating rather than claiming otherwise:
 
 ## Conflict resolution in home
 
-There is deliberately no visible working copy — a working copy next to the live config would mean three copies of everything. But the live config directory **is the working copy for all intents and purposes**, and it gets the full working-copy treatment. The user can never move it backward or sideways to another version or scope (inspection is done via `dotsync view`); it only ever goes forward. And when a merge conflicts, the conflict has to be put in front of whoever resolves it — whether that means writing it into the files they work in is the one open question here, and "The resolution surface" below is where it is left open.
+There is deliberately no visible working copy — a working copy next to the live config would mean three copies of everything. But the live config directory **is the working copy for all intents and purposes**, and it gets the full working-copy treatment. The user can never move it backward or sideways to another version or scope (inspection is done via `dotsync view`); it only ever goes forward. And when a merge conflicts, the conflict is put in front of whoever resolves it — in dotsync's own output, never in the file itself; see "The resolution surface" below.
 
 ### "Paused" is derived, not stored
 
@@ -282,30 +280,63 @@ Three paused states exist, and each is derived from a different place:
 
 ### The resolution surface
 
-**Settled**: when a merge conflicts, the conflict is put in front of the agent that has to resolve it, showing both sides _and_ the base, with the sides labeled by scope name rather than commit id. The base is in because a conflict _is_ a base plus two sides — see "The state space" above — and jj carries all three, so omitting it would mean discarding a part dotsync already holds. Max, on that: _"Yes the base is supposed to be included. I'm sure JJ supports that."_
+When a merge conflicts, the conflict is put in front of the agent that has to
+resolve it: every conflicted file, with both sides _and_ the base, each labeled
+with the scope it came from rather than with a commit id. The base is in
+because a conflict _is_ a base plus two sides — see "The state space" above —
+and jj carries all three, so leaving it out would mean discarding a part
+dotsync already holds. Max: _"Yes the base is supposed to be included."_
 
-**Where: the preference is to present the conflict without writing anything into home** (Max, 2026-08-19, "the overwhelming preference"). The reason: conflict markers in home are broken config. While `<<<<<<<` / `|||||||` / `=======` / `>>>>>>>` markers sit in a live config file, that file is not valid config, so the application it configures reads a broken file for exactly as long as the pause lasts — the machine is broken precisely while the conflict is being fixed. The alternative — materializing markers into the affected home files through ordinary sync, in the standard format agents have deep priors on — remains the fallback if the preference fails validation.
+**Nothing is written into home.** Conflict markers in a live config file are
+broken config: the file stops being valid for exactly as long as the pause
+lasts, so the application it configures reads a broken file precisely while
+somebody is fixing it. The versions therefore exist only in dotsync's output —
+which is why `dotsync view` prints them again, for the agent whose session
+ended or whose terminal scrolled.
 
-**The preference is validated empirically by the agent validation loop** (PLAN item 3) — by watching a real agent resolve a real conflict, not by argument here. Not because the preference is in doubt, but because conflicts are fundamental to the tool, and "a real agent can reliably resolve one from what it is shown" is the bar the presentation has to clear. Because the conflict is already a real object with all three parts, this is a rendering choice over that object rather than a design still to be invented, and nothing above this paragraph changes whichever way it goes.
+That leaves "I am done" as the one thing dotsync cannot find out for itself:
+home reads identically before the agent starts and after it decides to keep the
+version already there. So `continue` exists, and it carries the decision.
 
-The bullets below say which of them assume an answer.
+- **`continue` is the pass again with an answer supplied.** It recomputes the
+  merge that stopped, takes home's bytes at exactly the paths that merge could
+  not resolve, and hands those to the pass — so the resolution is recorded on
+  the scope that stopped, and everything below it merges a parent that moved,
+  which is ordinary convergence. There is no remaining cascade to remember: the
+  pass finds what is left by looking. An answer that does not cover a second
+  conflict leaves that merge conflicted, and the pass stops there as it would
+  have anyway, which is what keeps home's bytes off a conflict nobody has been
+  shown. `commit` refuses while a merge is waiting, pointing at the resolution
+  flow.
+- **"Resolved" is a property of the content, and refusing markers is the whole
+  of it.** `continue` refuses a file that still holds conflict markers, since
+  markers recorded as the merged contents cascade to every descendant and reach
+  every other machine's live config. It refuses nothing else. In particular an
+  unchanged file is a resolution — the agent read both versions and kept the one
+  already there — so the pause says as much, and the tempting "unchanged means
+  unresolved" check is the thing to avoid: it is silently wrong for exactly the
+  agent that did the work properly. Markers are detected by a start line *and*
+  an end line, because a lone run of seven `=` or `-` characters is ordinary
+  config.
+- **Conflicts outside this machine's ancestry** (e.g. a cascade from `all`
+  conflicting only in the `windows` subtree while this machine is linux) don't
+  appear in home naturally, and resolving one borrows the home path as a scratch
+  buffer for somebody else's config. The pause states the switch loudly — "this
+  machine is `mx-xps-cy`, which does not descend from `windows`, so what you are
+  resolving is not this machine's config; `mx-xps-cy`'s own version comes back
+  after `continue` or `abort`" — because without it the agent reads another
+  machine's settings as its own.
 
-- **If markers are materialized**, a conflict anywhere in this machine's scope ancestry propagates down into the machine scope's tree, so ordinary sync writes it into the affected home files. Drift detection then treats those markers as the expected home content while they are there — which is what stops a forced sync from replacing a resolution in progress with the unresolved file.
-- **`dotsync show conflict` renders the conflict state at any time**: DAG position, the scope whose merge stopped, which scopes' changes are colliding, the conflicted files, and the instructions. Because it renders derived state rather than a stored record, it is automatically correct after any crash, on any machine. `status` points here whenever conflicts exist.
-- **`continue` is the pass again with an answer supplied.** It recomputes the merge that stopped, takes home's bytes at exactly the paths that merge could not resolve, and hands those to the pass — so the resolution is recorded on the scope that stopped, and everything below it merges a parent that moved, which is ordinary convergence. There is no remaining cascade to remember: the pass finds what is left by looking. An answer that does not cover a second conflict leaves that merge conflicted, and the pass stops there as it would have anyway, which is what keeps home's bytes off a conflict nobody has been shown. `commit` refuses while a merge is waiting, pointing at the resolution flow. Whether `continue` exists at all rides on the same experiment — see below.
-- **"Resolved" is a property of the content, and refusing markers is the whole of it.** `continue` refuses a file that still holds conflict markers, since markers recorded as the merged contents cascade to every descendant and reach every other machine's live config. It refuses nothing else. In particular an unchanged file is a resolution — the agent read both versions and kept the one already there — so the pause says as much, and the tempting "unchanged means unresolved" check is the thing to avoid: it is silently wrong for exactly the agent that did the work properly. Markers are detected by a start line *and* an end line, because a lone run of seven `=` or `-` characters is ordinary config.
-- **Conflicts outside this machine's ancestry** (e.g. a cascade from `all` conflicting only in the `windows` subtree while this machine is linux) don't appear in home naturally, and resolving one borrows the home path as a scratch buffer for somebody else's config. The pause states the switch loudly — "this machine is `mx-xps-cy`, which does not descend from `windows`, so what you are resolving is not this machine's config; `mx-xps-cy`'s own version comes back after `continue` or `abort`" — because without it the agent reads another machine's settings as its own.
-
-  The borrowing has to end, and that is one rule rather than a mode: **`continue` lets the scope decide the conflicted paths again**, taking the head's side at exactly those paths and carrying every other local change as usual. Where the merge was on this machine's own path the resolution has just cascaded into its scope, so the head's side *is* what the agent typed and nothing moves. Where it was another machine's, home gets its own config back — without which the resolution stays a local change that no scope this machine syncs from can ever settle, so `status` reports it for ever. The run says which of the two happened, because a sync that discards home content and does not say why reads as lost work.
-
-#### Whether `continue` survives
-
-Under the preferred answer it survives; the reasoning is worth writing down so the experiment's result can be applied without re-deriving it.
-
-If markers are materialized, "the agent is done" is legible from the file itself: the markers are gone. `continue` is then the agent restating a fact dotsync can check for itself, and it deletes.
-
-If they are not materialized, home reads identically before the agent starts and after it decides to keep its own side unchanged. "I am done" becomes exactly the thing dotsync cannot find out on its own, and `continue` survives on the standing rule that every write command carries a decision only the user can make. The tempting shortcut — treat an unchanged file as unresolved — is the thing to avoid: it is silently wrong for the agent that legitimately resolved the conflict by keeping its own side.
-
+  The borrowing has to end, and that is one rule rather than a mode: **`continue`
+  lets the scope decide the conflicted paths again**, taking the head's side at
+  exactly those paths and carrying every other local change as usual. Where the
+  merge was on this machine's own path the resolution has just cascaded into its
+  scope, so the head's side *is* what the agent typed and nothing moves. Where it
+  was another machine's, home gets its own config back — without which the
+  resolution stays a local change that no scope this machine syncs from can ever
+  settle, so `status` reports it for ever. The run says which of the two
+  happened, because a sync that discards home content and does not say why reads
+  as lost work.
 - **A pause publishes nothing**, and `dotsync continue` publishes the lot. The scopes the pass converged before it stopped stay local-ahead, which is an ordinary convergence state, and the read-only commands name them so that a machine holding history back does not read as a machine with nothing to say.
 
   All or nothing, because the cause of a cascade conflict is a commit on a scope that merged cleanly: `dotsync commit all` collides at `linux`, and `all` is the scope that is fine. Publish `all` and no local command can take it back, so every later run re-derives the same conflict and `dotsync abort` can never clear it. Withholding keeps abort able to undo what the run did, and keeps the shared remote free of conflict encodings that plain git tooling renders poorly — at the cost that only the machine holding the conflict can resolve it.
@@ -343,26 +374,24 @@ It also reports three things that are true of the machine rather than of home, b
 
 **`dotsync diff`**: Show line-oriented diffs for managed home files with local changes. Read-only, and exits 1 when local changes are present so scripts and agents can distinguish clean from dirty state. A file the repo has moved on from while home stayed put is not a local change, so a machine that is merely behind exits 0 — the same answer `status` and plain `dotsync` give.
 
-**`dotsync view`**: Show a read-only overview of checked-in scope and file state. With `--scope <scope>`, show the managed file tree visible on that scope. With `--file <path>`, show the scopes where that file exists. With both `--scope <scope>` and `--file <path>`, print that file as it exists on that scope.
+**`dotsync discard <path>...`**: Throw away the local change at each path you name and write the scope's version there instead, then sync as usual. Every path has to be one of the changes `status` lists; anything else is a stop.
 
-**`dotsync show conflict`** _(not implemented — PLAN item 3)_: Re-render the current paused cascade: DAG position, paused scope, colliding scopes, conflicted files, and resolution instructions. Works at any time while a pause exists, for agents that lost the original output.
+**`dotsync view`**: Show a read-only overview of checked-in scope and file state, marking which scope is this machine. With `--scope <scope>`, show the managed file tree visible on that scope. With `--file <path>`, show the scopes where that file exists and which one owns it — the rootmost, since the rest have it from the cascade. With both, print that file as it exists on that scope.
 
-**`dotsync continue`** _(existence conditional — see "Whether `continue` survives")_: Continue a paused cascade once the conflict has been resolved, recording the resolved contents on the scope whose merge stopped and publishing everything the pause held back. Refuses a resolution that still holds conflict markers.
+While a merge is waiting, the overview also reprints it in full: every conflicted file, both sides and the base. That is the only copy there is — nothing is written into home and neither side is on a scope this machine syncs from — so an agent whose session ended has somewhere to ask.
 
-**`dotsync abort`**: Discard what the run that stopped committed, restoring every scope it moved to where that run found it, and sync the current machine home back to the restored state. Says so and exits 3 if the merge is still waiting afterwards, which is what a conflict that came from the remote does.
+**`dotsync continue`**: Continue a paused cascade once the conflict has been resolved, recording the resolved contents on the scope whose merge stopped and publishing everything the pause held back. Refuses a resolution that still holds conflict markers.
+
+**`dotsync abort`**: Discard what the run that stopped committed, restoring every scope it moved to where that run found it, and sync the current machine home back to the restored state. Says so, and stops, if the merge is still waiting afterwards — which is what a conflict that came from the remote does.
 
 ### Exit codes
 
 | Code | Meaning |
 | --- | --- |
 | 0 | The command did what it says. |
-| 1 | dotsync stopped, or `dotsync diff` found changes. Under `--output json` the payload's `status` separates the two: `"error"` for a stop, `"ok"` for the changes `diff` found. |
-| 2 | The command line was wrong. |
-| 3 | A merge is waiting: resolve the conflict and run `dotsync continue`, or run `dotsync abort` to discard what this machine committed. |
+| 1 | It did not, or `dotsync diff` found changes. |
 
-3 is a property of the state, not of the command that met it: the run that creates a pause, a `commit` that runs into one, a `continue` that finds nothing resolved, and an `abort` that could not clear it all exit 3, because they all have the same remedy. Only `diff` ever exits non-zero without having stopped, and it does so because a script needs to tell clean from dirty without parsing.
-
-`--force` takes the repo's side instead of stopping, and reports every local change it discarded — so you always see what was overwritten, even having chosen not to stop for it. On `commit`, `--force` covers only the paths that commit named; see "Local changes and the mark" above.
+Two, because what kind of stop it was is a question with more than two answers and the payload is where it is answered: `error` names the kind, including `cascade_paused` for the one state with a remedy of its own. `status` separates the two meanings of 1 — `"error"` for a stop, `"ok"` for the changes `diff` found, which is the one non-zero exit that is not a stop. Max: _"I frankly don't really care about exit codes."_
 
 ### Why one command?
 
@@ -370,17 +399,100 @@ Earlier designs had separate `dotsync` (sync), `dotsync commit` (commit + cascad
 
 ## Agent skill
 
-dotsync includes an agent skill (`dotfiles`) that triggers whenever any home directory config file is edited. The skill tells agents:
+dotsync ships an agent skill (`docs/SKILL.md`) that triggers whenever a home
+config file is edited: edit in `~/`, run `dotsync status`, choose the root-est
+scope that owns the change, commit it. The tool is plumbing; the skill is what
+makes agents use the plumbing correctly, and it is the reason the command
+surface stays small enough to describe in a page.
 
-1. Edit files directly in `~/` at their real locations
-2. Run `dotsync status` to see changed managed files
-3. Run `dotsync view` to see the scopes there are, and what each is for where somebody said
-4. Choose the root-est appropriate scope for the change
-5. Run `dotsync commit <scope> -m "description" -- <paths...>` when done
+What a scope is for is ordinary commentary, useful when the name is not
+self-evident and carrying nothing when it is (Max: _"I don't think the scope
+comments are 'load bearing' lol? they're pretty obvious"_). A scope called
+`hyprland` says what belongs on it by being called `hyprland`. So whoever
+creates a scope may say what it is for, in the creation commit, and `dotsync
+view` shows it — one sentence that cannot drift from the scope it describes.
 
-This is the mechanism that makes the system agent-friendly. The tool itself is simple plumbing — the skill is what makes agents use the plumbing correctly.
+## The JSON contract (`--output json`)
 
-What a scope is for is ordinary commentary, useful when a scope's name is not self-evident and carrying nothing when it is (Max, 2026-08-14: _"I don't think the scope comments are 'load bearing' lol? they're pretty obvious"_). A scope called `hyprland` says what belongs on it by being called `hyprland`, and step 4 above is the actual rule. So whoever creates a scope can say what it is for, in the creation commit, and `dotsync view` shows it — one sentence that cannot drift from the scope it describes, rather than a file to keep in step.
+Every command prints one JSON object on stdout. Notes go to stderr in every
+format — what a run overwrote, what it could not publish, what it carried — but
+the *headline* does not: `dotsync --output json` writes nothing to stderr where
+the same run in human mode says `synced 2 file(s) for mx-xps-cy`.
+
+The envelope is two fields. `status` is `"ok"` or `"error"`, and `command`
+names the command that answered. Read `status` first: it is what separates
+`dotsync diff`'s exit 1 (changes found, `"ok"`) from a stop (`"error"`). Any
+command that could not reach the remote also carries `remote_unreachable` with
+git's own words, meaning the payload describes the last state this machine
+fetched.
+
+Every payload from a read-only command carries three facts about the machine
+rather than about the question asked — `diverged_scopes`, `unpushed_scopes` and
+`machine_scope`, plus `paused_cascade` when a merge is waiting — because a fact
+carried by two of the three commands is a fact nobody finds.
+
+**The commands that move home** — `dotsync`, `init`, `continue`, `abort`,
+`discard` — answer in one shape:
+
+```json
+{"carried_changes":[],"command":"discard","machine_scope":"goof-b","overwritten_files":[".apprc"],"status":"ok","synced_files":[".apprc"],"unpushed_scopes":[]}
+```
+
+`overwritten_files` is home content this run discarded in favour of the repo,
+and `carried_changes` is home content it merged around and left standing — the
+two halves of what a sync did to your edits. `unpushed_scopes` lists scopes
+committed here that the remote does not have. `abort` adds `paused_scope`,
+where the run that stopped had stopped.
+
+**`commit`** says which of its two outcomes it had, because they are different
+events: one wrote history and synced home, the other did neither and so has no
+`synced_files` or `newly_tracked` at all rather than empty ones.
+
+```json
+{"command":"commit","machine_scope":"goof-a","newly_tracked":[".apprc"],"outcome":"committed","scope":"all","skipped_paths":[],"status":"ok","synced_files":[".apprc"],"unpushed_scopes":[]}
+```
+
+`newly_tracked` is what this commit put on the scope for the first time — every
+machine sharing it will have those written into its home directory.
+`skipped_paths` is what a named directory matched and the commit left alone,
+each as `{path, state, reason}`.
+
+**`status` and `diff`** are the same answer, and `diff` is `status`'s `changes`
+with a diff attached to each:
+
+```json
+{"changes":[{"path":".apprc","reason":"edited here since the last sync","state":"modified"}],"command":"status","diverged_scopes":[],"incoming":[],"machine_scope":"goof-b","status":"ok","unpushed_scopes":[]}
+```
+
+`status` adds `incoming`, the files another machine changed that home has not
+caught up to. Neither carries a count; the arrays have lengths.
+
+**`view`** answers in four shapes, one per question asked: `{scopes, files}`
+for the overview, `{scope, files}`, `{file, scopes, owner}`, and `{scope, path,
+contents}`. `owner` is the rootmost scope holding the file, which is the one it
+was committed to. At a pause the overview also carries `conflicts`, the same
+objects the stop printed. This is a known sharp edge: the shapes are coherent
+with each other only in the envelope, `scopes` changes type between two of
+them, and `contents` is UTF-8 lossy.
+
+**A stop** carries the kind, the message, the facts found, and the conflicted
+files:
+
+```json
+{"conflicts":[],"current_state":["`nope.conf` matched nothing: no file exists at or under /home/you/nope.conf, and scope `all` tracks no file at or under `nope.conf`."],"error":"unusable_commit_paths","message":"cannot commit the path you named","status":"error"}
+```
+
+`current_state` is a list of facts, one per thing the run found, so a caller
+never has to split a rendering apart on newlines. `conflicts` carries every
+version of every file a merge could not resolve: `{path, versions:[{role,
+label, contents}]}`, base first. Both are always present, so error handling has
+one shape — including for `error: "usage"`, which is what a command line dotsync
+could not parse answers with.
+
+`error` names the kind. The one worth branching on is `cascade_paused`: a merge
+is waiting, and the remedy is to resolve it and run `dotsync continue`, or to
+run `dotsync abort`. `paused_cascade` names the scope beside it, under the name
+the read-only commands use.
 
 ## What dotsync is NOT
 

@@ -26,8 +26,8 @@ and records `integrated-ci` on the exact merge commit.
 
 ## Start Here
 
-- Read `DESIGN.md` before changing command behavior, scope semantics, sync rules, or any product requirement.
-- Read `PLAN.md` for current priorities, the ordered work plan, and standing constraints (notably: never hand-mutate the hidden repo or dotfiles history).
+- Read `DESIGN.md` before changing command behavior, scope semantics, sync rules, or any product requirement. It describes dotsync as it is.
+- Read `PLAN.md` for what is not built: what is ahead, what is deferred, and the standing constraints any of it is done under (notably: never hand-mutate the hidden repo or dotfiles history).
 - Read `README.md` when updating public-facing positioning, quick-start content, or outbound links.
 - Read `docs/SKILL.md` only when editing the end-user dotfiles workflow skill that agents load while changing config files.
 
@@ -41,7 +41,7 @@ Tests, review and the ratchet are here because they make the work faster and les
 
 `dotsync` is a Rust CLI that wraps `jj` (Jujutsu) workflows for dotfile synchronization using scope branches and merge cascades.
 
-Core flows implemented: `dotsync init`, sync, commit with cascade, conflict pause/resume via `dotsync continue`, `--output json`, drift detection, scope isolation, multi-machine support.
+Home is jj's working copy through dotsync's own `WorkingCopy` implementation; the scope graph is derived from the repo's structure; one convergence pass moves every scope bookmark; a paused merge is recomputed rather than stored. Commands: `dotsync`, `init`, `create-scope`, `commit`, `discard`, `status`, `diff`, `view`, `continue`, `abort`, with `--output json` everywhere.
 
 `jj` (Jujutsu) is a runtime dependency. It may not be installed in every dev environment yet.
 
@@ -52,7 +52,7 @@ Core flows implemented: `dotsync init`, sync, commit with cascade, conflict paus
 
 ## Key Files
 
-- `DESIGN.md`: read when implementation choices might affect requirements or workflow semantics
+- `DESIGN.md`: read when implementation choices might affect requirements or workflow semantics; it also holds the JSON contract
 - `src/main.rs`: read when modifying CLI parsing, command shapes, or startup behavior
 - `.github/workflows/ci.yml`: read when changing CI, release, or Pages deployment
 - `docs/index.html`: read when updating the public landing page content or style
@@ -96,3 +96,11 @@ chmod +x /tmp/dotsync-x86_64-linux
 cp /tmp/dotsync-x86_64-linux ~/.local/bin/dotsync
 dotsync --version  # verify
 ```
+
+## Hard-won knowledge
+
+- `jj-lib` is used as a library, never the jj CLI: user machines do not have jj installed. A `git` binary on PATH is still needed for fetch and push, which jj shells out for.
+- The hidden repo's git store can be inspected read-only with `git --git-dir ~/.local/share/dotsync/repo/.jj/repo/store/git ...` — invaluable for diagnosis, never for mutation.
+- The `git_target` file in `.jj/repo/store/` controls where jj-lib finds the git backend. Relative path; `git` for a non-colocated repo.
+- `DOTSYNC_OS` and `DOTSYNC_HOSTNAME` override OS and hostname detection. Every test uses them, and so does every sandbox drive — never drive a build against real state; there is a live fleet using this tool.
+- The primary confidence signal is the final home config, not the internal branch shape. Branch assertions support that story; they do not replace it.
