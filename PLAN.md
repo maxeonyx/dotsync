@@ -26,9 +26,9 @@ Use the headless agent-scenario infrastructure (`tests/agent-scenarios/`) with a
 
 This is the actual product bar: the tool has failed in practice precisely when real agents met unplanned states. It is also what settles the one open presentation question. Conflicts are presented in dotsync's own output and never written into home, because markers in a live config file are broken config for as long as the pause lasts (Max, 2026-08-19, "the overwhelming preference") — but "a real agent can reliably resolve one from what it is shown" is the bar that presentation has to clear, and only watching one do it says whether it does. If it does not, the fallback is materialising markers through ordinary sync, and `continue` would delete with it, because "the markers are gone" is then legible from the file.
 
-### Scope graph changes beyond creation
+### Rename and reparent
 
-Rename, reparent and delete. Creation is the whole of the mutation surface today, so a scope created now is only for the machines that join under it afterwards — an existing machine cannot be moved onto one. Imperative operations first, validated empirically (Max, 2026-08-19): _"can an agent perform a correct sequence of imperative actions to modify the scope graph? And can dotsync manage scope graph changes across multiple machines without the reconciler? Does convergence need to handle scope graph changes?"_ Only after living with the answers: whether a declarative `config.toml` with a reconciler is worth bringing back at all.
+Creation and deletion are the mutation surface today, so a scope created now is only for the machines that join under it afterwards — an existing machine cannot be moved onto one, and a scope something hangs off cannot be deleted, because deleting it is the reparent nobody has designed. Imperative operations first, validated empirically (Max, 2026-08-19): _"can an agent perform a correct sequence of imperative actions to modify the scope graph? And can dotsync manage scope graph changes across multiple machines without the reconciler? Does convergence need to handle scope graph changes?"_ Deletion answered the last of those three for itself: the remote's absent head converges like any other head that moved. Only after living with the answers: whether a declarative `config.toml` with a reconciler is worth bringing back at all.
 
 ### Windows
 

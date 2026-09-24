@@ -1,6 +1,6 @@
-// `dotsync init` and `dotsync create-scope`: what they create, where a joining
-// machine hangs, and what every command says on a machine that has not been
-// initialized yet.
+// The scope graph, and how a machine joins one: what `init`, `create-scope`
+// and `delete-scope` do to it, where a joining machine hangs, and what every
+// command says on a machine that has not been initialized yet.
 
 mod harness;
 use harness::*;
@@ -284,5 +284,227 @@ fn missing_home_is_reported_as_an_environment_error() {
     assert_stderr_snapshot(
         &status_output,
         "dotsync: HOME is not set, so dotsync cannot find your home directory. Set HOME to the home directory dotsync should manage, then rerun.\n",
+    );
+}
+
+/// Deleting is the other half of what can happen to the graph, and the half a
+/// fleet needs when a machine goes away: the branch goes from the remote, so
+/// the scope stops being something every machine has to carry, cascade into
+/// and show.
+#[test]
+fn a_deleted_scope_is_gone_from_the_remote_and_from_the_graph() {
+    let harness = TestHarness::new();
+    let (machine_a, _machine_b) = two_synced_machines(&harness);
+
+    machine_a.run_ok("dotsync delete-scope goof-b");
+
+    assert!(
+        !remote_branches(&machine_a).contains(&"goof-b".to_string()),
+        "the scope's branch has to go from the remote, which is the only copy every machine reads: {:?}",
+        remote_branches(&machine_a)
+    );
+    let view = machine_a.run_ok("dotsync view");
+    assert!(
+        !String::from_utf8_lossy(&view.stdout).contains("goof-b"),
+        "and the scope has to be gone from the graph this machine reads\n{}",
+        render_output(&view)
+    );
+}
+
+/// Nothing tells the other machines. The scope's head on the remote is absent,
+/// which is a head position like any other, so the next run each of them makes
+/// picks it up the way it picks up a head that moved.
+#[test]
+fn another_machine_stops_seeing_a_deleted_scope() {
+    let harness = TestHarness::new();
+    let (machine_a, _machine_b) = two_synced_machines(&harness);
+    let machine_c = harness.machine("machine-c", "linux", "goof-c");
+    machine_c.init_ok_under("linux");
+    let before = machine_c.run_ok("dotsync view");
+    assert!(
+        String::from_utf8_lossy(&before.stdout).contains("goof-b"),
+        "this test is about a scope the third machine can see to begin with\n{}",
+        render_output(&before)
+    );
+
+    machine_a.run_ok("dotsync delete-scope goof-b");
+    machine_c.run_ok("dotsync");
+
+    let after = machine_c.run_ok("dotsync view");
+    assert!(
+        !String::from_utf8_lossy(&after.stdout).contains("goof-b"),
+        "a machine that has synced since the deletion must not still be carrying the scope\n{}",
+        render_output(&after)
+    );
+}
+
+/// What only that scope held goes with it — nobody else ever had it — and what
+/// it merely inherited stays where it is. A deletion that took a shared file
+/// down with it would empty out home on machines that have nothing to do with
+/// the one that left.
+#[test]
+fn deleting_a_scope_takes_the_files_only_it_had_and_nothing_else() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+    seed_shared_apprc(&machine_a, &machine_b);
+    machine_b.write_file(".config/vps-tunnel.conf", "port = 2222\n");
+    machine_b.run_ok("dotsync commit goof-b -m 'tunnel config' -- .config/vps-tunnel.conf");
+    machine_a.run_ok("dotsync");
+
+    let deleted = machine_a.run_ok("dotsync --output json delete-scope goof-b");
+
+    let payload = parse_stdout_json(&deleted);
+    assert_eq!(
+        payload["files_gone"],
+        serde_json::json!([".config/vps-tunnel.conf"]),
+        "the run has to say which files went with the scope\n{}",
+        render_output(&deleted)
+    );
+    assert!(
+        remote_branch_holds(&machine_a, "all", ".apprc"),
+        "and must not take anything off the scopes that own it: {:?}",
+        remote_branch_entries(&machine_a, "all")
+    );
+    assert_eq!(
+        machine_a.read_file(".apprc"),
+        "ui_theme = dark\nfont = mono\n",
+        "deleting somebody else's scope moves nothing this machine syncs from, so home cannot change"
+    );
+    let status = machine_a.run_ok("dotsync --output json status");
+    assert_eq!(
+        parse_stdout_json(&status)["changes"],
+        serde_json::json!([]),
+        "and it must leave this machine with nothing to report\n{}",
+        render_output(&status)
+    );
+}
+
+/// Deleting a scope something hangs off is the reparenting nobody has
+/// designed: every machine under it would silently start taking its config
+/// from the scopes above, keeping whatever the deleted scope had already
+/// merged into its history with no scope left to change it on.
+#[test]
+fn a_scope_other_scopes_hang_off_cannot_be_deleted() {
+    let harness = TestHarness::new();
+    let (machine_a, _machine_b) = two_synced_machines(&harness);
+
+    let refused = machine_a.run_expecting("dotsync delete-scope linux", 1);
+
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    for expected in ["linux", "goof-a", "goof-b"] {
+        assert!(
+            stderr.contains(expected),
+            "the stop has to name what hangs off it, because that is the whole reason; missing {expected:?}\n{stderr}"
+        );
+    }
+    assert!(
+        remote_branches(&machine_a).contains(&"linux".to_string()),
+        "and a refused deletion must change nothing: {:?}",
+        remote_branches(&machine_a)
+    );
+    machine_a.run_ok("dotsync");
+}
+
+/// Home is materialized from this machine's own scope, so a machine that
+/// deleted it would have nothing left to sync from and no way to undo it.
+#[test]
+fn a_machine_cannot_delete_the_scope_it_syncs_from() {
+    let harness = TestHarness::new();
+    let (machine_a, _machine_b) = two_synced_machines(&harness);
+
+    let refused = machine_a.run_expecting("dotsync delete-scope goof-a", 1);
+
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(
+        stderr.contains("goof-a"),
+        "the stop has to name the scope\n{stderr}"
+    );
+    assert!(
+        stderr.contains("another machine"),
+        "and say where the deletion can happen instead, or it is a dead end\n{stderr}"
+    );
+    assert!(
+        remote_branches(&machine_a).contains(&"goof-a".to_string()),
+        "and a refused deletion must change nothing: {:?}",
+        remote_branches(&machine_a)
+    );
+    machine_a.run_ok("dotsync");
+}
+
+/// A name that is not a scope is a typo, and the fleet is small enough that
+/// the answer is to go and look at it.
+#[test]
+fn deleting_a_name_that_is_not_a_scope_says_where_to_find_the_ones_that_are() {
+    let harness = TestHarness::new();
+    let (machine_a, _machine_b) = two_synced_machines(&harness);
+    let before = remote_branches(&machine_a);
+
+    let refused = machine_a.run_expecting("dotsync delete-scope hyprland", 1);
+
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(
+        stderr.contains("hyprland") && stderr.contains("dotsync view"),
+        "the stop has to name what was asked for and where to see what there is\n{stderr}"
+    );
+    assert_eq!(
+        remote_branches(&machine_a),
+        before,
+        "and must leave the remote exactly as it was"
+    );
+}
+
+/// The machine a deletion is about is the one that is not supposed to exist
+/// any more. If it turns up anyway it has to be told what happened and how to
+/// come back, rather than left with commands that fail.
+#[test]
+fn the_machine_whose_scope_was_deleted_is_told_how_to_get_one_back() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    machine_a.run_ok("dotsync delete-scope goof-b");
+
+    let stopped = machine_b.run_expecting("dotsync", 1);
+    let stderr = String::from_utf8_lossy(&stopped.stderr).into_owned();
+    assert!(
+        stderr.contains("dotsync create-scope goof-b"),
+        "the machine that lost its scope has to be told how to have one again\n{stderr}"
+    );
+}
+
+/// A machine that cascaded into a scope and never got to publish it holds a
+/// position for a scope the remote no longer has. Publishing that position
+/// would put the scope back under everybody's feet, saying nothing, and the
+/// deletion would have to be done again — from a machine that may never run
+/// again.
+#[test]
+fn a_machine_holding_an_unpublished_cascade_does_not_bring_a_deleted_scope_back() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+    let machine_c = harness.machine("machine-c", "linux", "goof-c");
+    machine_c.init_ok_under("linux");
+    machine_b.run_ok("dotsync");
+
+    block_remote_pushes(&machine_b);
+    machine_b.write_file(".apprc", "ui_theme = dark\n");
+    machine_b.run("dotsync commit all -m 'seed apprc' -- .apprc");
+    allow_remote_pushes(&machine_b);
+    assert_ne!(
+        bookmark_revision(&machine_b, "goof-c"),
+        remote_branch_revision(&machine_b, "goof-c"),
+        "this test needs a machine holding a cascade into `goof-c` that the remote never saw"
+    );
+
+    machine_a.run_ok("dotsync delete-scope goof-c");
+    machine_b.run_ok("dotsync");
+
+    assert!(
+        !remote_branches(&machine_b).contains(&"goof-c".to_string()),
+        "the deletion has to win: {:?}",
+        remote_branches(&machine_b)
+    );
+    assert_eq!(
+        remote_branch_file_contents(&machine_b, "all", ".apprc"),
+        "ui_theme = dark\n",
+        "and the work that machine was holding still has to get out"
     );
 }
