@@ -82,7 +82,7 @@ Files are implicitly tracked by existing in the repo. There is no whitelist file
 
 **Symlinks are treated as files, and are never followed** (Max, 2026-08-13: "for almost all intents we should treat symlinks as files and not follow them"). A link's content is its target string, so `commit` records a symlink as a symlink and sync writes it back into home as a symlink with the same target. Dotsync never reads the file a link points at, and never writes through a link — a home path that is a link where the repo holds a regular file is a difference in _kind_, reported as a change and replaced by sync rather than written through. This keeps `~/.config/nvim -> ~/src/nvim-config` recordable as what it is, and it keeps `commit -- selflink/` (a link to home) one entry rather than a walk of the whole home directory. Windows probably rejects symlinks on its scopes; that half is undecided in detail.
 
-There is no config file. The graph is the repo's own structure: a scope is a branch, and the commit that created it is written onto the heads of its parents — so a scope's ancestors are the scopes whose creation commits its history holds, and its parents are the nearest of those. The creation commit's message names the scope, and says what belongs on it where the name does not say so already.
+There is no config file. The graph is the repo's own structure: a scope is a branch, and the commit that created it is written onto the heads of its parents — so a scope's ancestors are the scopes whose creation commits its history holds, and its parents are the nearest of those. The creation commit's message names the scope, and says what belongs on it where the name does not say so already. A scope exists for as long as its branch does, so deleting the branch deletes the scope.
 
 Nothing else on the remote is a scope. The remote is a git remote and anything with git can push to it; a branch that was not created as a scope is not one, and dotsync neither reads, cascades nor publishes it.
 
@@ -112,9 +112,9 @@ Everything in this section is small, and that is the point. The essential comple
 
 Scopes are branches, so a scope has a head. That head is in exactly one of:
 
-- **absent** — the repo holds no head for this scope, which for a machine means its own scope was created and something outside dotsync has since moved or removed the branch.
+- **absent** — the repo holds no head under this name. The scope was deleted, or never existed, or — for this machine's own scope — something outside dotsync moved or removed the branch.
 - **exactly one commit** — the ordinary state.
-- **contested** — two machines moved it and it currently holds two candidate values at once. Neither is "the" head.
+- **contested** — two machines moved it and it currently holds two candidate values at once. Neither is "the" head. One of the two can be absent, which is one machine having deleted the scope while this one moved it.
 
 Contested is the state that was missing. It is not exotic and it is not a corruption: "The convergence model" below argues that two machines writing to one scope is a routine event rather than an edge case, and contested is simply what that event looks like before it has been converged. A repo holding a contested `linux` is a healthy repo that has been told two things and has not yet been asked to reconcile them.
 
@@ -304,7 +304,19 @@ Joining a remote that already has scopes means naming the parents, and naming on
 
 A machine whose scope already exists adopts it, and refuses `--parent`, because where a scope hangs was decided when it was created.
 
-**`dotsync create-scope <name> --parent <scope>... [-m "what belongs here"]`**: Create a scope holding everything its parents hold. This is the whole of what can happen to the graph: nothing renames, reparents or deletes a scope, which is what lets the graph be structural. Machines join a scope with `init --parent`, so a scope created now is for the machines that join under it. Rearranging a graph is open (PLAN §2.7).
+**`dotsync create-scope <name> --parent <scope>... [-m "what belongs here"]`**: Create a scope holding everything its parents hold. Machines join a scope with `init --parent`, so a scope created now is for the machines that join under it. Nothing moves an existing machine onto it.
+
+**`dotsync delete-scope <name>`**: Delete a scope. Its branch goes from the remote and from this machine, its own commits go with it, and no other scope moves — so no machine's home changes and there is nothing for this command to sync.
+
+Creating and deleting are the whole of what can happen to the graph. Nothing renames or reparents a scope, which is what lets the graph stay structural: an edge is a creation commit's ancestry and commits do not change, and a scope is there for exactly as long as its branch is. Rearranging a graph is open (PLAN).
+
+**Only a scope nothing hangs off can be deleted**, and there are two ways something hangs off one. A scope with children is refused, because deleting it is what reparenting would be: every machine under it would silently start taking its config from the scopes above instead, keeping whatever the deleted scope had already merged into its history with no scope left to change it on. This machine's own scope is refused too, because home is materialized from it — a machine that deleted it would have nothing left to sync from, and could not undo it. A machine's scope is deleted from another machine, once that machine is gone.
+
+**What only that scope held goes with it, and the run says which files those were.** Nothing else in the fleet ever had them: a scope with nothing under it reaches one machine, and that is the machine whose scope this is. Files it merely held a different version of are untouched on the scopes that own them, and every machine that reads them keeps reading them.
+
+**Deleting needs the remote**, which makes it the second command that does, for `init`'s reason: the deletion *is* the remote not having the branch. There is no local half to defer and converge later. A remote that refuses the write is a stop that changed nothing — the scope is still there, on the remote and here — so the way out is to run the same command again.
+
+Other machines are told nothing, and need to be: the scope's head on the remote is absent, and jj's import merges that into the local bookmark exactly as it merges a head that moved. A machine that is caught up simply loses the bookmark and the scope leaves its graph. A machine holding a position the remote never saw — an unpublished cascade into that scope — gets a head with an absent side, which is the deletion and that position at once, and the convergence pass settles it the way the rest of this section already implies: the deletion wins. A scope is deleted because somebody decided it should not exist, and a merge commit no machine asked for is a poor reason to publish it back under everybody's feet. A machine whose *own* scope was deleted has no scope, which dotsync already describes and points at `create-scope`.
 
 **`dotsync`** (no arguments): Pull and converge scope branches (merging remote changes and cascading, pausing on conflicts), sync repo -> system, push. It does not import home edits; use `dotsync status` and `dotsync commit <scope> -m "message" -- <paths...>` when home changes should be recorded.
 
@@ -370,6 +382,14 @@ Every payload from a read-only command carries three facts about the machine rat
 ```
 
 `newly_tracked` is what this commit put on the scope for the first time — every machine sharing it will have those written into its home directory. `skipped_paths` is what a named directory matched and the commit left alone, each as `{path, state, reason}`.
+
+**`delete-scope`** names the scope and what went with it:
+
+```json
+{"command":"delete-scope","files_gone":[".config/vps-tunnel.conf"],"scope":"mx-vps-fd","status":"ok"}
+```
+
+`files_gone` is what only that scope held, and therefore what no machine has any more. A file it held its own version of is not in it: the version every other machine reads is on the scope that owns it, untouched.
 
 **`status` and `diff`** are the same answer, and `diff` is `status`'s `changes` with a diff attached to each:
 
