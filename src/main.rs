@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
-    abort_paused_cascade, commit_and_sync, continue_after_conflict, create_scope, diff_home,
-    discard, init, status, sync, view, CommitOptions, DiffReport, DotsyncError, DotsyncPaths,
-    Explanation, MachineState, Resumed, Run, UnreachableRemote, ViewAnswer,
+    abort_paused_cascade, commit_and_sync, continue_after_conflict, create_scope, delete_scope,
+    diff_home, discard, init, status, sync, view, CommitOptions, DiffReport, DotsyncError,
+    DotsyncPaths, Explanation, MachineState, Resumed, Run, UnreachableRemote, ViewAnswer,
 };
 mod render;
 use serde_json::json;
@@ -50,11 +50,21 @@ const CREATE_SCOPE_ABOUT: &str = "Create a scope for config that several machine
 
 const CREATE_SCOPE_LONG_ABOUT: &str = "NAME is what the new scope is called. `--parent` is where it hangs: config on the parents reaches it, and config committed to it reaches every machine that hangs off it in turn.
 
-Creating a scope is the only thing that can happen to the scope graph. Nothing renames, moves or deletes one, which is what lets dotsync read the graph off its own history instead of a file that can disagree with it.
+Creating and deleting are the only things that can happen to the scope graph. Nothing renames or moves a scope, which is what lets dotsync read the graph off its own history instead of a file that can disagree with it.
 
 Machines join a scope with `dotsync init <remote-url> --parent <name>`, so a scope created now is for the machines that join under it.
 
 `-m` says what belongs on the scope, for whoever reads `dotsync view` later. A name that says it already — `hyprland`, `work` — needs nothing.";
+
+const DELETE_SCOPE_ABOUT: &str = "Delete a scope whose machine is gone";
+
+const DELETE_SCOPE_LONG_ABOUT: &str = "NAME is the scope to delete. Its branch goes from the remote and from this machine, and the files only it had go with it — the run says which those were. Nothing else moves, so no machine's home changes.
+
+Only a scope nothing hangs off can be deleted. A scope other scopes hang off is refused, because the machines under it would silently start taking their config from the scopes above while keeping everything it had already merged into their history. This machine's own scope is refused too: home is materialized from it. Delete a machine's scope from another machine, once that machine is gone.
+
+Deleting needs the remote, the way `dotsync init` does, because the deletion is the remote not having the branch. A remote that will not take it is a stop that changed nothing, so the answer is to run the command again.
+
+The other machines are not told anything and do not need to be: the next time each of them runs dotsync, the scope is gone.";
 
 const INIT_REMOTE_URL_USAGE: &str = "init needs the repo remote URL
 
@@ -134,6 +144,11 @@ enum Command {
         /// What belongs on this scope
         #[arg(short = 'm', long = "message")]
         description: Option<String>,
+    },
+    #[command(name = "delete-scope", about = DELETE_SCOPE_ABOUT, long_about = DELETE_SCOPE_LONG_ABOUT)]
+    DeleteScope {
+        /// Scope to delete
+        scope: String,
     },
     #[command(about = COMMIT_ABOUT, long_about = COMMIT_LONG_ABOUT)]
     Commit {
@@ -434,6 +449,7 @@ async fn dispatch(
             parents,
             description,
         }) => run_create_scope(scope, parents, description).await,
+        Some(Command::DeleteScope { scope }) => run_delete_scope(scope).await,
         Some(Command::Commit {
             scope,
             message,
@@ -527,6 +543,27 @@ async fn run_create_scope(
             ),
         )
         .with_notes(render::push_notes(&report.push))
+    }))
+}
+
+async fn run_delete_scope(scope: String) -> Result<CliOutput, DotsyncError> {
+    let paths = discover_paths()?;
+    let run = delete_scope(&paths, &scope).await;
+    Ok(output_of("dotsync delete-scope", run, |report| {
+        SuccessOutput::message(
+            json!({
+                "status": "ok",
+                "command": "delete-scope",
+                "scope": report.scope,
+                "files_gone": render::display_paths(&report.files_gone),
+            }),
+            format!(
+                "dotsync: deleted scope {} and the {} file(s) only it had",
+                report.scope,
+                report.files_gone.len()
+            ),
+        )
+        .with_notes(render::files_gone_notes(&report.scope, &report.files_gone))
     }))
 }
 

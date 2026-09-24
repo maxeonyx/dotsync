@@ -188,6 +188,20 @@ async fn pass(
     let mut paused = None;
 
     for scope in graph.in_cascade_order() {
+        // One side of this head says the scope is gone. The deletion wins:
+        // somebody decided the scope should not exist, and the position on the
+        // other side is a cascade merge no machine asked for — publishing it
+        // would put the scope back under everybody's feet, saying nothing, and
+        // leave the deletion to be done again from a machine that may never
+        // run again. DESIGN, "Commands", `delete-scope`.
+        if deleted_on_one_side(scope_head(tx.repo_mut(), &scope.name)) {
+            tx.repo_mut().set_local_bookmark_target(
+                RefNameBuf::from(scope.name.as_str()).as_ref(),
+                RefTarget::absent(),
+            );
+            moved = true;
+            continue;
+        }
         let inputs = convergence_inputs(tx.repo_mut(), graph, &scope.name)?;
         let parents: Vec<CommitId> = inputs.iter().map(|it| it.commit.id().clone()).collect();
         match inputs.as_slice() {
@@ -239,6 +253,17 @@ async fn pass(
     }
 
     Ok((moved, paused))
+}
+
+/// A head holding a deletion as one of its two sides.
+///
+/// jj's import makes one: the remote no longer has the branch, this machine
+/// has moved it since, and merging the two leaves the deletion and that
+/// position held at once. It is the contested state with an absent side, which
+/// is why reading it is a question about the head rather than about anything
+/// dotsync stores (DESIGN, "A scope head has three states").
+fn deleted_on_one_side(head: &RefTarget) -> bool {
+    head.has_conflict() && head.as_merge().adds().any(Option::is_none)
 }
 
 /// The merge with the answer laid over it at the paths the answer covers.

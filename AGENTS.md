@@ -42,7 +42,7 @@ Tests, review and the ratchet are here because they make the work faster and les
 
 `dotsync` is a Rust CLI that wraps `jj` (Jujutsu) workflows for dotfile synchronization using scope branches and merge cascades.
 
-Home is jj's working copy through dotsync's own `WorkingCopy` implementation; the scope graph is derived from the repo's structure; one convergence pass moves every scope bookmark; a paused merge is recomputed rather than stored. Commands: `dotsync`, `init`, `create-scope`, `commit`, `discard`, `status`, `diff`, `view`, `continue`, `abort`, with `--output json` everywhere.
+Home is jj's working copy through dotsync's own `WorkingCopy` implementation; the scope graph is derived from the repo's structure; one convergence pass moves every scope bookmark; a paused merge is recomputed rather than stored. Commands: `dotsync`, `init`, `create-scope`, `delete-scope`, `commit`, `discard`, `status`, `diff`, `view`, `continue`, `abort`, with `--output json` everywhere.
 
 `jj` (Jujutsu) is a runtime dependency. It may not be installed in every dev environment yet.
 

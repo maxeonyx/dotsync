@@ -76,6 +76,21 @@ fn carried_change_notes(carried: &[FileChange]) -> Vec<String> {
     notes
 }
 
+/// What a deleted scope took with it. Said out loud, path by path, because
+/// these files are not on any scope any more and nothing else will ever
+/// mention them again.
+pub(crate) fn files_gone_notes(scope: &str, files: &[PathBuf]) -> Vec<String> {
+    if files.is_empty() {
+        return Vec::new();
+    }
+    let mut notes = vec![format!(
+        "dotsync: {} file(s) were only on `{scope}`, so nothing has them now:",
+        files.len()
+    )];
+    notes.extend(files.iter().map(|path| format!("  {}", display_path(path))));
+    notes
+}
+
 pub(crate) fn display_paths(paths: &[PathBuf]) -> Vec<String> {
     paths.iter().map(|path| display_path(path)).collect()
 }

@@ -13,7 +13,7 @@ use jj_lib::git::{
 };
 use jj_lib::merged_tree::MergedTree;
 use jj_lib::op_store::RefTarget;
-use jj_lib::ref_name::RefNameBuf;
+use jj_lib::ref_name::{RefNameBuf, RemoteRefSymbol};
 use jj_lib::refs::BookmarkPushUpdate;
 use jj_lib::repo::{ReadonlyRepo, Repo, RepoLoader, StoreFactories};
 use jj_lib::rewrite::merge_commit_trees;
@@ -383,11 +383,20 @@ pub(crate) async fn push_scope_updates(session: &mut Session) -> Result<PushRepo
     if refused.is_empty() {
         return Ok(PushReport::UpToDate);
     }
-    // jj separates the two: `rejected` is the lease this run offered failing,
-    // and `remote_rejected` is the remote turning the write down. Anything
-    // that is not purely the first is treated as the second, so a run only
-    // ever retries a race it can actually win.
-    let rejection = match stats.remote_rejected.is_empty() && !stats.rejected.is_empty() {
+    Ok(PushReport::Refused {
+        scopes: refused,
+        rejection: rejection_from(&stats),
+    })
+}
+
+/// Why the remote turned a push down.
+///
+/// jj separates the two: `rejected` is the lease this run offered failing, and
+/// `remote_rejected` is the remote turning the write down. Anything that is
+/// not purely the first is treated as the second, so a run only ever retries a
+/// race it can actually win.
+fn rejection_from(stats: &git::GitPushStats) -> Rejection {
+    match stats.remote_rejected.is_empty() && !stats.rejected.is_empty() {
         true => Rejection::RemoteMoved,
         false => Rejection::RefusedTheWrite {
             reason: stats
@@ -396,11 +405,82 @@ pub(crate) async fn push_scope_updates(session: &mut Session) -> Result<PushRepo
                 .chain(stats.rejected.iter())
                 .find_map(|(_, reason)| reason.clone()),
         },
-    };
-    Ok(PushReport::Refused {
-        scopes: refused,
-        rejection,
-    })
+    }
+}
+
+/// Deletes a scope: the remote's branch goes, and this machine's bookmark goes
+/// with it in the operation that records the push.
+///
+/// The remote goes first, and that ordering is the whole of the recovery
+/// story. A push the remote will not take leaves the scope exactly where it
+/// was on both sides, so the run can say "nothing happened, try again". A run
+/// that dies between the push and the operation is a machine whose next fetch
+/// finds the branch gone and removes the bookmark itself — which is what every
+/// other machine does anyway.
+///
+/// Not part of `pending_bookmark_updates`, and it cannot be: that set is
+/// derived from the scopes this machine holds, and this is the one update that
+/// is about a scope it is about to stop holding.
+pub(crate) async fn delete_scope_branch(
+    session: &mut Session,
+    scope: &str,
+) -> Result<(), DotsyncError> {
+    let repo = session.repo().clone();
+    let published = repo
+        .view()
+        .get_remote_bookmark(RemoteRefSymbol {
+            name: RefNameBuf::from(scope).as_ref(),
+            remote: ORIGIN.as_ref(),
+        })
+        .target
+        .as_normal()
+        .cloned();
+
+    let mut tx = repo.start_transaction();
+    // A scope the remote has never seen — created here while the remote was
+    // out of reach — is deleted by this machine forgetting it, because that is
+    // all there is of it.
+    if let Some(published) = published {
+        let settings = default_settings()?;
+        let subprocess_options = GitSubprocessOptions::from_settings(&settings)
+            .map_err(|err| jj_error(format!("load git subprocess settings: {err}")))?;
+        let stats = git::push_branches(
+            tx.repo_mut(),
+            subprocess_options,
+            ORIGIN.as_ref(),
+            &GitBranchPushTargets {
+                branch_updates: vec![(
+                    RefNameBuf::from(scope),
+                    BookmarkPushUpdate {
+                        old_target: Some(published),
+                        new_target: None,
+                    },
+                )],
+            },
+            &mut QuietGitCallback,
+            &GitPushOptions::default(),
+        )
+        .map_err(|err| DotsyncError::ScopeDeletionRefused {
+            scope: scope.to_string(),
+            reason: remote_failure_reason(&err),
+        })?;
+        if stats.pushed.is_empty() {
+            return Err(DotsyncError::ScopeDeletionRefused {
+                scope: scope.to_string(),
+                reason: rejection_from(&stats).reason(),
+            });
+        }
+    }
+
+    tx.repo_mut()
+        .set_local_bookmark_target(RefNameBuf::from(scope).as_ref(), RefTarget::absent());
+    session
+        .advance_to(
+            tx.commit(format!("dotsync: delete {scope} scope"))
+                .await
+                .map_err(|err| jj_error(format!("commit the deletion of {scope}: {err}")))?,
+        )
+        .await
 }
 
 /// Every managed path a tree holds, and what is at it — `None` where the tree

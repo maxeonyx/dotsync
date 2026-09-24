@@ -386,6 +386,25 @@ pub enum DotsyncError {
     /// once, and a branch that is not a scope belongs to whoever pushed it.
     #[error("`{scope}` already exists on the remote")]
     ScopeNameTaken { scope: String },
+    /// Deleting a scope other scopes hang off. Deleting it is the reparenting
+    /// nothing does: the machines under it would take their config from the
+    /// scopes above instead, keeping whatever it had already merged into their
+    /// history with no scope left to change it on.
+    #[error("other scopes hang off `{scope}`: {}", children.join(", "))]
+    ScopeHasChildren {
+        scope: String,
+        children: Vec<String>,
+    },
+    /// Deleting the scope this machine syncs from. Home is materialized from
+    /// it, so this machine would have nothing left to sync and no way back.
+    #[error("scope `{scope}` is the one this machine syncs from")]
+    DeletingThisMachinesScope { scope: String },
+    /// The remote would not take a scope's deletion — it refused the write, or
+    /// it was not there at all. Nothing changed: the remote goes first
+    /// precisely so that a deletion it will not take leaves the scope where it
+    /// was, here and there.
+    #[error("the remote did not delete `{scope}`: {reason}")]
+    ScopeDeletionRefused { scope: String, reason: String },
     /// A scope created under parents that hold different versions of the same
     /// file. Its first commit would be a conflict nobody asked for.
     #[error("scope `{scope}` cannot be created while its parents disagree about {}", files.join(", "))]
@@ -876,6 +895,48 @@ impl DotsyncError {
             &[
                 "run `dotsync view` to see whether it is already a scope, in which case there is nothing to create.",
                 "otherwise pick another name.",
+            ])),
+        Self::ScopeHasChildren { scope, children } => Explanation::stop("scope_has_children", self)
+            .state(vec![format!("scope: {scope}; scopes hanging off it: {}", children.join(", "))])
+            .teaching(Teaching::new(
+            "other scopes hang off that one",
+            THE_SCOPE_GRAPH,
+            "This flow was about to delete a scope, which means taking its branch off the remote and off this machine.",
+            "It expects nothing to hang off it, because a scope with nothing below it reaches one machine and a deletion then takes nothing away from anybody else.",
+            &format!(
+                "`{}` would silently start taking config from the scopes above `{scope}` instead, while keeping everything `{scope}` has already merged into their history — with no scope left to change it on. That is a reparenting, and dotsync does not do those.",
+                children.join("` and `")
+            ),
+            &[
+                "run `dotsync view` to see what hangs off it.",
+                "delete those scopes first, if they are what should go.",
+            ])),
+        Self::DeletingThisMachinesScope { scope } => Explanation::stop("deleting_this_machines_scope", self)
+            .teaching(Teaching::new(
+            "that is this machine's own scope",
+            THE_SCOPE_GRAPH,
+            "This flow was about to delete a scope, which means taking its branch off the remote and off this machine.",
+            "It expects the scope to be one this machine does not sync from.",
+            &format!(
+                "Home is materialized from `{scope}`. Deleting it would leave this machine with nothing to sync and nowhere to record a change, and nothing undoes it."
+            ),
+            &[
+                &format!("run `dotsync delete-scope {scope}` from another machine, once this one is gone — that is what deleting a machine's scope is for."),
+                "to stop using dotsync on this machine, leave the scope where it is and stop running dotsync.",
+            ])),
+        Self::ScopeDeletionRefused { scope, reason } => Explanation::stop("scope_deletion_refused", self)
+            .state(vec![reason.clone()])
+            .teaching(Teaching::new(
+            "the remote did not take the deletion",
+            THE_SCOPE_GRAPH,
+            "This flow deletes a scope by taking its branch off the remote first, and off this machine in the same operation.",
+            "It expects the remote to accept that, offering the position the remote was last seen at so that a scope another machine has just published to is not deleted out from under it.",
+            &format!(
+                "The remote said no, so nothing happened: `{scope}` is still on the remote and still on this machine."
+            ),
+            &[
+                &format!("run `dotsync delete-scope {scope}` again — if another machine published to the scope first, this run offers the position it has now."),
+                "if the remote keeps saying the same thing, that is the remote refusing the write rather than a race, and the answer is wherever that refusal comes from.",
             ])),
         Self::ScopeCreationConflict { scope, files } => Explanation::stop("scope_creation_conflict", self)
             .state(vec![format!("scope: {scope}; its parents hold different versions of: {}", files.join(", "))])

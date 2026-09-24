@@ -16,7 +16,9 @@ mod status;
 mod sync;
 mod working_copy;
 
-pub use crate::bootstrap::{create_scope, init, CreatedScope, InitReport};
+pub use crate::bootstrap::{
+    create_scope, delete_scope, init, CreatedScope, DeletedScope, InitReport,
+};
 pub use crate::commit::{commit_and_sync, CommitOptions, CommitReport, RecordedCommit};
 pub use crate::drift::FileState;
 pub use crate::error::{

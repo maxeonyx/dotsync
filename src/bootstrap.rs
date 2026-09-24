@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use jj_lib::backend::Signature;
@@ -13,8 +15,9 @@ use crate::home::Home;
 use crate::machine::{detect_machine, machine_signature, MachineIdentity};
 use crate::paths::DotsyncPaths;
 use crate::repo::{
-    add_origin_remote, default_settings, fetch_origin, load_repo_direct, push_scope_updates,
-    scope_head, scope_head_commit, PushReport,
+    add_origin_remote, default_settings, delete_scope_branch, fetch_origin, load_repo_direct,
+    managed_tree_entries, push_scope_updates, scope_head, scope_head_commit, scope_head_tree,
+    PushReport,
 };
 use crate::scope_graph::{self, creation_description, ScopeGraph, ROOT_SCOPE};
 use crate::session::{in_session, Run, Session};
@@ -34,6 +37,14 @@ pub struct CreatedScope {
     pub scope: String,
     pub parents: Vec<String>,
     pub push: PushReport,
+}
+
+/// What `delete-scope` did. The files are the ones only that scope held, which
+/// are the ones nothing in the fleet has any more.
+#[derive(Debug, Clone)]
+pub struct DeletedScope {
+    pub scope: String,
+    pub files_gone: Vec<PathBuf>,
 }
 
 /// Unlike every other command, `init` cannot carry on against a last-fetched
@@ -281,6 +292,81 @@ pub async fn create_scope(
         })
     })
     .await
+}
+
+/// `dotsync delete-scope`: the other half of what can be done to the graph.
+///
+/// Only a scope nothing hangs off can go, and there are two ways something
+/// hangs off one — a scope below it, and this machine. Both are refused, so
+/// what is left is a leaf somebody else's machine had, or one no machine ever
+/// joined.
+pub async fn delete_scope(
+    paths: &DotsyncPaths,
+    scope: &str,
+) -> Run<Result<DeletedScope, DotsyncError>> {
+    in_session(paths, async |session, _paths| {
+        // A paused cascade has scopes half cascaded, and a scope that is about
+        // to stop existing may be one of them — so the pause has to be
+        // resolved first, for the reason a commit does.
+        crate::pause::reject_commit_if_paused(session, session.machine_scope()).await?;
+        session.fetch().await?;
+
+        let graph = session.graph().clone();
+        let Some(target) = graph.get(scope) else {
+            return Err(DotsyncError::InvalidScope {
+                scope: scope.to_string(),
+            });
+        };
+        if scope == session.machine_scope() {
+            return Err(DotsyncError::DeletingThisMachinesScope {
+                scope: scope.to_string(),
+            });
+        }
+        if !target.is_leaf() {
+            return Err(DotsyncError::ScopeHasChildren {
+                scope: scope.to_string(),
+                children: target.children.clone(),
+            });
+        }
+
+        // Read before the scope goes, because afterwards there is no tree to
+        // ask. Nothing this machine syncs from is moving, so home is not
+        // touched and there is nothing to sync.
+        let files_gone = files_only_on(session.repo().as_ref(), &graph, scope).await?;
+        delete_scope_branch(session, scope).await?;
+
+        Ok(DeletedScope {
+            scope: scope.to_string(),
+            files_gone,
+        })
+    })
+    .await
+}
+
+/// The paths a scope holds that no other scope holds — what no machine has any
+/// more once the scope goes.
+///
+/// Every other scope rather than this one's parents: a file can have been
+/// committed to two scopes separately, and then deleting one of them takes
+/// nothing away from the machines reading the other.
+async fn files_only_on(
+    repo: &dyn jj_lib::repo::Repo,
+    graph: &ScopeGraph,
+    scope: &str,
+) -> Result<Vec<PathBuf>, DotsyncError> {
+    let Some(tree) = scope_head_tree(repo, scope).await? else {
+        return Ok(Vec::new());
+    };
+    let mut gone: BTreeSet<PathBuf> = managed_tree_entries(&tree)?.into_keys().collect();
+    for other in graph.names().filter(|other| *other != scope) {
+        let Some(tree) = scope_head_tree(repo, other).await? else {
+            continue;
+        };
+        for path in managed_tree_entries(&tree)?.into_keys() {
+            gone.remove(&path);
+        }
+    }
+    Ok(gone.into_iter().collect())
 }
 
 /// The heads a new scope hangs off, refusing anything that is not a scope this

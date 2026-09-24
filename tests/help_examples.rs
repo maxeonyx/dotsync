@@ -35,6 +35,7 @@ fn help_examples() {
             fixture.command("git", &["init", "--bare", "<url>"]);
         })
         .page(&["create-scope"], |_fixture| {})
+        .page(&["delete-scope"], |_fixture| {})
         .page(&["commit"], |_fixture| {})
         .page(&["discard"], |_fixture| {})
         .page(&["continue"], |_fixture| {})
