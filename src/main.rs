@@ -557,11 +557,9 @@ async fn run_delete_scope(scope: String) -> Result<CliOutput, DotsyncError> {
                 "scope": report.scope,
                 "files_gone": render::display_paths(&report.files_gone),
             }),
-            format!(
-                "dotsync: deleted scope {} and the {} file(s) only it had",
-                report.scope,
-                report.files_gone.len()
-            ),
+            // What went with it is the note above this line, listed path by
+            // path, so a count here would be the same fact twice.
+            format!("dotsync: deleted scope {}", report.scope),
         )
         .with_notes(render::files_gone_notes(&report.scope, &report.files_gone))
     }))
