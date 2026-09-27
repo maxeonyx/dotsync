@@ -508,3 +508,71 @@ fn a_machine_holding_an_unpublished_cascade_does_not_bring_a_deleted_scope_back(
         "and the work that machine was holding still has to get out"
     );
 }
+
+/// Joining a fleet used to overwrite whatever home already held at a path the
+/// scope has — the new machine's own config, which nothing had ever recorded —
+/// so agents backed home up by hand before running `init`. A path where home
+/// and the scope disagree is the same collision a sync stops on: home is left
+/// exactly as it was, both versions are shown, and the machine is joined. The
+/// way on is to decide: keep home's version (`continue`), or take the scope's
+/// (`discard`).
+#[test]
+fn joining_a_fleet_keeps_home_files_that_differ_from_it() {
+    let harness = TestHarness::new();
+    let (machine_a, _machine_b) = two_synced_machines(&harness);
+    machine_a.write_file(".config/fish/config.fish", "set -g fish_greeting shared\n");
+    machine_a.write_file(".gitconfig", "[user]\nname = Shared\n");
+    machine_a.run_ok("dotsync commit linux -m 'shared' -- .config/fish/config.fish .gitconfig");
+
+    let newcomer = harness.machine("machine-c", "linux", "goof-c");
+    newcomer.write_file(".config/fish/config.fish", "set -g fish_greeting mine\n");
+    newcomer.write_file(".gitconfig", "[user]\nname = Shared\n");
+
+    let stopped = newcomer.run_expecting(
+        &format!(
+            "dotsync init {} --parent linux --output json",
+            newcomer.remote_dir.to_str().unwrap()
+        ),
+        1,
+    );
+    let payload = parse_stdout_json(&stopped);
+    let conflicted: Vec<&str> = payload["conflicts"]
+        .as_array()
+        .expect("the collision is presented like any other")
+        .iter()
+        .map(|file| file["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(conflicted, vec![".config/fish/config.fish"], "{payload:#}");
+    assert_eq!(
+        newcomer.read_file(".config/fish/config.fish"),
+        "set -g fish_greeting mine\n",
+        "home is left exactly as it was"
+    );
+
+    let scopes = parse_stdout_json(&newcomer.run_ok("dotsync scopes --output json"));
+    assert!(
+        scopes["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scope| scope["name"] == "goof-c"),
+        "the machine joined even though its first sync stopped\n{scopes:#}"
+    );
+
+    newcomer.run_ok("dotsync continue");
+    assert_eq!(
+        newcomer.read_file(".config/fish/config.fish"),
+        "set -g fish_greeting mine\n"
+    );
+    let status = parse_stdout_json(&newcomer.run_ok("dotsync status --output json"));
+    assert_eq!(
+        status["changes"][0]["path"], ".config/fish/config.fish",
+        "the kept version is a local change, to commit or discard\n{status:#}"
+    );
+
+    newcomer.run_ok("dotsync discard .config/fish/config.fish");
+    assert_eq!(
+        newcomer.read_file(".config/fish/config.fish"),
+        "set -g fish_greeting shared\n"
+    );
+}
