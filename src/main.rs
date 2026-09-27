@@ -1,8 +1,10 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dotsync::{
-    abort_paused_cascade, commit_and_sync, continue_after_conflict, create_scope, delete_scope,
-    diff_home, discard, init, status, sync, view, CommitOptions, DiffReport, DotsyncError,
-    DotsyncPaths, Explanation, MachineState, Resumed, Run, UnreachableRemote, ViewAnswer,
+    abort_paused_cascade, commit_and_sync, compare, continue_after_conflict, create_scope,
+    delete_scope, diff_home, discard, files, init, place, scopes, show, status, sync,
+    CommitOptions, DiffReport, DotsyncError, DotsyncPaths, Explanation, FileRow, FilesQuery,
+    MachineEffect, MachineState, PlacementOptions, Planned, Resumed, Run, ScopeInfo, Standing,
+    UnreachableRemote,
 };
 mod render;
 use serde_json::json;
@@ -12,15 +14,27 @@ use std::path::PathBuf;
 
 const TOP_LEVEL_ABOUT: &str = "Agent-first dotfile sync";
 
-const TOP_LEVEL_LONG_ABOUT: &str = "dotsync keeps a hidden repo at ~/.local/share/dotsync/repo and syncs the current machine scope into your home directory.
+const TOP_LEVEL_LONG_ABOUT: &str = "dotsync keeps your dotfiles in a hidden repo of scopes at ~/.local/share/dotsync/repo, and syncs this machine's scope into your home directory. You never touch that repo: every question about it and every change to it is a dotsync command.
 
-A scope is a branch in the dotsync DAG. Shared config lives on ancestor scopes such as `all` or `linux`; machine-specific config lives on leaf scopes such as your hostname.
+A scope is a layer of config. Shared config lives on scopes such as `all` or `linux`; every scope inherits what the scopes above it hold, and a machine's own scope is the one at the bottom. A scope can add a file, override one it inherits with its own version, or remove one. Any scope can be read from any machine.
 
-Basic workflow:
-  - plain `dotsync` syncs your current machine scope into home
-  - edit files in home, then run `dotsync commit <scope> -m \"message\" <path>...` to record the change on the right scope
-  - run `dotsync continue` if a cascade pauses for conflicts
-  - run `dotsync abort` to discard a paused cascade";
+Everyday:
+  - plain `dotsync` syncs your current machine scope into home, with whatever other machines published
+  - edit files in home, then run `dotsync commit <scope> -m \"message\" <path>...` to record the change on this machine's scope or one above it
+  - `dotsync status` lists what you changed here and what is incoming
+
+Reading the fleet:
+  - `dotsync scopes` shows the scopes, where each hangs, and the machines each reaches
+  - `dotsync files [--own] [--scope <scope>] [<path>...]` shows what each scope holds, and whether it inherited, added, overrode or removed it
+  - `dotsync show <scope> <path>` prints a file as one scope holds it
+  - `dotsync diff <scope>` shows what a scope changes over what it inherits; `dotsync diff <scope> <scope>` compares two
+
+Rearranging config, on any scope, with content taken from the repo:
+  - `dotsync move <path>... --from <scope> --to <scope> -m \"message\"` gives the second scope the first one's version
+  - `dotsync drop <path>... --from <scope> -m \"message\"` makes a scope take what it inherits
+  - add `--dry-run` to any write to see what it would change on each machine first
+
+When a merge stops, resolve it in home and run `dotsync continue`, or run `dotsync abort`.";
 
 const TOP_LEVEL_AFTER_HELP: &str = "Exit codes:
   0  the command did what it says
@@ -40,7 +54,9 @@ const INIT_LONG_ABOUT: &str = "REMOTE_URL is the git remote that stores your dot
 
 `dotsync init` clones the repo into ~/.local/share/dotsync/repo, creates this machine's own scope, and syncs it into home.
 
-Joining a remote that already has scopes means saying where this machine's config comes from: `--parent work-linux`. A hostname cannot tell a `home-linux` from a `work-linux`, and a scope is created where its parents are and never moved, so this is the one moment that answer can be given. Run `dotsync view` on another machine to see the scopes there are. Give `--parent` more than once for a machine that inherits from several scopes.
+Joining a remote that already has scopes means saying where this machine's config comes from: `--parent work-linux`. A hostname cannot tell a `home-linux` from a `work-linux`, so this is the one moment that answer can be given. Run `dotsync init <remote-url>` without `--parent` to clone the fleet and stop: `dotsync scopes`, `dotsync files` and `dotsync show` then read it, and `dotsync init --parent <scope>` finishes joining. Give `--parent` more than once for a machine that inherits from several scopes.
+
+A file home already holds that the scope holds differently is never overwritten: the first sync stops and shows both versions. Keep yours with `dotsync continue`, or take the scope's with `dotsync discard <path>`.
 
 A remote with no scopes on it yet has nothing to choose from: this machine gets the root scope `all`, a scope for its OS, and its own scope under that.
 
@@ -54,7 +70,7 @@ Creating and deleting are the only things that can happen to the scope graph. No
 
 Machines join a scope with `dotsync init <remote-url> --parent <name>`, so a scope created now is for the machines that join under it.
 
-`-m` says what belongs on the scope, for whoever reads `dotsync view` later. A name that says it already — `hyprland`, `work` — needs nothing.";
+`-m` says what belongs on the scope, for whoever reads `dotsync scopes` later. A name that says it already — `hyprland`, `work` — needs nothing.";
 
 const DELETE_SCOPE_ABOUT: &str = "Delete a scope whose machine is gone";
 
@@ -93,6 +109,37 @@ const DISCARD_LONG_ABOUT: &str = "PATHS are home-relative files whose local chan
 This is the other way a local change ends. `dotsync commit` makes it everybody's; `dotsync discard` decides against it. Deleting the file yourself is neither — a deletion is a local change too, so home would come back empty rather than canonical.
 
 Every path must be one of the changes `dotsync status` lists. Naming anything else is a stop rather than a run that discarded nothing, because discarding cannot be undone.";
+
+const MOVE_ABOUT: &str =
+    "Give a scope another scope's version of a file, and take it off the first";
+
+const MOVE_LONG_ABOUT: &str = "PATHS are repo paths whose version on `--from` should live on `--to` instead. `--to` holds that version afterwards, and `--from` holds nothing of its own there: it inherits.
+
+Promote config to a scope several machines share (`--to` above `--from`), narrow it to the scope it belongs on (`--to` below `--from`), or hand it sideways. Any two scopes work, whichever machine runs it, because the content comes from the repo rather than from home.
+
+Every other scope that holds its own version keeps it. So the only machines whose config changes are the ones that took the file from `--from` or will now take it from `--to` — and the run lists them, file by file. `--dry-run` lists them without changing anything.";
+
+const DROP_ABOUT: &str = "Make a scope take what it inherits instead of its own version";
+
+const DROP_LONG_ABOUT: &str = "PATHS are repo paths where `--from` holds a version of its own: a file it added, overrode, or removed. Afterwards it holds whatever the scopes above it hold there — the shared version for an override, nothing for a file it added, the inherited file again for one it removed.
+
+Works on any scope, whichever machine runs it. Every other scope that holds its own version keeps it, and the run lists the machines whose config changed. `--dry-run` lists them without changing anything.";
+
+const SCOPES_ABOUT: &str = "Show the scopes, where each hangs, and the machines each reaches";
+
+const FILES_ABOUT: &str = "Show what each scope holds, and how it relates to what it inherits";
+
+const FILES_LONG_ABOUT: &str = "One row per scope and path. Each says whether the scope inherited it, added it, overrode what it inherits with its own version, or removed it; where an inherited version comes from; and a content id that is equal exactly when two versions are identical.
+
+`--own` keeps only what each scope adds, overrides or removes — what is local to each machine, and what could be shared. `--scope` narrows to named scopes; PATHS narrow to those paths and whatever is under them.";
+
+const SHOW_ABOUT: &str = "Print a file as one scope holds it";
+
+const DIFF_ABOUT: &str = "Show your local changes, what a scope changes, or how two scopes differ";
+
+const DIFF_LONG_ABOUT: &str = "With no scope: the diffs of the managed files you changed in home, the same list `dotsync status` shows. Exits 1 when there are any.
+
+With one scope: what that scope changes over what it inherits. With two: how the second differs from the first. PATHS after `--` narrow either to those paths and whatever is under them. Exits 1 when there are differences.";
 
 const CONTINUE_ABOUT: &str = "Continue a paused merge cascade after resolving conflicts";
 const ABORT_ABOUT: &str = "Abort a paused merge cascade and restore the pre-pause state";
@@ -159,9 +206,53 @@ enum Command {
         #[arg(short = 'm', long = "message")]
         message: String,
 
+        /// Say what the commit would change on each machine, and change nothing
+        #[arg(long)]
+        dry_run: bool,
+
         /// Home-relative file or directory paths to commit; omit to commit
         /// every managed file this machine has changed
         paths: Vec<PathBuf>,
+    },
+    #[command(name = "move", about = MOVE_ABOUT, long_about = MOVE_LONG_ABOUT)]
+    Move {
+        /// Repo paths to move
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+
+        /// Scope whose own version moves
+        #[arg(long)]
+        from: String,
+
+        /// Scope that holds it afterwards
+        #[arg(long)]
+        to: String,
+
+        /// Commit message
+        #[arg(short = 'm', long = "message")]
+        message: String,
+
+        /// Say what the move would change on each machine, and change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    #[command(about = DROP_ABOUT, long_about = DROP_LONG_ABOUT)]
+    Drop {
+        /// Repo paths where the scope holds its own version
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+
+        /// Scope that stops holding a version of its own
+        #[arg(long)]
+        from: String,
+
+        /// Commit message
+        #[arg(short = 'm', long = "message")]
+        message: String,
+
+        /// Say what the drop would change on each machine, and change nothing
+        #[arg(long)]
+        dry_run: bool,
     },
     #[command(about = DISCARD_ABOUT, long_about = DISCARD_LONG_ABOUT)]
     Discard {
@@ -175,17 +266,39 @@ enum Command {
     Abort,
     /// Show managed files that differ from the repo
     Status,
-    /// Show line-oriented diffs for managed home files that differ from the repo
-    Diff,
-    /// Show checked-in scope and file state
-    View {
-        /// Scope to inspect
-        #[arg(long)]
-        scope: Option<String>,
+    #[command(about = DIFF_ABOUT, long_about = DIFF_LONG_ABOUT)]
+    Diff {
+        /// No scope for your local changes; one scope for what it changes; two
+        /// to compare them
+        #[arg(num_args = 0..=2)]
+        scopes: Vec<String>,
 
-        /// Repo-relative file path to inspect
+        /// Repo paths to narrow the comparison to
+        #[arg(last = true)]
+        paths: Vec<PathBuf>,
+    },
+    #[command(about = SCOPES_ABOUT)]
+    Scopes,
+    #[command(about = FILES_ABOUT, long_about = FILES_LONG_ABOUT)]
+    Files {
+        /// Repo paths to narrow to, with whatever is under them
+        paths: Vec<PathBuf>,
+
+        /// Only this scope; repeat for several
+        #[arg(long = "scope")]
+        scopes: Vec<String>,
+
+        /// Only what each scope adds, overrides or removes
         #[arg(long)]
-        file: Option<PathBuf>,
+        own: bool,
+    },
+    #[command(about = SHOW_ABOUT)]
+    Show {
+        /// Scope to read the file from
+        scope: String,
+
+        /// Repo path of the file
+        path: PathBuf,
     },
     #[command(external_subcommand)]
     Unknown(Vec<String>),
@@ -453,14 +566,34 @@ async fn dispatch(
         Some(Command::Commit {
             scope,
             message,
+            dry_run,
             paths,
-        }) => run_commit(scope, message, paths).await,
+        }) => run_commit(scope, message, paths, dry_run).await,
+        Some(Command::Move {
+            paths,
+            from,
+            to,
+            message,
+            dry_run,
+        }) => run_place("move", paths, from, Some(to), message, dry_run).await,
+        Some(Command::Drop {
+            paths,
+            from,
+            message,
+            dry_run,
+        }) => run_place("drop", paths, from, None, message, dry_run).await,
         Some(Command::Discard { paths }) => run_discard(paths).await,
         Some(Command::Continue) => run_continue().await,
         Some(Command::Abort) => run_abort().await,
         Some(Command::Status) => run_status().await,
-        Some(Command::Diff) => run_diff().await,
-        Some(Command::View { scope, file }) => run_view(scope, file).await,
+        Some(Command::Diff { scopes, paths }) => match scopes.as_slice() {
+            [] => run_diff().await,
+            [one] => run_compare(one.clone(), None, paths).await,
+            [left, right, ..] => run_compare(left.clone(), Some(right.clone()), paths).await,
+        },
+        Some(Command::Scopes) => run_scopes().await,
+        Some(Command::Files { paths, scopes, own }) => run_files(paths, scopes, own).await,
+        Some(Command::Show { scope, path }) => run_show(scope, path).await,
         // Clap's `external_subcommand`, so that an unknown command is refused
         // in dotsync's words and in the output format that was asked for.
         Some(Command::Unknown(args)) => {
@@ -495,18 +628,21 @@ async fn run_init(
     parents: Vec<String>,
     context: CliContext,
 ) -> Result<CliOutput, DotsyncError> {
+    let paths = discover_paths()?;
     let remote_url = match remote_url {
-        Some(remote_url) => remote_url,
+        Some(remote_url) => Some(remote_url),
+        // A clone an earlier `init` kept is what this one joins from, so it
+        // needs no URL.
+        None if paths.repo_root.exists() => None,
         // A terminal can be asked for the URL. A script cannot, so it gets
         // the usage text instead — before anything opens the repo.
         None if context.interactive_terminal => match prompt_init_remote_url() {
-            Ok(remote_url) => remote_url,
+            Ok(remote_url) => Some(remote_url),
             Err(message) => return Ok(usage_output(&message)),
         },
         None => return Ok(usage_output(INIT_REMOTE_URL_USAGE)),
     };
-    let paths = discover_paths()?;
-    let run = init(&paths, &remote_url, &parents).await;
+    let run = init(&paths, remote_url.as_deref(), &parents).await;
     Ok(output_of("dotsync init", run, |report| {
         render::synced_output(
             "init",
@@ -701,7 +837,7 @@ async fn run_status() -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     let run = status(&paths).await;
     Ok(output_of("dotsync status", run, |report| {
-        with_machine_state(
+        let answer = reprinting_any_conflict(
             SuccessOutput::message(
                 json!({
                     "status": "ok",
@@ -712,7 +848,8 @@ async fn run_status() -> Result<CliOutput, DotsyncError> {
                 render_status_human(&report),
             ),
             &report.machine,
-        )
+        );
+        with_machine_state(answer, &report.machine)
     }))
 }
 
@@ -743,74 +880,285 @@ async fn run_diff() -> Result<CliOutput, DotsyncError> {
     }))
 }
 
-async fn run_view(scope: Option<String>, file: Option<PathBuf>) -> Result<CliOutput, DotsyncError> {
+async fn run_scopes() -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let run = view(&paths, scope.as_deref(), file.as_deref()).await;
-    Ok(output_of("dotsync view", run, |report| {
-        // What is true of the machine is not true of the question asked, so it
-        // is added once here rather than in each of the four shapes.
+    let run = scopes(&paths).await;
+    Ok(output_of("dotsync scopes", run, |report| {
         let machine = report.machine;
-        let answer = match report.found {
-            ViewAnswer::FileContents {
-                scope,
-                file,
-                contents,
-            } => SuccessOutput::stdout(
-                json!({
-                    "status": "ok",
-                    "command": "view",
-                    "scope": scope,
-                    "path": render::display_path(&file),
-                    "contents": String::from_utf8_lossy(&contents),
-                }),
-                String::from_utf8_lossy(&contents).into_owned(),
+        let answer = SuccessOutput::stdout(
+            json!({
+                "status": "ok",
+                "command": "scopes",
+                "scopes": report.scopes.iter().map(|scope| json!({
+                    "name": scope.name,
+                    "parents": scope.parents,
+                    "children": scope.children,
+                    "machine": scope.is_machine(),
+                    "machines": scope.machines,
+                    "description": scope.description,
+                })).collect::<Vec<_>>(),
+            }),
+            render_lines(
+                report
+                    .scopes
+                    .iter()
+                    .map(|scope| render_scope_line(scope, &machine.machine_scope)),
             ),
-            ViewAnswer::Scope { scope, files } => SuccessOutput::stdout(
-                json!({
-                    "status": "ok",
-                    "command": "view",
-                    "scope": scope,
-                    "files": files.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
-                }),
-                render_view_scope_stdout(&scope, &files),
-            ),
-            ViewAnswer::FileScopes {
-                file,
-                scopes,
-                owner,
-            } => SuccessOutput::stdout(
-                json!({
-                    "status": "ok",
-                    "command": "view",
-                    "file": render::display_path(&file),
-                    "scopes": scopes,
-                    "owner": owner,
-                }),
-                render_view_file_scopes_stdout(&file, &scopes, owner.as_deref()),
-            ),
-            ViewAnswer::Overview { scopes, files } => SuccessOutput::stdout(
-                json!({
-                    "status": "ok",
-                    "command": "view",
-                    "scopes": scopes.iter().map(|scope| json!({
-                        "name": scope.name,
-                        "parents": scope.parents,
-                        "description": scope.description,
-                    })).collect::<Vec<_>>(),
-                    "files": files.iter().map(|path| render::display_path(path)).collect::<Vec<_>>(),
-                }),
-                render_view_overview_stdout(&scopes, &files, &machine.machine_scope),
+        );
+        with_machine_state(answer, &machine)
+    }))
+}
+
+async fn run_files(
+    only: Vec<PathBuf>,
+    scopes: Vec<String>,
+    own: bool,
+) -> Result<CliOutput, DotsyncError> {
+    let paths = discover_paths()?;
+    let run = files(
+        &paths,
+        FilesQuery {
+            scopes,
+            own,
+            paths: only.clone(),
+        },
+    )
+    .await;
+    Ok(output_of("dotsync files", run, |report| {
+        // An empty table reads exactly like a bug, and the commonest reason it
+        // is empty is a typo — so it says it is an answer.
+        let nothing_there = match report.rows.is_empty() && !only.is_empty() {
+            true => vec![format!(
+                "dotsync: no scope holds anything at {}",
+                only.iter()
+                    .map(|path| render::display_path(path))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )],
+            false => Vec::new(),
+        };
+        let answer = SuccessOutput::stdout(
+            json!({
+                "status": "ok",
+                "command": "files",
+                "files": report.rows.iter().map(|row| json!({
+                    "scope": row.scope,
+                    "path": render::display_path(&row.path),
+                    "standing": row.standing.code(),
+                    "kind": row.kind.map(|kind| kind.code()),
+                    "content": row.content,
+                    "origin": row.origin,
+                })).collect::<Vec<_>>(),
+            }),
+            render_files_human(&report.rows),
+        )
+        .with_notes(nothing_there);
+        with_machine_state(answer, &report.machine)
+    }))
+}
+
+async fn run_show(scope: String, path: PathBuf) -> Result<CliOutput, DotsyncError> {
+    let paths = discover_paths()?;
+    let run = show(&paths, &scope, &path).await;
+    Ok(output_of("dotsync show", run, |report| {
+        let text = String::from_utf8(report.contents.clone());
+        let answer = SuccessOutput::stdout(
+            json!({
+                "status": "ok",
+                "command": "show",
+                "scope": report.row.scope,
+                "path": render::display_path(&report.row.path),
+                "standing": report.row.standing.code(),
+                "kind": report.row.kind.map(|kind| kind.code()),
+                "origin": report.row.origin,
+                "content": report.row.content,
+                "utf8": text.is_ok(),
+                "contents": String::from_utf8_lossy(&report.contents),
+            }),
+            String::from_utf8_lossy(&report.contents).into_owned(),
+        );
+        with_machine_state(answer, &report.machine)
+    }))
+}
+
+async fn run_compare(
+    left: String,
+    right: Option<String>,
+    only: Vec<PathBuf>,
+) -> Result<CliOutput, DotsyncError> {
+    let paths = discover_paths()?;
+    let run = compare(&paths, &left, right.as_deref(), &only).await;
+    Ok(output_of("dotsync diff", run, |report| {
+        let diffs: Vec<(String, String)> = report
+            .changes
+            .iter()
+            .map(|change| {
+                (
+                    render::display_path(&change.path),
+                    render::unified_diff(
+                        &report.left,
+                        change.left.as_deref(),
+                        &report.right,
+                        change.right.as_deref(),
+                    ),
+                )
+            })
+            .collect();
+        let human = match diffs.is_empty() {
+            true => String::new(),
+            false => render_lines(
+                diffs
+                    .iter()
+                    .flat_map(|(path, diff)| [path.clone(), diff.clone()]),
             ),
         };
-
-        with_machine_state(reprinting_any_conflict(answer, &machine), &machine)
+        let mut answer = SuccessOutput::stdout(
+            json!({
+                "status": "ok",
+                "command": "diff",
+                "left": report.left,
+                "right": report.right,
+                "changes": report.changes.iter().zip(&diffs).map(|(change, (path, diff))| json!({
+                    "path": path,
+                    "left_kind": change.left_kind.map(|kind| kind.code()),
+                    "right_kind": change.right_kind.map(|kind| kind.code()),
+                    "diff": diff,
+                })).collect::<Vec<_>>(),
+            }),
+            human,
+        );
+        if report.changes.is_empty() {
+            answer.notes.push(format!(
+                "dotsync: no differences between {} and {}",
+                report.left, report.right
+            ));
+        }
+        // The same contract as `dotsync diff` with no scope: 1 means it found
+        // differences, and the payload's `status` says it was not a stop.
+        answer.exit_code = if report.changes.is_empty() { 0 } else { 1 };
+        with_machine_state(answer, &report.machine)
     }))
+}
+
+async fn run_place(
+    command: &'static str,
+    place_paths: Vec<PathBuf>,
+    from: String,
+    to: Option<String>,
+    message: String,
+    dry_run: bool,
+) -> Result<CliOutput, DotsyncError> {
+    let paths = discover_paths()?;
+    let run = place(
+        &paths,
+        PlacementOptions {
+            paths: place_paths,
+            from: from.clone(),
+            to: to.clone(),
+            message,
+            dry_run,
+        },
+    )
+    .await;
+    let invocation = match command {
+        "move" => "dotsync move",
+        _ => "dotsync drop",
+    };
+    Ok(output_of(invocation, run, |report| {
+        let headline = match (&to, dry_run) {
+            (Some(to), true) => format!("dotsync: moving from `{from}` to `{to}` would change what follows; nothing was changed"),
+            (Some(to), false) => format!("dotsync: moved from `{from}` to `{to}`"),
+            (None, true) => format!("dotsync: dropping `{from}`'s own version would change what follows; nothing was changed"),
+            (None, false) => format!("dotsync: `{from}` now takes what it inherits"),
+        };
+        let mut output = match &report.carried_out {
+            Some(done) => {
+                let mut output =
+                    render::synced_output(command, headline, &done.sync, Some(&done.push));
+                output.json["dry_run"] = json!(false);
+                output
+            }
+            None => SuccessOutput::message(
+                json!({
+                    "status": "ok",
+                    "command": command,
+                    "machine_scope": report.machine_scope,
+                    "dry_run": true,
+                }),
+                headline,
+            ),
+        };
+        output.json["from"] = json!(from);
+        if let Some(to) = &to {
+            output.json["to"] = json!(to);
+        }
+        output.json["paths"] = json!(render::display_paths(&report.paths));
+        with_plan(output, &report.planned)
+    }))
+}
+
+/// What a write changes on each machine — and, for a dry run, where it would
+/// stop — in both channels. One function for every write, because "which
+/// machines get this untested" is the same question whichever write asks it.
+fn with_plan(mut output: SuccessOutput, planned: &Planned) -> SuccessOutput {
+    output.json["effect"] = json!(planned
+        .effect
+        .iter()
+        .map(|machine| json!({
+            "machine": machine.machine,
+            "changes": machine.changes.iter().map(|change| json!({
+                "path": render::display_path(&change.path),
+                "change": change.change.code(),
+            })).collect::<Vec<_>>(),
+        }))
+        .collect::<Vec<_>>());
+    output.notes.extend(render_effect_notes(&planned.effect));
+    if let Some(stop) = &planned.stops_at {
+        output.json["stops_at"] = json!({
+            "scope": stop.scope,
+            "conflicts": stop.conflicts.iter().map(render::render_conflict_json).collect::<Vec<_>>(),
+        });
+        output.notes.push(format!(
+            "dotsync: it would stop at `{}`, where these file(s) would not merge",
+            stop.scope
+        ));
+        output
+            .notes
+            .extend(render::render_conflicts_human(&stop.conflicts));
+    }
+    output
+}
+
+fn render_effect_notes(effect: &[MachineEffect]) -> Vec<String> {
+    if effect.is_empty() {
+        return vec!["dotsync: no machine's config changes".to_string()];
+    }
+    let mut notes = vec![format!(
+        "dotsync: config changes on {} machine(s):",
+        effect.len()
+    )];
+    for machine in effect {
+        notes.push(format!("  {}", machine.machine));
+        for change in &machine.changes {
+            let marker = match change.change {
+                dotsync::Change::Added => "+",
+                dotsync::Change::Modified => "M",
+                dotsync::Change::Removed => "-",
+            };
+            notes.push(format!(
+                "    {marker} {}",
+                render::display_path(&change.path)
+            ));
+        }
+    }
+    notes
 }
 
 async fn run_commit(
     scope: String,
     message: String,
     commit_paths: Vec<PathBuf>,
+    dry_run: bool,
 ) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     // Whether the caller named anything, which decides what a commit that
@@ -822,6 +1170,7 @@ async fn run_commit(
             scope,
             message,
             paths: commit_paths,
+            dry_run,
         },
     )
     .await;
@@ -834,6 +1183,8 @@ async fn run_commit(
 /// the same event: one wrote history and synced home, the other did neither.
 /// The fields that only one of them can honestly fill are only on that one.
 fn render_commit_success(report: dotsync::CommitReport, named_paths: bool) -> SuccessOutput {
+    let dry_run =
+        report.push.is_none() && report.recorded.as_ref().is_some_and(|r| r.sync.is_none());
     let mut json = json!({
         "status": "ok",
         "command": "commit",
@@ -841,9 +1192,16 @@ fn render_commit_success(report: dotsync::CommitReport, named_paths: bool) -> Su
         "scope": report.committed_scope,
         "machine_scope": report.machine_scope,
         "skipped_paths": render::skipped_paths_json(&report.skipped),
-        "unpushed_scopes": report.push.unpushed_scopes(),
     });
+    if let Some(push) = &report.push {
+        json["unpushed_scopes"] = json!(push.unpushed_scopes());
+    }
     let skipped = render::skipped_path_notes(&report.skipped);
+    let push_notes = report
+        .push
+        .as_ref()
+        .map(render::push_notes)
+        .unwrap_or_default();
 
     let Some(recorded) = report.recorded else {
         // A commit that named nothing records only changes to files dotsync
@@ -869,44 +1227,103 @@ fn render_commit_success(report: dotsync::CommitReport, named_paths: bool) -> Su
             skipped
                 .into_iter()
                 .chain(new_file_advice)
-                .chain(render::push_notes(&report.push))
+                .chain(push_notes)
                 .collect(),
         );
     };
 
-    json["synced_files"] = json!(render::display_paths(&recorded.sync.synced_paths));
+    json["dry_run"] = json!(dry_run);
     json["newly_tracked"] = json!(render::display_paths(&recorded.newly_tracked));
-    SuccessOutput::message(
+    let Some(sync) = &recorded.sync else {
+        let output = SuccessOutput::message(
+            json,
+            format!(
+                "dotsync: committing to {} would change what follows; nothing was changed",
+                report.committed_scope
+            ),
+        )
+        .with_notes(
+            render::newly_tracked_notes(&recorded.newly_tracked)
+                .into_iter()
+                .chain(skipped)
+                .collect(),
+        );
+        return with_plan(output, &recorded.planned);
+    };
+    json["synced_files"] = json!(render::display_paths(&sync.synced_paths));
+    let output = SuccessOutput::message(
         json,
         format!(
             "dotsync: committed {} and synced {} file(s)",
             report.committed_scope,
-            recorded.sync.synced_paths.len()
+            sync.synced_paths.len()
         ),
     )
     .with_notes(
         render::newly_tracked_notes(&recorded.newly_tracked)
             .into_iter()
             .chain(skipped)
-            .chain(render::success_notes(
-                &recorded.sync.drifts,
-                Some(&report.push),
-            ))
+            .chain(render::success_notes(&sync.drifts, report.push.as_ref()))
             .collect(),
-    )
+    );
+    with_plan(output, &recorded.planned)
 }
 
-/// The conflict a machine is paused on, printed again by `view`.
+/// The fleet table for a person: scope by scope, one marker per path.
+///
+/// An own version that another scope also holds, byte for byte, says so —
+/// that pair is the commonest promotion candidate there is.
+fn render_files_human(rows: &[FileRow]) -> String {
+    let mut lines = Vec::new();
+    let mut current: Option<&str> = None;
+    for row in rows {
+        if current != Some(row.scope.as_str()) {
+            lines.push(row.scope.clone());
+            current = Some(row.scope.as_str());
+        }
+        let marker = match row.standing {
+            Standing::Inherited => "=",
+            Standing::Added => "A",
+            Standing::Overridden => "M",
+            Standing::Removed => "D",
+        };
+        let mut line = format!("  {marker} {}", render::display_path(&row.path));
+        match row.standing {
+            Standing::Inherited => line.push_str(&format!("  (from {})", row.origin.join(", "))),
+            Standing::Removed => {}
+            _ => {
+                let twins: Vec<&str> = rows
+                    .iter()
+                    .filter(|other| {
+                        other.scope != row.scope
+                            && other.path == row.path
+                            && other.standing.is_own()
+                            && other.content.is_some()
+                            && other.content == row.content
+                    })
+                    .map(|other| other.scope.as_str())
+                    .collect();
+                if !twins.is_empty() {
+                    line.push_str(&format!("  (same as {})", twins.join(", ")));
+                }
+            }
+        }
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    render_lines(lines)
+}
+
+/// The conflict a machine is paused on, printed again by `status`.
 ///
 /// Every version of every conflicted file exists nowhere else: dotsync writes
 /// no markers into home, and neither side is on a scope this machine syncs
 /// from. So the pause message is the only copy, and an agent that lost it — a
-/// new session, a scrolled terminal — needs somewhere to ask. `view` is that
-/// somewhere, because it already answers "what is checked in" and the pause is
-/// derived, so it is correct whenever it is asked.
-///
-/// `status` and `diff` name the pause and stop there. `status` is the concise
-/// one, and three versions of every conflicted file is not concise.
+/// new session, a scrolled terminal — needs somewhere to ask. `status` is that
+/// somewhere because it is the command an agent runs by reflex, and the pause
+/// is derived, so it is correct whenever it is asked.
 fn reprinting_any_conflict(answer: SuccessOutput, machine: &MachineState) -> SuccessOutput {
     let Some(paused) = &machine.paused_cascade else {
         return answer;
@@ -931,10 +1348,9 @@ fn reprinting_any_conflict(answer: SuccessOutput, machine: &MachineState) -> Suc
 /// What `status`, `diff` and `view` say about the machine, whatever they were
 /// asked, in both channels.
 ///
-/// One function for all three commands and all four of `view`'s shapes,
-/// because these facts are true of the machine rather than of the question:
-/// adding them per command per shape is how one of them came to carry a fact
-/// the other two did not. `paused_cascade` is present only when there is one,
+/// One function for every read, because these facts are true of the machine
+/// rather than of the question: adding them per command is how one command
+/// came to carry a fact the others did not. `paused_cascade` is present only when there is one,
 /// the same shape as `remote_unreachable` and for the same reason — a machine
 /// with no pause and a run with nothing to say about one are the same answer
 /// to whoever reads that field.
@@ -1024,61 +1440,6 @@ fn render_diff_human(report: &DiffReport) -> String {
     lines.join("\n")
 }
 
-fn render_view_overview_stdout(
-    scopes: &[dotsync::ScopeInfo],
-    files: &[PathBuf],
-    machine_scope: &str,
-) -> String {
-    render_lines(
-        std::iter::once("Scopes".to_string())
-            .chain(
-                scopes
-                    .iter()
-                    .map(|scope| render_scope_line(scope, machine_scope)),
-            )
-            .chain([String::new(), "Files".to_string()])
-            .chain(files.iter().map(|path| render::display_path(path))),
-    )
-}
-
-fn render_view_scope_stdout(scope: &str, files: &[PathBuf]) -> String {
-    render_lines(
-        std::iter::once(format!("Scope {scope}"))
-            .chain(files.iter().map(|path| render::display_path(path))),
-    )
-}
-
-/// Which scopes hold a file — including none of them, which used to print two
-/// headings with nothing between them. That is the answer to the commonest
-/// reason for asking, a typo, and it read like a bug instead.
-///
-/// Still exit 0: "no scope holds this" is an answer to the question asked.
-/// Asking for the *contents* of a file on a named scope is a different
-/// question, and having none to print is a stop.
-fn render_view_file_scopes_stdout(
-    path: &std::path::Path,
-    scopes: &[String],
-    owner: Option<&str>,
-) -> String {
-    let path = render::display_path(path);
-    let Some(owner) = owner else {
-        return render_lines([
-            format!("File {path}"),
-            format!("No scope holds {path}."),
-            "Run `dotsync view` to see every file the scopes do hold.".to_string(),
-        ]);
-    };
-    render_lines(
-        [
-            format!("File {path}"),
-            format!("Owned by {owner}; every other scope below has it from the cascade."),
-            "Scopes".to_string(),
-        ]
-        .into_iter()
-        .chain(scopes.iter().cloned()),
-    )
-}
-
 fn render_lines(lines: impl IntoIterator<Item = String>) -> String {
     let mut lines = lines.into_iter().collect::<Vec<_>>();
     lines.push(String::new());
@@ -1087,10 +1448,10 @@ fn render_lines(lines: impl IntoIterator<Item = String>) -> String {
 
 /// One scope, its parents, and whether it is the machine reading this.
 ///
-/// The marker is the answer to "where am I?", which is the question `view`
-/// exists for and the one thing the list could not say: two machine scopes
-/// rendered identically apart from their names.
-fn render_scope_line(scope: &dotsync::ScopeInfo, machine_scope: &str) -> String {
+/// The marker is the answer to "where am I?". A shared scope says which
+/// machines a change to it reaches, which is the question every commit to it
+/// raises; a machine's own scope says it is one.
+fn render_scope_line(scope: &ScopeInfo, machine_scope: &str) -> String {
     let here = match scope.name == machine_scope {
         true => "* ",
         false => "  ",
@@ -1099,6 +1460,10 @@ fn render_scope_line(scope: &dotsync::ScopeInfo, machine_scope: &str) -> String 
         [] => format!("{here}{}", scope.name),
         parents => format!("{here}{} <- {}", scope.name, parents.join(", ")),
     };
+    match scope.is_machine() {
+        true => line.push_str("  (machine)"),
+        false => line.push_str(&format!("  (reaches {})", scope.machines.join(", "))),
+    }
     // Only the scopes whose creator said what they are for carry this, so a
     // graph of self-evident names reads as a graph and nothing else.
     if let Some(description) = &scope.description {

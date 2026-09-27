@@ -1,4 +1,4 @@
-// `status`, `diff` and `view`: what they report, in the same words as each
+// `status`, `diff` and the fleet reads: what they report, in the same words as each
 // other, without mutating anything and without refusing to answer.
 
 mod harness;
@@ -243,121 +243,43 @@ fn status_and_diff_describe_the_same_change_with_the_same_words() {
 /// used to be a comment in `config.toml` — a file an agent had to know to
 /// open, kept in step with the graph by hand. It belongs to the scope's own
 /// creation commit now, which cannot drift from the scope it describes, and
-/// `view` is where an agent getting its bearings reads it.
+/// `scopes` is where an agent getting its bearings reads it.
 #[test]
-fn view_says_what_each_scope_is_for() {
+fn scopes_says_what_each_scope_is_for() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     machine.init_ok();
     machine.run_ok("dotsync create-scope hyprland --parent linux -m 'wayland compositor config'");
 
-    let view = machine.run_ok("dotsync view");
-    let said = String::from_utf8_lossy(&view.stdout).into_owned();
+    let scopes = machine.run_ok("dotsync scopes");
+    let said = String::from_utf8_lossy(&scopes.stdout).into_owned();
     assert!(
         said.contains("wayland compositor config"),
-        "`view` has to say what a scope is for, not just that it exists\n{said}"
+        "`scopes` has to say what a scope is for, not just that it exists\n{said}"
     );
 }
 
+/// Asking about a path no scope holds printed nothing at all, which reads
+/// exactly like a bug — and is the answer to the commonest reason for asking:
+/// a typo.
 #[test]
-fn view_summarizes_checked_in_scopes_and_files() {
+fn files_says_when_no_scope_holds_a_path() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
     machine.init_ok();
 
-    seed_remote_scope_file(&machine, "all", ".gitconfig", "[user]\nname = Shared\n");
-    merge_remote_scope_into(&machine, "all", "linux");
-    merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
-    machine.run_ok("dotsync");
-
-    let view_output = machine.run_ok("dotsync view");
-    assert_stdout_snapshot(
-        &view_output,
-        "\
-Scopes
-  all
-  linux <- all
-* mx-xps-cy <- linux
-
-Files
-.gitconfig
-",
-    );
-}
-
-#[test]
-fn view_scope_shows_checked_in_file_tree() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    seed_remote_scope_file(&machine, "all", ".gitconfig", "[user]\nname = Shared\n");
-    merge_remote_scope_into(&machine, "all", "linux");
-    merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
-    machine.run_ok("dotsync");
-
-    let view_output = machine.run_ok("dotsync view --scope mx-xps-cy");
-    assert_stdout_snapshot(
-        &view_output,
-        "\
-Scope mx-xps-cy
-.gitconfig
-",
-    );
-}
-
-#[test]
-fn view_file_shows_scopes_and_scoped_file_content() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    seed_remote_scope_file(&machine, "all", ".gitconfig", "[user]\nname = Shared\n");
-    merge_remote_scope_into(&machine, "all", "linux");
-    merge_remote_scope_into(&machine, "linux", "mx-xps-cy");
-    machine.run_ok("dotsync");
-
-    let file_scopes_output = machine.run_ok("dotsync view --file .gitconfig");
-    assert_stdout_snapshot(
-        &file_scopes_output,
-        "\
-File .gitconfig
-Owned by all; every other scope below has it from the cascade.
-Scopes
-all
-linux
-mx-xps-cy
-",
-    );
-
-    let file_content_output = machine.run_ok("dotsync view --scope mx-xps-cy --file .gitconfig");
-    assert_stdout_snapshot(&file_content_output, "[user]\nname = Shared\n");
-}
-
-/// `dotsync view --file` on a path no scope holds printed the two headings and
-/// nothing between them, which reads exactly like a bug — and is the answer to
-/// the commonest reason for asking: a typo.
-#[test]
-fn view_says_when_no_scope_holds_a_file() {
-    let harness = TestHarness::new();
-    let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
-
-    machine.init_ok();
-
-    let output = machine.run_expecting("dotsync view --file .nosuchfile", 0);
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let output = machine.run_expecting("dotsync files .nosuchfile", 0);
+    let said = render_output(&output);
     assert!(
-        stdout.contains("No scope holds .nosuchfile"),
-        "an empty answer has to say it is an answer\n{stdout}"
+        said.contains("no scope holds anything at .nosuchfile"),
+        "an empty answer has to say it is an answer\n{said}"
     );
 }
 
 #[test]
-fn view_works_while_local_scopes_are_ahead_of_remote() {
+fn files_works_while_local_scopes_are_ahead_of_remote() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
@@ -369,17 +291,17 @@ fn view_works_while_local_scopes_are_ahead_of_remote() {
         "set -gx DEV_CERTS 1\n",
     );
 
-    let view_output = machine.run("dotsync view");
+    let files_output = machine.run("dotsync files");
     assert_eq!(
-        view_output.status.code(),
+        files_output.status.code(),
         Some(0),
-        "`dotsync view` must keep working while local scopes are unpushed: {}",
-        render_output(&view_output)
+        "`dotsync files` must keep working while local scopes are unpushed: {}",
+        render_output(&files_output)
     );
     assert!(
-        String::from_utf8_lossy(&view_output.stdout).contains(".config/fish/dev-certs.fish"),
-        "`dotsync view` should show the locally committed file: {}",
-        render_output(&view_output)
+        String::from_utf8_lossy(&files_output.stdout).contains(".config/fish/dev-certs.fish"),
+        "`dotsync files` should show the locally committed file: {}",
+        render_output(&files_output)
     );
 }
 
@@ -483,19 +405,19 @@ fn read_only_commands_describe_a_diverged_scope_instead_of_refusing_to_run() {
     let human = machine.run_expecting("dotsync status", 0);
     assert_reports_divergence(&human, "all");
 
-    let view = machine.run("dotsync view");
+    let files = machine.run("dotsync files");
     assert_eq!(
-        view.status.code(),
+        files.status.code(),
         Some(0),
-        "`dotsync view` has no clean/dirty contract to spend an exit code on, so it either answers or it is a dead end\n{}",
-        render_output(&view)
+        "`dotsync files` has no clean/dirty contract to spend an exit code on, so it either answers or it is a dead end\n{}",
+        render_output(&files)
     );
-    let listed = String::from_utf8_lossy(&view.stdout).into_owned();
+    let listed = String::from_utf8_lossy(&files.stdout).into_owned();
     assert!(
         listed.contains(".config/fish/dev-certs.fish"),
         "and it still has to list what the scopes hold\n{listed}"
     );
-    assert_reports_divergence(&view, "all");
+    assert_reports_divergence(&files, "all");
 
     // Home holds exactly what the machine scope holds, so there is no drift
     // for `diff` to find. Divergence is not drift.
@@ -526,7 +448,7 @@ fn read_only_commands_describe_a_diverged_scope_instead_of_refusing_to_run() {
     assert_reports_divergence(&drifted, "all");
 }
 
-/// DESIGN: "Read-only commands never mutate. `status`, `diff`, and `view`
+/// DESIGN: "Read-only commands never mutate. `status`, `diff`, and the fleet reads
 /// don't move bookmarks, create commits, or touch home. They fetch (when
 /// online) and *report* what convergence would do."
 ///
@@ -556,7 +478,7 @@ fn read_only_commands_leave_the_scope_bookmarks_where_they_found_them() {
     let scopes = ["all", "linux", "mx-xps-cy"];
     let before = scopes.map(|scope| bookmark_revision(&machine, scope));
 
-    for command in ["dotsync status", "dotsync diff", "dotsync view"] {
+    for command in ["dotsync status", "dotsync diff", "dotsync files"] {
         let output = machine.run(command);
         assert_eq!(
             output.status.code(),
@@ -705,7 +627,7 @@ fn read_only_commands_answer_when_the_diverged_merge_conflicts() {
         render_output(&status)
     );
 
-    for command in ["dotsync diff", "dotsync view"] {
+    for command in ["dotsync diff", "dotsync files"] {
         let output = machine.run(command);
         assert_ne!(
             output.status.code(),
@@ -729,76 +651,30 @@ fn read_only_commands_answer_when_the_diverged_merge_conflicts() {
     );
 }
 
-/// The overview lists every scope, and nothing in it says which one is this
-/// machine — so the command whose whole job is orientation leaves an agent
-/// unable to answer "where am I?". `status` knows: the machine scope is in
-/// sync state. `view` just does not compute it.
+/// The scope list has to say which scope is this machine — orientation is its
+/// whole job, and "where am I?" is the first question it answers.
 #[test]
 fn the_overview_says_which_scope_is_this_machine() {
     let harness = TestHarness::new();
     let (machine_a, _machine_b) = two_synced_machines(&harness);
 
-    let json = machine_a.run_ok("dotsync view --output json");
+    let json = machine_a.run_ok("dotsync scopes --output json");
     assert_eq!(
         parse_stdout_json(&json)["machine_scope"],
         "goof-a",
-        "the overview has to name this machine's scope, under the name every other payload uses for it\n{}",
+        "the scope list has to name this machine's scope, under the name every other payload uses for it\n{}",
         render_output(&json)
     );
 
-    let human = machine_a.run_ok("dotsync view");
+    let human = machine_a.run_ok("dotsync scopes");
     let stdout = String::from_utf8_lossy(&human.stdout).into_owned();
-    let this_machine = the_line_naming(&stdout, "goof-a");
-    let another_machine = the_line_naming(&stdout, "goof-b");
+    // A shared scope's line lists the machines it reaches, so a machine's own
+    // line is the one that names it with its parents.
+    let this_machine = the_line_naming(&stdout, "goof-a <-");
+    let another_machine = the_line_naming(&stdout, "goof-b <-");
     assert_ne!(
         this_machine.replace("goof-a", ""),
         another_machine.replace("goof-b", ""),
         "the two machine scopes render identically apart from their names, so the rendering says nothing about where you are\n{stdout}"
-    );
-}
-
-/// `view --file` lists every scope holding the file — the owner plus every
-/// descendant, because files propagate down the DAG. Reading that list
-/// correctly needs exactly the propagation knowledge an agent was using `view`
-/// to acquire, and the useful answer is the one fact the list does not state:
-/// which scope owns the file. It is derivable — the owner is the rootmost
-/// scope holding it — and it is not computed.
-///
-/// Both cases are here because the rootmost scope is only interesting when it
-/// is not the only one: a file on `all` reaches all four scopes, and a file on
-/// a machine scope reaches one.
-#[test]
-fn view_file_says_which_scope_owns_the_file() {
-    let harness = TestHarness::new();
-    let (machine_a, machine_b) = two_synced_machines(&harness);
-
-    machine_a.write_file(".apprc", "ui = dark\n");
-    machine_a.run_ok("dotsync commit all -m 'shared apprc' -- .apprc");
-
-    machine_b.run_ok("dotsync");
-    machine_b.write_file(".config/local.conf", "monitor = DP-1\n");
-    machine_b.run_ok("dotsync commit goof-b -m 'this box only' -- .config/local.conf");
-
-    let on_the_root = machine_a.run_ok("dotsync view --file .apprc --output json");
-    assert_eq!(
-        parse_stdout_json(&on_the_root)["owner"],
-        "all",
-        "a file every scope inherits is owned by the one it was committed to\n{}",
-        render_output(&on_the_root)
-    );
-
-    let on_a_leaf = machine_a.run_ok("dotsync view --file .config/local.conf --output json");
-    assert_eq!(
-        parse_stdout_json(&on_a_leaf)["owner"],
-        "goof-b",
-        "and a file only one machine holds is owned by that machine's scope\n{}",
-        render_output(&on_a_leaf)
-    );
-
-    let human = machine_a.run_ok("dotsync view --file .apprc");
-    let stdout = String::from_utf8_lossy(&human.stdout).into_owned();
-    assert!(
-        stdout.to_lowercase().contains("own"),
-        "the rendering has to say which scope owns it, not leave the reader to derive it from the list\n{stdout}"
     );
 }

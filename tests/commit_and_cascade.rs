@@ -270,7 +270,7 @@ Why dotsync stopped:
 Dotsync stopped because there is no such scope: it can neither place a change on one nor show you what one holds.
 
 Correct flow:
-- run `dotsync view` to list the scopes that do exist.
+- run `dotsync scopes` to list the scopes that do exist.
 - then name one of those. For a commit, pick the root-est appropriate ancestor scope that should own the change.
 "
     );

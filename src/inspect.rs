@@ -1,71 +1,64 @@
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use jj_lib::merge::Merge;
 use jj_lib::repo::Repo as _;
 
 use crate::drift::{changed_paths, FileState};
-use crate::error::{jj_error, DotsyncError};
+use crate::error::DotsyncError;
+use crate::fleet::{EntryKind, FileRow, Fleet, ScopeInfo, Standing};
 use crate::home::Home;
 use crate::paths::DotsyncPaths;
-use crate::repo::{managed_tree_entries, read_tree_entry_bytes, scope_head_tree};
+use crate::place::normalized;
+use crate::repo::read_tree_entry_bytes;
 use crate::session::{in_session, Run, Session};
 use crate::status::MachineState;
 use crate::sync::{classify_home_against_machine_scope, file_drift, finishing, FileDrift};
 
+/// The graph, for `dotsync scopes`.
 #[derive(Debug, Clone)]
-pub struct ScopeInfo {
-    pub name: String,
-    pub parents: Vec<String>,
-    /// What the scope is for, in the words of whoever created it. Only there
-    /// when they said.
-    pub description: Option<String>,
-}
-
-/// What `view` found, and what it has to say whatever it was asked.
-#[derive(Debug, Clone)]
-pub struct ViewReport {
-    /// True of the machine rather than of the question, so every shape below
-    /// carries it — `view` is the command an agent reaches for to get its
-    /// bearings, and "this machine cannot commit anything" is the most
-    /// important bearing there is.
+pub struct ScopesReport {
+    /// True of the machine rather than of the question, so every read carries
+    /// it — the reads are what an agent reaches for to get its bearings, and
+    /// "this machine cannot commit anything" is the most important bearing
+    /// there is.
     pub machine: MachineState,
-    pub found: ViewAnswer,
+    pub scopes: Vec<ScopeInfo>,
 }
 
-/// The answer to whichever question `view` was asked.
-///
-/// One report rather than four entry points, because the four shapes are one
-/// question — what is checked in — asked with different arguments. They are
-/// also one run, which is what stops the overview from fetching once per
-/// scope: it holds a session, and a session fetches once.
+/// Rows of the fleet table, for `dotsync files`.
 #[derive(Debug, Clone)]
-pub enum ViewAnswer {
-    /// Every scope, and every file any of them holds.
-    Overview {
-        scopes: Vec<ScopeInfo>,
-        files: Vec<PathBuf>,
-    },
-    /// Every file one scope holds.
-    Scope { scope: String, files: Vec<PathBuf> },
-    /// Every scope that holds one file, and the one that owns it.
-    FileScopes {
-        file: PathBuf,
-        scopes: Vec<String>,
-        /// The rootmost scope holding the file, which is the one it was
-        /// committed to: every other scope in the list has it because the
-        /// cascade carried it down. `None` when no scope holds the file at
-        /// all. Answered rather than left to be derived, because deriving it
-        /// takes exactly the knowledge of how the graph propagates that an
-        /// agent is running `view` to acquire.
-        owner: Option<String>,
-    },
-    /// One file's contents on one scope.
-    FileContents {
-        scope: String,
-        file: PathBuf,
-        contents: Vec<u8>,
-    },
+pub struct FilesReport {
+    pub machine: MachineState,
+    pub rows: Vec<FileRow>,
+}
+
+/// One file on one scope, for `dotsync show`.
+#[derive(Debug, Clone)]
+pub struct ShowReport {
+    pub machine: MachineState,
+    pub row: FileRow,
+    /// A symlink's content is its target.
+    pub contents: Vec<u8>,
+}
+
+/// Two versions of every path that differs, for `dotsync diff <scope>...`.
+#[derive(Debug, Clone)]
+pub struct CompareReport {
+    pub machine: MachineState,
+    /// What is on the left: a scope, or what a scope inherits.
+    pub left: String,
+    pub right: String,
+    pub changes: Vec<ScopeDifference>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScopeDifference {
+    pub path: PathBuf,
+    /// `None` where that side does not hold the path.
+    pub left: Option<Vec<u8>>,
+    pub right: Option<Vec<u8>>,
+    pub left_kind: Option<EntryKind>,
+    pub right_kind: Option<EntryKind>,
 }
 
 #[derive(Debug, Clone)]
@@ -76,143 +69,199 @@ pub struct DiffReport {
     pub drifts: Vec<FileDrift>,
 }
 
-pub async fn view(
-    paths: &DotsyncPaths,
-    scope: Option<&str>,
-    file: Option<&Path>,
-) -> Run<Result<ViewReport, DotsyncError>> {
-    in_session(paths, async |session, _paths| {
-        session.fetch().await?;
-        // Asked here rather than left to whatever fails first, because "that
-        // scope does not exist" is the same mistake `commit` already explains
-        // in full — and the answer a lookup failure gave instead was about
-        // jj's objects.
-        if let Some(scope) = scope {
-            if !session.graph().contains(scope) {
-                return Err(DotsyncError::InvalidScope {
-                    scope: scope.to_string(),
-                });
-            }
+/// Every read opens the same way: fetch, check every scope it names, predict
+/// the fleet. A read works on any repo state this machine can be in —
+/// including before it has joined, which is when choosing where to join needs
+/// it most.
+async fn read_fleet(session: &mut Session, named: &[&str]) -> Result<Fleet, DotsyncError> {
+    session.fetch().await?;
+    for scope in named {
+        if !session.graph().contains(scope) {
+            return Err(DotsyncError::InvalidScope {
+                scope: scope.to_string(),
+            });
         }
+    }
+    Fleet::predicted(session).await
+}
 
-        let found = match (scope, file) {
-            (Some(scope), Some(file)) => ViewAnswer::FileContents {
-                scope: scope.to_string(),
-                file: file.to_path_buf(),
-                contents: scope_file_contents(session, scope, file).await?,
-            },
-            (Some(scope), None) => ViewAnswer::Scope {
-                scope: scope.to_string(),
-                files: scope_files(session, scope).await?,
-            },
-            (None, Some(file)) => {
-                let mut scopes = Vec::new();
-                for scope in scope_list(session) {
-                    if scope_files(session, &scope.name)
-                        .await?
-                        .iter()
-                        .any(|path| path == file)
-                    {
-                        scopes.push(scope.name);
-                    }
-                }
-                ViewAnswer::FileScopes {
-                    file: file.to_path_buf(),
-                    // The scopes are collected parents-before-children, so the
-                    // first one to hold the file is the rootmost.
-                    owner: scopes.first().cloned(),
-                    scopes,
-                }
-            }
-            (None, None) => {
-                let scopes = scope_list(session);
-                let mut files = BTreeSet::new();
-                for scope in &scopes {
-                    files.extend(scope_files(session, &scope.name).await?);
-                }
-                ViewAnswer::Overview {
-                    scopes,
-                    files: files.into_iter().collect(),
-                }
-            }
-        };
-
-        Ok(ViewReport {
+pub async fn scopes(paths: &DotsyncPaths) -> Run<Result<ScopesReport, DotsyncError>> {
+    in_session(paths, async |session, _paths| {
+        let fleet = read_fleet(session, &[]).await?;
+        Ok(ScopesReport {
             machine: MachineState::read(session).await?,
-            found,
+            scopes: fleet.scopes().to_vec(),
         })
     })
     .await
 }
 
-/// The scope graph, root scopes first and alphabetical within a depth, which
-/// is the order the DAG reads in.
-fn scope_list(session: &Session) -> Vec<ScopeInfo> {
-    let graph = session.graph();
-    let mut scopes: Vec<(usize, ScopeInfo)> = graph
-        .scopes()
-        .map(|scope| {
-            (
-                graph.depth(&scope.name),
-                ScopeInfo {
-                    name: scope.name.clone(),
-                    parents: scope.parents.clone(),
-                    description: scope.description.clone(),
-                },
-            )
+/// What `dotsync files` was asked.
+#[derive(Debug, Clone, Default)]
+pub struct FilesQuery {
+    /// Only these scopes; every scope when empty.
+    pub scopes: Vec<String>,
+    /// Only what each scope adds, overrides or removes.
+    pub own: bool,
+    /// Only these paths and whatever is under them; every path when empty.
+    pub paths: Vec<PathBuf>,
+}
+
+pub async fn files(
+    paths: &DotsyncPaths,
+    query: FilesQuery,
+) -> Run<Result<FilesReport, DotsyncError>> {
+    in_session(paths, async |session, _paths| {
+        let named: Vec<&str> = query.scopes.iter().map(String::as_str).collect();
+        let fleet = read_fleet(session, &named).await?;
+        // Scope by scope in the order the graph reads, then path by path.
+        let mut rows: Vec<FileRow> = Vec::new();
+        for scope in fleet.scopes() {
+            if !query.scopes.is_empty() && !query.scopes.contains(&scope.name) {
+                continue;
+            }
+            rows.extend(
+                fleet
+                    .rows()
+                    .iter()
+                    .filter(|row| row.scope == scope.name)
+                    .filter(|row| !query.own || row.standing.is_own())
+                    // A removal is a scope's own decision and nothing it
+                    // holds, so it belongs to the question "what is this
+                    // scope's own", not to "what does this scope hold".
+                    .filter(|row| query.own || row.standing != Standing::Removed)
+                    .filter(|row| {
+                        query.paths.is_empty()
+                            || query.paths.iter().any(|prefix| under(&row.path, prefix))
+                    })
+                    .cloned(),
+            );
+        }
+        Ok(FilesReport {
+            machine: MachineState::read(session).await?,
+            rows,
         })
-        .collect();
-    scopes.sort_by(|(left_depth, left), (right_depth, right)| {
-        left_depth
-            .cmp(right_depth)
-            .then_with(|| left.name.cmp(&right.name))
-    });
-
-    scopes.into_iter().map(|(_, scope)| scope).collect()
+    })
+    .await
 }
 
-/// The files one scope holds. A scope the graph names and the repo has no head
-/// for holds none, and a path its two sides disagree about is still a path it
-/// holds — `view` describes the state a scope is in rather than refusing to
-/// describe it, which is the whole of what it is for.
-async fn scope_files(session: &Session, scope: &str) -> Result<Vec<PathBuf>, DotsyncError> {
-    let Some(tree) = scope_head_tree(session.repo().as_ref(), scope).await? else {
-        return Ok(Vec::new());
-    };
-    let entries = managed_tree_entries(&tree)?;
-    Ok(entries.into_keys().collect())
-}
-
-async fn scope_file_contents(
-    session: &Session,
+pub async fn show(
+    paths: &DotsyncPaths,
     scope: &str,
-    relative: &Path,
-) -> Result<Vec<u8>, DotsyncError> {
-    let relative_str = relative.to_str().ok_or_else(|| DotsyncError::NonUtf8Path {
-        path: relative.to_path_buf(),
-    })?;
-    let repo_path = jj_lib::repo_path::RepoPath::from_internal_string(relative_str)
-        .map_err(|err| jj_error(format!("invalid repo path {}: {err}", relative.display())))?;
-    let value = match scope_head_tree(session.repo().as_ref(), scope).await? {
-        Some(tree) => tree.path_value(repo_path),
-        // A scope with no head holds no files, so the answer is the same one a
-        // scope that simply does not hold this file gives.
-        None => Ok(Merge::absent()),
-    }
-    .map_err(|err| jj_error(format!("read {} from {scope}: {err}", relative.display())))?;
-    let value = value
-        .into_resolved()
-        .map_err(|conflict| {
-            jj_error(format!(
-                "{} is conflicted on {scope}: {conflict:?}",
-                relative.display()
-            ))
-        })?
-        .ok_or_else(|| DotsyncError::FileNotOnScope {
-            scope: scope.to_string(),
-            path: relative.to_path_buf(),
-        })?;
-    read_tree_entry_bytes(session.repo().store(), relative, &value).await
+    path: &Path,
+) -> Run<Result<ShowReport, DotsyncError>> {
+    in_session(paths, async |session, _paths| {
+        let fleet = read_fleet(session, &[scope]).await?;
+        let path = normalized(path);
+        let row = fleet
+            .row(scope, &path)
+            .filter(|row| row.standing != Standing::Removed)
+            .cloned()
+            .ok_or_else(|| DotsyncError::FileNotOnScope {
+                scope: scope.to_string(),
+                path: path.clone(),
+            })?;
+        let (_, entries) = fleet.holds(scope).expect("a scope with a row has a tree");
+        let contents = match entries.get(&path) {
+            Some(Some(value)) => {
+                read_tree_entry_bytes(session.repo().store(), &path, value).await?
+            }
+            // Two heads that disagree have no one version to print. Every
+            // version of a conflict is what the pause presents.
+            _ => {
+                return Err(DotsyncError::ConflictedOnScope {
+                    scope: scope.to_string(),
+                    path,
+                })
+            }
+        };
+        Ok(ShowReport {
+            machine: MachineState::read(session).await?,
+            row,
+            contents,
+        })
+    })
+    .await
+}
+
+/// `dotsync diff <scope>` compares what a scope inherits with what it holds;
+/// `dotsync diff <left> <right>` compares two scopes.
+pub async fn compare(
+    paths: &DotsyncPaths,
+    left: &str,
+    right: Option<&str>,
+    only: &[PathBuf],
+) -> Run<Result<CompareReport, DotsyncError>> {
+    in_session(paths, async |session, _paths| {
+        let named: Vec<&str> = [Some(left), right].into_iter().flatten().collect();
+        let fleet = read_fleet(session, &named).await?;
+        let empty = BTreeMap::new();
+        let (left_label, left_entries, right_label, right_entries) = match right {
+            None => (
+                format!("what {left} inherits"),
+                fleet
+                    .inherits(left)
+                    .map(|(_, entries)| entries)
+                    .unwrap_or(&empty),
+                left.to_string(),
+                fleet
+                    .holds(left)
+                    .map(|(_, entries)| entries)
+                    .unwrap_or(&empty),
+            ),
+            Some(right) => (
+                left.to_string(),
+                fleet
+                    .holds(left)
+                    .map(|(_, entries)| entries)
+                    .unwrap_or(&empty),
+                right.to_string(),
+                fleet
+                    .holds(right)
+                    .map(|(_, entries)| entries)
+                    .unwrap_or(&empty),
+            ),
+        };
+
+        let store = session.repo().store().clone();
+        let mut changes = Vec::new();
+        let paths: std::collections::BTreeSet<&PathBuf> =
+            left_entries.keys().chain(right_entries.keys()).collect();
+        for path in paths {
+            if !only.is_empty() && !only.iter().any(|prefix| under(path, &normalized(prefix))) {
+                continue;
+            }
+            let (l, r) = (left_entries.get(path), right_entries.get(path));
+            if l == r {
+                continue;
+            }
+            let bytes = async |value: Option<&Option<jj_lib::backend::TreeValue>>| match value {
+                Some(Some(value)) => read_tree_entry_bytes(&store, path, value).await.map(Some),
+                _ => Ok(None),
+            };
+            changes.push(ScopeDifference {
+                path: path.to_path_buf(),
+                left_kind: l.map(|value| EntryKind::of(value.as_ref())),
+                right_kind: r.map(|value| EntryKind::of(value.as_ref())),
+                left: bytes(l).await?,
+                right: bytes(r).await?,
+            });
+        }
+
+        Ok(CompareReport {
+            machine: MachineState::read(session).await?,
+            left: left_label,
+            right: right_label,
+            changes,
+        })
+    })
+    .await
+}
+
+/// Whether `path` is `prefix` or lies under it.
+fn under(path: &Path, prefix: &Path) -> bool {
+    let prefix = normalized(prefix);
+    prefix.as_os_str().is_empty() || prefix == Path::new(".") || path.starts_with(&prefix)
 }
 
 pub async fn diff_home(paths: &DotsyncPaths) -> Run<Result<DiffReport, DotsyncError>> {

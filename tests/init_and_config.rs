@@ -64,7 +64,7 @@ fn init_reports_no_drift() {
 /// test the graph work has owed since the rewrite began: a run that reports it
 /// created a scope means the scope exists and can be used. Declaring one in
 /// `config.toml` reported success and created no bookmark, so the scope was
-/// unusable and `dotsync view` broke on every machine in the fleet.
+/// unusable and reading the fleet broke on every machine.
 ///
 /// Usable means usable from another machine, which is why this ends on a
 /// machine that had nothing to do with any of it reading the file: a scope
@@ -303,7 +303,7 @@ fn a_deleted_scope_is_gone_from_the_remote_and_from_the_graph() {
         "the scope's branch has to go from the remote, which is the only copy every machine reads: {:?}",
         remote_branches(&machine_a)
     );
-    let view = machine_a.run_ok("dotsync view");
+    let view = machine_a.run_ok("dotsync scopes");
     assert!(
         !String::from_utf8_lossy(&view.stdout).contains("goof-b"),
         "and the scope has to be gone from the graph this machine reads\n{}",
@@ -320,7 +320,7 @@ fn another_machine_stops_seeing_a_deleted_scope() {
     let (machine_a, _machine_b) = two_synced_machines(&harness);
     let machine_c = harness.machine("machine-c", "linux", "goof-c");
     machine_c.init_ok_under("linux");
-    let before = machine_c.run_ok("dotsync view");
+    let before = machine_c.run_ok("dotsync scopes");
     assert!(
         String::from_utf8_lossy(&before.stdout).contains("goof-b"),
         "this test is about a scope the third machine can see to begin with\n{}",
@@ -330,7 +330,7 @@ fn another_machine_stops_seeing_a_deleted_scope() {
     machine_a.run_ok("dotsync delete-scope goof-b");
     machine_c.run_ok("dotsync");
 
-    let after = machine_c.run_ok("dotsync view");
+    let after = machine_c.run_ok("dotsync scopes");
     assert!(
         !String::from_utf8_lossy(&after.stdout).contains("goof-b"),
         "a machine that has synced since the deletion must not still be carrying the scope\n{}",
@@ -443,7 +443,7 @@ fn deleting_a_name_that_is_not_a_scope_says_where_to_find_the_ones_that_are() {
 
     let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
     assert!(
-        stderr.contains("hyprland") && stderr.contains("dotsync view"),
+        stderr.contains("hyprland") && stderr.contains("dotsync scopes"),
         "the stop has to name what was asked for and where to see what there is\n{stderr}"
     );
     assert_eq!(

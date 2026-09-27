@@ -355,21 +355,3 @@ fn the_fleet_can_be_read_before_this_machine_joins_it() {
     newcomer.run_ok("dotsync init --parent linux");
     assert_eq!(newcomer.read_file(".apprc"), "shared = yes\n");
 }
-
-/// A waiting merge's versions exist nowhere but dotsync's output, so the
-/// command an agent runs by reflex prints them again.
-#[test]
-fn status_prints_every_version_of_a_waiting_conflict() {
-    let harness = TestHarness::new();
-    let (machine, _stop) = pause_a_conflict_on_linux(&harness);
-
-    let payload = parse_stdout_json(&machine.run_ok("dotsync status --output json"));
-    let conflicts = payload["conflicts"].as_array().expect("conflicts");
-    assert!(!conflicts.is_empty(), "{payload:#}");
-    assert!(
-        conflicts[0]["versions"]
-            .as_array()
-            .is_some_and(|v| v.len() == 3),
-        "base and both sides\n{payload:#}"
-    );
-}

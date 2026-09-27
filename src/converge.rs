@@ -108,6 +108,31 @@ pub(crate) struct Resolution {
     pub(crate) entries: Vec<(RepoPathBuf, MergedTreeValue)>,
 }
 
+/// What some scopes are to hold at some paths once the pass has merged them —
+/// the whole of what a write adds to convergence.
+///
+/// A write is not a commit followed by a cascade: it is the pass, with these
+/// laid over the scopes they name as the pass reaches each one. That is what
+/// makes a write that touches several scopes one run whose order the graph
+/// decides — a scope's pin lands after its parents' have merged into it, so
+/// narrowing config from `linux` to `work-linux` cannot have the deletion on
+/// `linux` cascade through the keep on `work-linux`, and promoting config to a
+/// shared scope cannot collide with the copy the machine it came from holds.
+pub(crate) struct Pins {
+    pub(crate) by_scope: BTreeMap<String, Vec<(RepoPathBuf, Pin)>>,
+    /// What a commit is called when a pin is why it exists.
+    pub(crate) description: String,
+}
+
+/// What one scope holds at one path after the pass reaches it.
+pub(crate) enum Pin {
+    /// Exactly this, whatever the merge said.
+    Holds(MergedTreeValue),
+    /// Whatever its parents hold there now, so the scope stops contributing a
+    /// version of its own and later changes above it flow straight through.
+    Inherits,
+}
+
 /// Converges every scope, in one transaction.
 ///
 /// `machine_scope` is the author every merge this run writes carries: a
@@ -129,7 +154,7 @@ pub(crate) async fn converge_with(
     let graph = session.graph().clone();
     let repo = session.repo().clone();
     let mut tx = repo.start_transaction();
-    let (moved, paused) = pass(&mut tx, &graph, machine_scope, resolution).await?;
+    let (moved, paused) = pass(&mut tx, &graph, machine_scope, resolution, None).await?;
 
     // A pass that moved nothing drops its transaction rather than committing
     // one, so a settled machine writes no operation and leaves every bookmark
@@ -170,7 +195,7 @@ pub(crate) async fn pending_pause(
     machine_scope: &str,
 ) -> Result<Option<Pause>, DotsyncError> {
     let mut tx = repo.start_transaction();
-    let (_, paused) = pass(&mut tx, graph, machine_scope, None).await?;
+    let (_, paused) = pass(&mut tx, graph, machine_scope, None, None).await?;
     Ok(paused)
 }
 
@@ -178,11 +203,12 @@ pub(crate) async fn pending_pause(
 /// one caller commit it, another drop it, and `continue` write into it.
 ///
 /// Reports whether anything moved, and the merge it stopped at if one did.
-async fn pass(
+pub(crate) async fn pass(
     tx: &mut Transaction,
     graph: &ScopeGraph,
     machine_scope: &str,
     resolution: Option<&Resolution>,
+    pins: Option<&Pins>,
 ) -> Result<(bool, Option<Pause>), DotsyncError> {
     let mut moved = false;
     let mut paused = None;
@@ -204,23 +230,27 @@ async fn pass(
         }
         let inputs = convergence_inputs(tx.repo_mut(), graph, &scope.name)?;
         let parents: Vec<CommitId> = inputs.iter().map(|it| it.commit.id().clone()).collect();
-        match inputs.as_slice() {
+        let pinned = pins.and_then(|pins| pins.by_scope.get(&scope.name));
+        match (inputs.as_slice(), pinned) {
             // No head at all — unreachable for a scope the graph names, since
             // the graph is derived from the bookmarks that exist. A skip
             // rather than a stop, because a scope dotsync cannot see is not
             // one it should be writing to.
-            [] => continue,
+            ([], _) => continue,
             // Everything else reaches this one, so there is nothing to merge.
             // The bookmark is either already here or fast-forwards onto it.
-            [only] => {
+            ([only], None) => {
                 if scope_head(tx.repo_mut(), &scope.name).as_normal() != Some(only.commit.id()) {
                     set_head(tx.repo_mut(), &scope.name, only.commit.id().clone());
                     moved = true;
                 }
             }
             _ => {
-                let mut merged = merge_inputs(tx.repo_mut(), &inputs).await?;
-                let description = format!("dotsync: converge {}", scope.name);
+                let mut merged = match inputs.as_slice() {
+                    [only] => only.commit.tree(),
+                    _ => merge_inputs(tx.repo_mut(), &inputs).await?,
+                };
+                let mut description = format!("dotsync: converge {}", scope.name);
                 // An answer applies to the merge it was written for, and only
                 // where that merge stopped.
                 if let (true, Some(resolution)) = (
@@ -229,12 +259,33 @@ async fn pass(
                 ) {
                     merged = resolved_with(merged, resolution).await?;
                 }
+                if let (Some(entries), Some(pins)) = (pinned, pins) {
+                    let laid =
+                        pinned_with(tx.repo_mut(), graph, &scope.name, &merged, entries).await?;
+                    if laid.tree_ids() != merged.tree_ids() {
+                        description = pins.description.clone();
+                    }
+                    merged = laid;
+                }
                 if merged.has_conflict() {
                     paused = Some(Pause {
                         scope: scope.name.clone(),
                         merged,
                     });
                     break;
+                }
+                // A pin that changed nothing leaves a one-input scope exactly
+                // where the pass would have: on that input.
+                if let [only] = inputs.as_slice() {
+                    if merged.tree_ids() == only.commit.tree().tree_ids() {
+                        if scope_head(tx.repo_mut(), &scope.name).as_normal()
+                            != Some(only.commit.id())
+                        {
+                            set_head(tx.repo_mut(), &scope.name, only.commit.id().clone());
+                            moved = true;
+                        }
+                        continue;
+                    }
                 }
                 let commit = tx
                     .repo_mut()
@@ -281,6 +332,65 @@ async fn resolved_with(
             resolution.scope
         ))
     })
+}
+
+/// A scope's merge with its pins laid over it.
+///
+/// `Inherits` reads the parents as this pass has already left them, which is
+/// what makes it mean "what this scope would hold if it had never had a version
+/// of its own" rather than a copy of whatever the parents held when the write
+/// was planned.
+async fn pinned_with(
+    repo: &dyn Repo,
+    graph: &ScopeGraph,
+    scope: &str,
+    merged: &MergedTree,
+    entries: &[(RepoPathBuf, Pin)],
+) -> Result<MergedTree, DotsyncError> {
+    let inherited = inherited_tree(repo, graph, scope).await?;
+    let mut builder = MergedTreeBuilder::new(merged.clone());
+    for (path, pin) in entries {
+        let value = match pin {
+            Pin::Holds(value) => value.clone(),
+            Pin::Inherits => inherited
+                .path_value(path)
+                .map_err(|err| jj_error(format!("read what {scope} inherits: {err}")))?,
+        };
+        builder.set_or_remove(path.clone(), value);
+    }
+    builder
+        .write_tree()
+        .await
+        .map_err(|err| jj_error(format!("write what {scope} holds: {err}")))
+}
+
+/// What a scope's parents hold together: the tree the scope would be if it
+/// held nothing of its own. A root scope inherits nothing.
+pub(crate) async fn inherited_tree(
+    repo: &dyn Repo,
+    graph: &ScopeGraph,
+    scope: &str,
+) -> Result<MergedTree, DotsyncError> {
+    let mut commits = Vec::new();
+    for parent in graph
+        .get(scope)
+        .map(|scope| scope.parents.as_slice())
+        .unwrap_or_default()
+    {
+        for id in scope_head(repo, parent).added_ids() {
+            commits.push(
+                repo.store()
+                    .get_commit(id)
+                    .map_err(|err| jj_error(format!("load {parent}: {err}")))?,
+            );
+        }
+    }
+    if commits.is_empty() {
+        return Ok(repo.store().root_commit().tree());
+    }
+    merge_commit_trees(repo, &commits)
+        .await
+        .map_err(|err| jj_error(format!("merge what {scope} inherits: {err}")))
 }
 
 /// Everything a scope's new head has to account for: its own head, and its

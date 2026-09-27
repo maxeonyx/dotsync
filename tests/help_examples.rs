@@ -42,6 +42,10 @@ fn help_examples() {
         .page(&["diff"], |_fixture| {})
         .page(&["abort"], |_fixture| {})
         .page(&["status"], |_fixture| {})
-        .page(&["view"], |_fixture| {})
+        .page(&["move"], |_fixture| {})
+        .page(&["drop"], |_fixture| {})
+        .page(&["scopes"], |_fixture| {})
+        .page(&["files"], |_fixture| {})
+        .page(&["show"], |_fixture| {})
         .run();
 }

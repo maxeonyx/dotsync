@@ -319,16 +319,28 @@ pub(crate) fn render_drift_json(drift: &FileDrift) -> serde_json::Value {
 /// whole content removed rather than as nothing at all. Non-UTF-8 content has
 /// no line structure to diff, so it is reported rather than mangled.
 pub(crate) fn render_drift_diff(drift: &FileDrift) -> String {
-    let (Some(repo), Some(system)) = (
-        drift_side_text(drift.repo_bytes.as_deref()),
-        drift_side_text(drift.home_bytes.as_deref()),
-    ) else {
+    unified_diff(
+        "repo",
+        drift.repo_bytes.as_deref(),
+        "system",
+        drift.home_bytes.as_deref(),
+    )
+}
+
+/// A unified diff of two versions of one file, either of which may be absent.
+pub(crate) fn unified_diff(
+    left_label: &str,
+    left: Option<&[u8]>,
+    right_label: &str,
+    right: Option<&[u8]>,
+) -> String {
+    let (Some(left), Some(right)) = (drift_side_text(left), drift_side_text(right)) else {
         return "binary content differs".to_string();
     };
 
-    let mut rendered = TextDiff::from_lines(&repo, &system)
+    let mut rendered = TextDiff::from_lines(&left, &right)
         .unified_diff()
-        .header("repo", "system")
+        .header(left_label, right_label)
         .to_string();
     // Every caller prints this as one block with `eprintln!`, so the diff's own
     // trailing newline would show up as a blank line.

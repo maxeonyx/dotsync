@@ -432,6 +432,20 @@ pub enum DotsyncError {
     /// failure with a jj message.
     #[error("`{}` is not on scope `{scope}`", path.display())]
     FileNotOnScope { scope: String, path: PathBuf },
+    /// `move --from X --to X`: there is nowhere to move to.
+    #[error("`--from` and `--to` both name scope `{scope}`")]
+    MoveOntoItself { scope: String },
+    /// Asked for one scope's version of a file its two heads disagree about.
+    #[error("`{}` has two versions on scope `{scope}` that nothing has merged yet", path.display())]
+    ConflictedOnScope { scope: String, path: PathBuf },
+    /// Asked to move or drop a scope's own version of a path the scope only
+    /// inherits, or does not hold. `origin` is where its version comes from.
+    #[error("scope `{scope}` has no version of its own of `{}`", path.display())]
+    NotOwnOnScope {
+        scope: String,
+        path: PathBuf,
+        origin: Vec<String>,
+    },
     /// The scope graph names a scope this machine's repo has no history for.
     /// Says what it means rather than which of jj's objects is missing:
     /// "bookmark" is a concept dotsync exists to keep out of the user's way.
@@ -579,7 +593,7 @@ impl DotsyncError {
             ),
             &[
                 &format!(
-                    "the versions to choose between are the ones the pause printed; `dotsync view --scope {scope} --file {}` prints the one on the scope again.",
+                    "the versions to choose between are the ones the pause printed; `dotsync show {scope} {}` prints the one on the scope again.",
                     paths
                         .first()
                         .map(|path| path.display().to_string())
@@ -704,9 +718,9 @@ impl DotsyncError {
                 &[
                     &match shared_ancestor {
                         Some(shared) => format!("put the shared material on `{shared}`: `dotsync commit {shared} -m \"message\" -- <paths...>`. The cascade carries it into `{scope}` and into this machine alike."),
-                        None => format!("put the shared material on a scope both machines reach; `dotsync view` shows which scopes there are, and `{scope}` shares none of them with this machine yet."),
+                        None => format!("put the shared material on a scope both machines reach; `dotsync scopes` shows which scopes there are, and `{scope}` shares none of them with this machine yet."),
                     },
-                    &format!("write down, on that same scope, the pattern an agent on `{scope}` should follow when it adds that machine's own version — a commit here cannot make that decision for it."),
+                    &format!("to change what `{scope}` holds using config already in the repo, move it there: `dotsync move <paths...> --from {machine_scope} --to {scope} -m \"message\"` takes this machine's committed version, and `dotsync drop <paths...> --from {scope} -m \"message\"` makes `{scope}` take what it inherits. Both work on any scope, because their content comes from the repo rather than from home."),
                 ],
             )),
         Self::EmptyCommitMessage { scope } => Explanation::stop("empty_commit_message", self)
@@ -729,7 +743,7 @@ impl DotsyncError {
             "It expects the scope you name to be one of them.",
             "Dotsync stopped because there is no such scope: it can neither place a change on one nor show you what one holds.",
             &[
-                "run `dotsync view` to list the scopes that do exist.",
+                "run `dotsync scopes` to list the scopes that do exist.",
                 "then name one of those. For a commit, pick the root-est appropriate ancestor scope that should own the change.",
             ])),
         Self::NotARegularFile { .. } => Explanation::stop("not_a_regular_file", self)
@@ -747,12 +761,56 @@ impl DotsyncError {
             .teaching(Teaching::new(
             "that file is not on that scope",
             "Dotsync stores dotfiles in a scope DAG, and a file lives on the scope it was committed to. Every scope below that one inherits it through the cascade, so the same file is visible on many scopes and absent from the ones above it.",
-            "This view flow reads the file out of the tree that one scope holds.",
+            "This flow reads the file out of the tree that one scope holds.",
             "It expects that scope to hold the file — the scope it was committed to, or one below it.",
             "Dotsync stopped rather than printing nothing: empty output would read exactly like an empty file.",
             &[
-                "run `dotsync view --file <path>` to see which scopes hold it.",
-                "run `dotsync view --scope <scope>` to see what that scope does hold.",
+                "run `dotsync files <path>` to see which scopes hold it.",
+                "run `dotsync files --scope <scope>` to see what that scope does hold.",
+            ])),
+        Self::MoveOntoItself { .. } => Explanation::stop("move_onto_itself", self)
+            .teaching(Teaching::new(
+            "that moves nothing",
+            THE_SCOPE_GRAPH,
+            "This flow moves a scope's own version of a file onto another scope.",
+            "It expects `--from` and `--to` to be two different scopes.",
+            "Moving a version onto the scope that already holds it changes nothing.",
+            &[
+                "to take a scope's own version away so it inherits again, run `dotsync drop <paths...> --from <scope> -m \"message\"`.",
+                "run `dotsync files --own <path>` to see which scopes hold their own version.",
+            ])),
+        Self::ConflictedOnScope { scope, path } => Explanation::stop("conflicted_on_scope", self)
+            .teaching(Teaching::new(
+            "that file has two versions on that scope",
+            "Two machines can move one scope before either has seen the other's change. Until a run merges them the scope holds both, and where they changed one file differently there is no single version of it.",
+            "This flow prints one scope's version of one file.",
+            &format!("It expects `{scope}` to hold one version of `{}`.", path.display()),
+            "Printing either side would be printing a version the scope does not hold.",
+            &[
+                "run `dotsync` to merge the two; where they collide the run stops and prints every version.",
+                "run `dotsync status` to see the merge waiting, if one already is.",
+            ])),
+        Self::NotOwnOnScope { scope, path, origin } => Explanation::stop("not_own_on_scope", self)
+            .state(vec![match origin.as_slice() {
+                [] => format!("`{scope}` does not hold `{}` at all", path.display()),
+                origin => format!(
+                    "`{scope}` holds `{}` only because it inherits it from `{}`",
+                    path.display(),
+                    origin.join("`, `")
+                ),
+            }])
+            .teaching(Teaching::new(
+            "that scope has no version of its own there",
+            THE_SCOPE_GRAPH,
+            "This flow moves or drops a scope's own version of a file: what the scope adds, or holds instead of what it inherits.",
+            &format!("It expects `{scope}` to hold its own version of `{}`.", path.display()),
+            "A scope that only inherits a file has nothing of its own to move or drop; acting on it would mean acting on the scope it comes from, which is a different change with a different reach.",
+            &[
+                &match origin.first() {
+                    Some(owner) => format!("name the scope the version comes from instead: `--from {owner}`."),
+                    None => "run `dotsync files <path>` to see which scopes hold it.".to_string(),
+                },
+                "run `dotsync files --own <path>` to see every scope that holds its own version.",
             ])),
         // Every other command carries on against the last state it fetched
         // and says so in a note. `init` is the one whose whole job is to reach
@@ -805,7 +863,7 @@ impl DotsyncError {
             "Cloning over an existing repo would discard whatever this machine has committed but not published.",
             &[
                 "run `dotsync` to sync this machine, which is what `init` would have finished by doing.",
-                "run `dotsync status` to see what this machine has changed, and `dotsync view` to see the scopes it knows about.",
+                "run `dotsync status` to see what this machine has changed, and `dotsync scopes` to see the scopes it knows about.",
                 "to point this machine at a different remote, move the existing repo aside by hand first — dotsync has no command for that yet.",
             ])),
         Self::NoSuchParentScope { parent, scopes } => Explanation::stop("no_such_parent_scope", self)
@@ -817,7 +875,7 @@ impl DotsyncError {
             "It expects every parent you name to be a scope this repo already has, because a scope is created where its parents are and cannot be moved afterwards.",
             "A scope hung off a name nothing answers to would receive nothing and reach nothing.",
             &[
-                "run `dotsync view` to see the scopes there are.",
+                "run `dotsync scopes` to see the scopes there are.",
                 "then name the one this config should come from: the root-est scope whose machines should all share it.",
                 "to create the parent itself first, run `dotsync create-scope <name> --parent <scope>`.",
             ])),
@@ -830,7 +888,7 @@ impl DotsyncError {
             "It expects at least one `--parent`, because that is what decides which config this scope receives and which machines a change on it reaches.",
             "Nothing else says it. A hostname cannot tell a `home-linux` from a `work-linux`, and the graph is append-only, so a scope put in the wrong place cannot be moved afterwards — this is the only moment the answer can be given.",
             &[
-                "run `dotsync view` on a machine that is already set up to see the scopes there are.",
+                "run `dotsync scopes` to see the scopes there are — it works before this machine has joined.",
                 &format!(
                     "then name the one this config should come from: `--parent <scope>`, or several for a `{scope}` that inherits from more than one."
                 ),
@@ -840,15 +898,15 @@ impl DotsyncError {
             .teaching(Teaching::new(
             "that scope is shared with other machines",
             THE_SCOPE_GRAPH,
-            "This init flow was about to adopt the scope named after this machine's hostname as the scope only this machine holds.",
+            "This flow was about to treat the scope named after this machine's hostname as the scope only this machine holds.",
             "It expects that scope to be a leaf: nothing else hanging off it, so nothing it holds reaches anywhere else.",
             &format!(
                 "`{scope}` is what `{}` inherit from, so config committed to it would reach them as well — which is the opposite of what a machine's own scope is for.",
                 children.join("` and `")
             ),
             &[
-                "set DOTSYNC_HOSTNAME to a name that is this machine's alone, then run `dotsync init <remote-url> --parent <scope>` again.",
-                "run `dotsync view` to see which scopes exist and what hangs off them.",
+                "set DOTSYNC_HOSTNAME to a name that is this machine's alone, then run `dotsync init --parent <scope>` to join as that name.",
+                "run `dotsync scopes` to see which scopes exist and what hangs off them.",
             ])),
         Self::MachineScopeAlreadyPlaced { scope, parents } => Explanation::stop("machine_scope_already_placed", self)
             .state(vec![format!("scope: {scope}; it already hangs off: {}", parents.join(", "))])
@@ -860,7 +918,7 @@ impl DotsyncError {
             "Where a scope hangs was decided when it was created, and the graph is append-only, so `--parent` here could only be ignored or wrong.",
             &[
                 "run `dotsync init <remote-url>` without `--parent` to adopt this machine's scope as it stands.",
-                "run `dotsync view` to see where it hangs.",
+                "run `dotsync scopes` to see where it hangs.",
             ])),
         Self::MachineScopeMissing { scope, scopes, root } => Explanation::stop("machine_scope_missing", self)
             .state(vec![scopes_in_the_repo(scope, scopes)])
@@ -871,7 +929,7 @@ impl DotsyncError {
             "It expects that scope to be in the repo: `dotsync init` creates it when the machine joins.",
             "Without it there is nothing that says what belongs on this machine, so there is nothing to sync, and nowhere to record a change of its own.",
             &[
-                "run `dotsync view` to see the scopes there are.",
+                "run `dotsync scopes` to see the scopes there are.",
                 &format!(
                     "give this machine a scope again with `dotsync create-scope {scope} --parent <the scope its config should come from>`."
                 ),
@@ -893,7 +951,7 @@ impl DotsyncError {
                 "Something already answers to `{scope}` — a scope somebody created, or a branch pushed by something that is not dotsync. Writing over it would take it away from whoever is using it."
             ),
             &[
-                "run `dotsync view` to see whether it is already a scope, in which case there is nothing to create.",
+                "run `dotsync scopes` to see whether it is already a scope, in which case there is nothing to create.",
                 "otherwise pick another name.",
             ])),
         Self::ScopeHasChildren { scope, children } => Explanation::stop("scope_has_children", self)
@@ -908,7 +966,7 @@ impl DotsyncError {
                 children.join("` and `")
             ),
             &[
-                "run `dotsync view` to see what hangs off it.",
+                "run `dotsync scopes` to see what hangs off it.",
                 "delete those scopes first, if they are what should go.",
             ])),
         Self::DeletingThisMachinesScope { scope } => Explanation::stop("deleting_this_machines_scope", self)
@@ -950,7 +1008,7 @@ impl DotsyncError {
                 files.join(", ")
             ),
             &[
-                "run `dotsync view --file <path>` to see which scopes hold the file and what each of them says.",
+                "run `dotsync files <path>` to see which scopes hold the file, and `dotsync diff <scope> <scope> -- <path>` to see how two of them differ.",
                 "commit one agreed version to a scope both parents inherit from, let it cascade, then create the scope.",
                 "or create the scope under one parent for now.",
             ])),

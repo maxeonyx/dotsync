@@ -11,7 +11,7 @@ fn top_level_help_explains_scope_and_basic_workflow() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     for expected in [
-        "A scope is a branch in the dotsync DAG",
+        "A scope is a layer of config",
         "plain `dotsync` syncs your current machine scope into home",
         "dotsync commit <scope> -m \"message\"",
         "Examples:",

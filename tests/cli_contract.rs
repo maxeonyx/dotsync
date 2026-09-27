@@ -187,7 +187,7 @@ fn a_user_never_meets_the_backends_vocabulary() {
 
     machine.init_ok();
 
-    let bad_scope = machine.run_expecting("dotsync --output json view --scope nosuchscope", 1);
+    let bad_scope = machine.run_expecting("dotsync --output json files --scope nosuchscope", 1);
     let stderr = String::from_utf8_lossy(&bad_scope.stderr).into_owned();
     assert!(
         !stderr.contains("bookmark"),
@@ -200,10 +200,7 @@ fn a_user_never_meets_the_backends_vocabulary() {
         render_output(&bad_scope)
     );
 
-    let missing_file = machine.run_expecting(
-        "dotsync --output json view --scope all --file .nosuchfile",
-        1,
-    );
+    let missing_file = machine.run_expecting("dotsync --output json show all .nosuchfile", 1);
     let stderr = String::from_utf8_lossy(&missing_file.stderr).into_owned();
     assert!(
         !stderr.contains("jj operation failed"),
