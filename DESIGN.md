@@ -131,6 +131,10 @@ Kind is not decoration on top of content, and treating a managed path as bytes a
 
 So a difference of kind is a difference: `status` and `diff` report it, and sync replaces rather than writes through. That is the same rule "Repo structure" states for symlinks, generalised to the reason behind it.
 
+A folder is never an entry: dotsync manages files and links, so a path that is a folder holds nothing of its own, and the files in it are entries of their own. That settles the cases where a path changes between a link and a folder — a skill linked into place from a clone becoming the skill's own files, or a folder of files becoming one link to where they now live. A path beneath one of dotsync's own links holds nothing in home; the merge reads a folder term as no entry, so "home removed the files, the scope removed them and put a link there" is the link; and a sync removes before it writes, taking with it the folders its removals emptied. A folder that still holds files dotsync does not manage is never removed: the sync stops before writing anything and names them.
+
+Home is written before the sync is recorded. A sync that stops part-way leaves the mark where it was, so what it did write reads as the change the head makes and merges cleanly next run; recording first would make every file it did not reach read as deleted here.
+
 ### A scope's version has a standing
 
 A scope's tree is already its effective config — the cascade merged its parents into it. What a tree alone cannot say is which of it is the scope's _own_. That is the difference, path by path, between what the scope holds and what its parents give it (the merge of their trees; nothing, for a root):
@@ -371,6 +375,8 @@ Every scope can be read from every machine, including before it has joined. Ther
 **`dotsync move <path>... --from <scope> --to <scope> -m "message"`**: `--to` holds the version `--from` held, and `--from` holds nothing of its own there: it inherits. Up is promotion to a scope machines share, down is narrowing config pushed too broad, sideways is handing it over. `--from` has to hold its own version — a scope that only inherits a file has nothing to move, and the stop names where its version comes from.
 
 **`dotsync drop <path>... --from <scope> -m "message"`**: `--from` stops holding a version of its own and takes what it inherits: the shared version for an override, nothing for a file it added, the inherited file again for one it removed.
+
+A path that names a directory stands for every entry `--from` holds of its own under it, the way a directory named to `commit` stands for what is under it: an agent skill is a folder, and moving or removing one is one change. A path `--from` holds an entry at is that entry, and the report's `paths` lists what each directory stood for.
 
 Both work on any scope, from any machine. The rule that keeps `commit` inside this machine's ancestry is about content from home, which has no base on another machine's scope; a move's content is a scope's own tree entry landing on heads this run has just converged, so it has an exact base wherever it lands. What neither can know is whether the machines it reaches have tried the config, and that is what the per-machine effect is for (Max, 2026-09-28, choosing this over keeping placement inside this machine's ancestry).
 

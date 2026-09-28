@@ -449,6 +449,14 @@ impl LockedWorkingCopy for HomeLockedWorkingCopy {
     ) -> Result<(MergedTree, SnapshotStats), SnapshotError> {
         let mut builder = MergedTreeBuilder::new(self.tree.clone());
         for path in &self.probe {
+            // A path beneath one of dotsync's own links holds nothing in home:
+            // the link is what home holds there, and it is never read
+            // through. The fleet replacing that link with a folder is how such
+            // a path comes to be probed at all.
+            if beneath_managed_link(&self.tree, &self.home, path)? {
+                builder.set_or_remove(path.clone(), Merge::absent());
+                continue;
+            }
             let disk = home_disk_path(&self.home, &self.repo_root, path)
                 .map_err(|message| snapshot_error(message, "refused path"))?;
             let value = read_disk_entry(&self.store, path, &disk).await?;
@@ -476,46 +484,91 @@ impl LockedWorkingCopy for HomeLockedWorkingCopy {
                 paths.push(path);
             }
         }
+        let mut removals = Vec::new();
+        let mut writes = Vec::new();
         for path in paths {
-            let old_value = self
-                .tree
-                .path_value(path.as_ref())?
-                .as_resolved()
-                .cloned()
-                .flatten();
-            let new_value = new_tree
-                .path_value(path.as_ref())?
-                .as_resolved()
-                .cloned()
-                .flatten();
+            // A folder is not an entry: a path that is one on either side
+            // holds nothing there, and its files are entries of their own.
+            let entry =
+                |value: Option<TreeValue>| value.filter(|v| !matches!(v, TreeValue::Tree(_)));
+            let old_value = entry(
+                self.tree
+                    .path_value(path.as_ref())?
+                    .as_resolved()
+                    .cloned()
+                    .flatten(),
+            );
+            let new_value = entry(
+                new_tree
+                    .path_value(path.as_ref())?
+                    .as_resolved()
+                    .cloned()
+                    .flatten(),
+            );
             if old_value == new_value {
                 continue;
             }
+            match new_value {
+                None => removals.push(path),
+                Some(value) => writes.push((path, value)),
+            }
+        }
+
+        // Everything that stands in a write's way is checked before anything
+        // is written, so a checkout that cannot finish changes nothing.
+        let removed: Vec<PathBuf> = removals
+            .iter()
+            .map(|path| self.home.join(path.as_internal_file_string()))
+            .collect();
+        for (path, _) in &writes {
+            let disk = self.home.join(path.as_internal_file_string());
+            let unmanaged = unmanaged_files_under(&disk, &removed);
+            if !unmanaged.is_empty() {
+                let listed: Vec<String> = unmanaged
+                    .iter()
+                    .filter_map(|file| file.strip_prefix(&disk).ok())
+                    .map(|file| format!("  {}", file.display()))
+                    .collect();
+                return Err(checkout_error(
+                    format!(
+                        "home holds a folder at {} where the scope now holds a file or link, and dotsync never removes files it does not manage — move them out, then run dotsync again:\n{}",
+                        path.as_internal_file_string(),
+                        listed.join("\n")
+                    ),
+                    "folder in the way",
+                ));
+            }
+        }
+
+        for path in removals {
             let disk = home_disk_path(&self.home, &self.repo_root, &path)
                 .map_err(|message| checkout_error(message, "refused path"))?;
+            if std::fs::symlink_metadata(&disk).is_ok() {
+                std::fs::remove_file(&disk)
+                    .map_err(|err| checkout_error(format!("remove {}", disk.display()), err))?;
+                stats.removed_files += 1;
+            }
+            remove_emptied_folders(&self.home, &disk);
+        }
+        for (path, value) in writes {
+            let disk = home_disk_path(&self.home, &self.repo_root, &path)
+                .map_err(|message| checkout_error(message, "refused path"))?;
+            // A folder here held only folders dotsync's removals emptied: the
+            // check above refused any other.
+            if std::fs::symlink_metadata(&disk).is_ok_and(|md| md.is_dir()) {
+                remove_empty_folder_tree(&disk)?;
+            }
             let existed = std::fs::symlink_metadata(&disk).is_ok();
-            match new_value {
-                None => {
-                    if existed {
-                        std::fs::remove_file(&disk).map_err(|err| {
-                            checkout_error(format!("remove {}", disk.display()), err)
-                        })?;
-                        stats.removed_files += 1;
-                    }
-                }
-                Some(value) => {
-                    if let Some(parent) = disk.parent() {
-                        std::fs::create_dir_all(parent).map_err(|err| {
-                            checkout_error(format!("create directory {}", parent.display()), err)
-                        })?;
-                    }
-                    write_disk_entry(&self.store, &path, &disk, existed, &value).await?;
-                    if existed {
-                        stats.updated_files += 1;
-                    } else {
-                        stats.added_files += 1;
-                    }
-                }
+            if let Some(parent) = disk.parent() {
+                std::fs::create_dir_all(parent).map_err(|err| {
+                    checkout_error(format!("create directory {}", parent.display()), err)
+                })?;
+            }
+            write_disk_entry(&self.store, &path, &disk, existed, &value).await?;
+            if existed {
+                stats.updated_files += 1;
+            } else {
+                stats.added_files += 1;
             }
         }
         self.tree = new_tree;
@@ -566,6 +619,84 @@ impl LockedWorkingCopy for HomeLockedWorkingCopy {
         wc.persist()?;
         Ok(Box::new(wc))
     }
+}
+
+/// Whether a proper ancestor of `path` is a link dotsync materialized, and is
+/// still a link in home.
+fn beneath_managed_link(
+    tree: &MergedTree,
+    home: &Path,
+    path: &RepoPathBuf,
+) -> Result<bool, SnapshotError> {
+    let mut ancestor = path.as_ref().parent();
+    while let Some(dir) = ancestor {
+        if dir.is_root() {
+            break;
+        }
+        let value = tree
+            .path_value(dir)
+            .map_err(|err| snapshot_error(format!("read tree entry {dir:?}"), err))?;
+        if let Some(Some(TreeValue::Symlink(_))) = value.as_resolved() {
+            let disk = home.join(dir.as_internal_file_string());
+            if std::fs::symlink_metadata(&disk).is_ok_and(|md| md.file_type().is_symlink()) {
+                return Ok(true);
+            }
+        }
+        ancestor = dir.parent();
+    }
+    Ok(false)
+}
+
+/// Every file or link under a folder at `disk`, other than the ones about to
+/// be removed. Empty when `disk` is not a folder.
+fn unmanaged_files_under(disk: &Path, removed: &[PathBuf]) -> Vec<PathBuf> {
+    let Ok(md) = std::fs::symlink_metadata(disk) else {
+        return Vec::new();
+    };
+    if !md.is_dir() {
+        return Vec::new();
+    }
+    let mut found = Vec::new();
+    let mut pending = vec![disk.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => pending.push(path),
+                _ if removed.contains(&path) => {}
+                _ => found.push(path),
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Removes the folders above `disk` that are left empty, up to home. A folder
+/// that only held what a removal took leaves nothing behind for a harness or
+/// a person to mistake for config.
+fn remove_emptied_folders(home: &Path, disk: &Path) {
+    let mut dir = disk.parent();
+    while let Some(folder) = dir {
+        if folder == home || !folder.starts_with(home) || std::fs::remove_dir(folder).is_err() {
+            break;
+        }
+        dir = folder.parent();
+    }
+}
+
+/// Removes a folder holding nothing but folders.
+fn remove_empty_folder_tree(disk: &Path) -> Result<(), CheckoutError> {
+    let entries = std::fs::read_dir(disk)
+        .map_err(|err| checkout_error(format!("read {}", disk.display()), err))?;
+    for entry in entries.flatten() {
+        remove_empty_folder_tree(&entry.path())?;
+    }
+    std::fs::remove_dir(disk)
+        .map_err(|err| checkout_error(format!("remove {}", disk.display()), err))
 }
 
 /// Writes one resolved tree entry to disk. Replaces whatever is there rather
