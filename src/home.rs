@@ -104,6 +104,28 @@ impl Home {
         paths: &DotsyncPaths,
     ) -> Result<Self, DotsyncError> {
         let machine_scope = session.machine_scope().to_string();
+        // Config on a scope reaches every machine below it, so a scope
+        // something else hangs off is never one machine's own — whatever this
+        // machine's name says. Checked here, at the one door every command
+        // that treats a scope as this machine's goes through, because the
+        // name alone decides nothing: a machine whose clone has not joined yet
+        // can be named after a shared scope, and without this every commit it
+        // made "to its own scope" would reach every machine under that one.
+        match session.graph().get(&machine_scope) {
+            Some(scope) if !scope.is_leaf() => {
+                return Err(DotsyncError::MachineScopeIsShared {
+                    scope: scope.name.clone(),
+                    children: scope.children.clone(),
+                });
+            }
+            Some(_) => {}
+            // No scope to be: a clone that has not joined, or a machine whose
+            // scope was deleted. Nothing is written — a working-copy record
+            // made now would name the machine before it has chosen a name.
+            None => {
+                return Err(crate::sync::machine_scope_missing(session, &machine_scope));
+            }
+        }
         let workspace: WorkspaceNameBuf = machine_scope.as_str().into();
         let store = session.repo().store().clone();
         let state_path = paths.repo_root.join(".jj/working_copy");

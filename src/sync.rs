@@ -282,7 +282,7 @@ pub(crate) async fn classify_home_against_machine_scope(
 /// fetch in between is what takes a scope away: the reachable way to lose one
 /// is something that is not dotsync renaming or deleting the branch on the
 /// shared remote, and the run finds out about that when it fetches.
-fn machine_scope_missing(session: &Session, machine_scope: &str) -> DotsyncError {
+pub(crate) fn machine_scope_missing(session: &Session, machine_scope: &str) -> DotsyncError {
     DotsyncError::MachineScopeMissing {
         scope: machine_scope.to_string(),
         scopes: session.graph().names().map(str::to_string).collect(),

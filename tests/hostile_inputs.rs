@@ -39,7 +39,7 @@ fn a_machine_whose_scope_the_fleet_renamed_has_a_route_back() {
     assert_dotsync_can_get_this_machine_working(&machine_b);
 }
 
-/// A new scope joins the fleet's graph, and `dotsync view` stops working on
+/// A new scope joins the fleet's graph, and reading the fleet stops working on
 /// every machine in it — including the machine that made the change, whose run
 /// reported success a moment earlier.
 ///
@@ -49,7 +49,7 @@ fn a_machine_whose_scope_the_fleet_renamed_has_a_route_back() {
 /// is configured, but this machine's repo has no history for it" wherever the
 /// config reached.
 ///
-/// What this pins: `status`, `diff` and `view` "must work
+/// What this pins: `status`, `diff` and the fleet reads "must work
 /// on any repo state". A read-only command that refuses to describe the state
 /// it is in is refusing to do the one thing it is for — and a machine that had
 /// nothing to do with the change has lost the command it would use to find out
@@ -60,7 +60,7 @@ fn a_machine_whose_scope_the_fleet_renamed_has_a_route_back() {
 /// writing that pins the creation mechanism, which steps 4 and 8 remove and
 /// reinstate.
 #[test]
-fn view_still_answers_on_every_machine_after_a_scope_joins_the_graph() {
+fn reads_still_answer_on_every_machine_after_a_scope_joins_the_graph() {
     let harness = TestHarness::new();
     let (machine_a, machine_b) = two_synced_machines(&harness);
     machine_b.run_ok("dotsync");
@@ -72,11 +72,11 @@ fn view_still_answers_on_every_machine_after_a_scope_joins_the_graph() {
         ("the machine that had nothing to do with it", &machine_b),
         ("the machine that made the change", &machine_a),
     ] {
-        let view = machine.run("dotsync view --output json");
+        let view = machine.run("dotsync scopes --output json");
         assert_eq!(
             view.status.code(),
             Some(0),
-            "`view` is how a machine finds out what the scopes hold, and {whose} no longer has it\n{}",
+            "`scopes` is how a machine finds out what the fleet is, and {whose} no longer has it\n{}",
             render_output(&view)
         );
         // Named by field rather than as a bare string: the overview's

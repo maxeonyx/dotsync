@@ -873,12 +873,11 @@ fn status_and_diff_say_a_cascade_is_paused() {
     }
 }
 
-/// `view` is the third read-only diagnostic, and the only one that stayed
-/// silent about a paused cascade — so an agent that reached for the command
-/// whose whole job is orientation was the one agent not told that this machine
-/// cannot commit anything.
+/// The fleet reads are how an agent gets its bearings, so each of them says
+/// when this machine cannot commit anything — an agent that reached for the
+/// command whose whole job is orientation must not be the one agent not told.
 #[test]
-fn view_says_a_cascade_is_paused() {
+fn reads_say_a_cascade_is_paused() {
     let harness = TestHarness::new();
     let (machine_a, machine_b) = two_synced_machines(&harness);
 
@@ -894,14 +893,15 @@ fn view_says_a_cascade_is_paused() {
         1,
     );
 
-    // Every shape `view` answers in, because the pause is true of the machine
-    // rather than of the question asked.
+    // Every read, because the pause is true of the machine rather than of the
+    // question asked.
     for command in [
-        "dotsync view",
-        "dotsync view --scope all",
-        "dotsync view --file .config/app.conf",
+        "dotsync scopes",
+        "dotsync files --scope all",
+        "dotsync show all .config/app.conf",
+        "dotsync diff linux",
     ] {
-        let output = machine_b.run_ok(command);
+        let output = machine_b.run(command);
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         assert!(
             stderr.contains("paused") && stderr.contains("linux"),
@@ -959,7 +959,7 @@ fn the_drift_stop_says_a_cascade_is_paused_rather_than_advising_a_refused_commit
     assert_eq!(
         parse_stdout_json(&json)["paused_cascade"],
         "linux",
-        "and the payload has to carry it too, like `status`, `diff` and `view` do\n{}",
+        "and the payload has to carry it too, like `status`, `diff` and the fleet reads do\n{}",
         render_output(&json)
     );
 
@@ -1399,16 +1399,14 @@ fn a_conflict_that_came_from_the_remote_is_still_reported_after_abort() {
 /// The versions the pause printed are the only copies there are: nothing is
 /// written into home, and neither side is on a scope this machine syncs from.
 /// So an agent that lost that output — a new session, a scrolled terminal —
-/// has to be able to ask for them again, which is the whole of what `dotsync
-/// show conflict` was designed to do and the reason `view` absorbs it: `view`
-/// already answers "what is checked in", and the pause is derived, so it is
-/// correct whenever it is asked.
+/// has to be able to ask for them again. `status` is the command it runs by
+/// reflex, and the pause is derived, so it is correct whenever it is asked.
 #[test]
-fn view_reprints_the_conflict_the_pause_message_showed() {
+fn status_reprints_the_conflict_the_pause_message_showed() {
     let harness = TestHarness::new();
     let (machine, _pause) = pause_a_conflict_on_linux(&harness);
 
-    let view = machine.run_ok("dotsync view --output json");
+    let view = machine.run_ok("dotsync status --output json");
     let json = parse_stdout_json(&view);
     assert_eq!(json["paused_cascade"], "linux", "{}", render_output(&view));
     assert_eq!(
@@ -1425,7 +1423,7 @@ fn view_reprints_the_conflict_the_pause_message_showed() {
         render_output(&view)
     );
 
-    let human = machine.run_ok("dotsync view");
+    let human = machine.run_ok("dotsync status");
     let presented = render_output(&human);
     for version in [
         "setting = \"base\"",
@@ -1494,7 +1492,7 @@ fn a_pause_survives_losing_every_machine_local_record_of_it() {
 /// exactly the bytes the agent last typed there, and neither the version this
 /// change is colliding with nor the version they both came from is anywhere in
 /// what the run said. The `linux` side is reachable, but only by knowing to
-/// run `dotsync view --scope linux --file .config/app.conf`; the base is not
+/// run `dotsync show linux .config/app.conf`; the base is not
 /// reachable at all.
 ///
 /// That is also why the interim DL-2 guard has to ask "did this file change"

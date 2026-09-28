@@ -739,3 +739,36 @@ fn ensure_the_previous_releases_sync_state(machine: &MachineEnvironment) -> std:
     );
     path
 }
+
+/// A fresh agent joining a machine met this stop and did what it said —
+/// commit home's version — which was refused, because a file dotsync has
+/// never synced is not a change of this machine's to commit. The way out of a
+/// home-against-scope collision is the one DESIGN names: write the version you
+/// want into home and `continue`, or `discard` to take the scope's. The stop
+/// has to say that, and only that.
+#[test]
+fn a_home_collision_says_to_continue_or_discard() {
+    let harness = TestHarness::new();
+    let (machine_a, _machine_b) = two_synced_machines(&harness);
+    machine_a.write_file(".apprc", "theme = dark\n");
+    machine_a.run_ok("dotsync commit linux -m 'shared' -- .apprc");
+
+    let newcomer = harness.machine("machine-c", "linux", "goof-c");
+    newcomer.write_file(".apprc", "theme = mine\n");
+    let stopped = newcomer.run_expecting(
+        &format!(
+            "dotsync init {} --parent linux",
+            newcomer.remote_dir.to_str().unwrap()
+        ),
+        1,
+    );
+    let advice = render_output(&stopped);
+    assert!(
+        advice.contains("`dotsync continue`") && advice.contains("`dotsync discard <path>`"),
+        "{advice}"
+    );
+    assert!(
+        !advice.contains("dotsync commit"),
+        "committing is not how this stop ends\n{advice}"
+    );
+}

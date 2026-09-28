@@ -64,7 +64,7 @@ fn init_reports_no_drift() {
 /// test the graph work has owed since the rewrite began: a run that reports it
 /// created a scope means the scope exists and can be used. Declaring one in
 /// `config.toml` reported success and created no bookmark, so the scope was
-/// unusable and `dotsync view` broke on every machine in the fleet.
+/// unusable and reading the fleet broke on every machine.
 ///
 /// Usable means usable from another machine, which is why this ends on a
 /// machine that had nothing to do with any of it reading the file: a scope
@@ -303,7 +303,7 @@ fn a_deleted_scope_is_gone_from_the_remote_and_from_the_graph() {
         "the scope's branch has to go from the remote, which is the only copy every machine reads: {:?}",
         remote_branches(&machine_a)
     );
-    let view = machine_a.run_ok("dotsync view");
+    let view = machine_a.run_ok("dotsync scopes");
     assert!(
         !String::from_utf8_lossy(&view.stdout).contains("goof-b"),
         "and the scope has to be gone from the graph this machine reads\n{}",
@@ -320,7 +320,7 @@ fn another_machine_stops_seeing_a_deleted_scope() {
     let (machine_a, _machine_b) = two_synced_machines(&harness);
     let machine_c = harness.machine("machine-c", "linux", "goof-c");
     machine_c.init_ok_under("linux");
-    let before = machine_c.run_ok("dotsync view");
+    let before = machine_c.run_ok("dotsync scopes");
     assert!(
         String::from_utf8_lossy(&before.stdout).contains("goof-b"),
         "this test is about a scope the third machine can see to begin with\n{}",
@@ -330,7 +330,7 @@ fn another_machine_stops_seeing_a_deleted_scope() {
     machine_a.run_ok("dotsync delete-scope goof-b");
     machine_c.run_ok("dotsync");
 
-    let after = machine_c.run_ok("dotsync view");
+    let after = machine_c.run_ok("dotsync scopes");
     assert!(
         !String::from_utf8_lossy(&after.stdout).contains("goof-b"),
         "a machine that has synced since the deletion must not still be carrying the scope\n{}",
@@ -443,7 +443,7 @@ fn deleting_a_name_that_is_not_a_scope_says_where_to_find_the_ones_that_are() {
 
     let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
     assert!(
-        stderr.contains("hyprland") && stderr.contains("dotsync view"),
+        stderr.contains("hyprland") && stderr.contains("dotsync scopes"),
         "the stop has to name what was asked for and where to see what there is\n{stderr}"
     );
     assert_eq!(
@@ -507,4 +507,138 @@ fn a_machine_holding_an_unpublished_cascade_does_not_bring_a_deleted_scope_back(
         "ui_theme = dark\n",
         "and the work that machine was holding still has to get out"
     );
+}
+
+/// Joining a fleet used to overwrite whatever home already held at a path the
+/// scope has — the new machine's own config, which nothing had ever recorded —
+/// so agents backed home up by hand before running `init`. A path where home
+/// and the scope disagree is the same collision a sync stops on: home is left
+/// exactly as it was, both versions are shown, and the machine is joined. The
+/// way on is to decide: keep home's version (`continue`), or take the scope's
+/// (`discard`).
+#[test]
+fn joining_a_fleet_keeps_home_files_that_differ_from_it() {
+    let harness = TestHarness::new();
+    let (machine_a, _machine_b) = two_synced_machines(&harness);
+    machine_a.write_file(".config/fish/config.fish", "set -g fish_greeting shared\n");
+    machine_a.write_file(".gitconfig", "[user]\nname = Shared\n");
+    machine_a.run_ok("dotsync commit linux -m 'shared' -- .config/fish/config.fish .gitconfig");
+
+    let newcomer = harness.machine("machine-c", "linux", "goof-c");
+    newcomer.write_file(".config/fish/config.fish", "set -g fish_greeting mine\n");
+    newcomer.write_file(".gitconfig", "[user]\nname = Shared\n");
+
+    let stopped = newcomer.run_expecting(
+        &format!(
+            "dotsync init {} --parent linux --output json",
+            newcomer.remote_dir.to_str().unwrap()
+        ),
+        1,
+    );
+    let payload = parse_stdout_json(&stopped);
+    let conflicted: Vec<&str> = payload["conflicts"]
+        .as_array()
+        .expect("the collision is presented like any other")
+        .iter()
+        .map(|file| file["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(conflicted, vec![".config/fish/config.fish"], "{payload:#}");
+    assert_eq!(
+        newcomer.read_file(".config/fish/config.fish"),
+        "set -g fish_greeting mine\n",
+        "home is left exactly as it was"
+    );
+
+    let scopes = parse_stdout_json(&newcomer.run_ok("dotsync scopes --output json"));
+    assert!(
+        scopes["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scope| scope["name"] == "goof-c"),
+        "the machine joined even though its first sync stopped\n{scopes:#}"
+    );
+
+    newcomer.run_ok("dotsync continue");
+    assert_eq!(
+        newcomer.read_file(".config/fish/config.fish"),
+        "set -g fish_greeting mine\n"
+    );
+    let status = parse_stdout_json(&newcomer.run_ok("dotsync status --output json"));
+    assert_eq!(
+        status["changes"][0]["path"], ".config/fish/config.fish",
+        "the kept version is a local change, to commit or discard\n{status:#}"
+    );
+
+    newcomer.run_ok("dotsync discard .config/fish/config.fish");
+    assert_eq!(
+        newcomer.read_file(".config/fish/config.fish"),
+        "set -g fish_greeting shared\n"
+    );
+}
+
+/// A machine's name decides which scope is its own, and a hostname is often
+/// not the name wanted (`mx-manjaro` for a VM the fleet calls `mx-hv-mj`) —
+/// which used to mean exporting `DOTSYNC_HOSTNAME` in every shell for ever.
+/// The name is chosen once, at `init`, and every later run reads it back from
+/// the machine's own record rather than from the hostname.
+#[test]
+fn a_machine_named_at_init_keeps_that_name() {
+    let harness = TestHarness::new();
+    let (_machine_a, _machine_b) = two_synced_machines(&harness);
+    let newcomer = harness.machine("machine-c", "linux", "mx-manjaro");
+
+    newcomer.run_ok(&format!(
+        "dotsync init {} --parent linux --name mx-hv-mj",
+        newcomer.remote_dir.to_str().unwrap()
+    ));
+
+    let status = parse_stdout_json(&newcomer.run_ok("dotsync status --output json"));
+    assert_eq!(status["machine_scope"], "mx-hv-mj", "{status:#}");
+    let scopes = parse_stdout_json(&newcomer.run_ok("dotsync scopes --output json"));
+    let names: Vec<&str> = scopes["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|scope| scope["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"mx-hv-mj"), "{scopes:#}");
+    assert!(!names.contains(&"mx-manjaro"), "{scopes:#}");
+
+    newcomer.write_file(".config/vm.conf", "hypervisor = hyper-v\n");
+    newcomer.run_ok("dotsync commit mx-hv-mj -m 'this VM' -- .config/vm.conf");
+}
+
+/// A machine whose scope was deleted can join again under a new name, and
+/// keeps the new one.
+#[test]
+fn a_machine_rejoining_under_a_new_name_keeps_the_new_name() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+    machine_a.run_ok("dotsync delete-scope goof-b");
+
+    machine_b.run_ok("dotsync init --parent linux --name goof-b2");
+    let status = parse_stdout_json(&machine_b.run_ok("dotsync status --output json"));
+    assert_eq!(status["machine_scope"], "goof-b2", "{status:#}");
+}
+
+/// Reading home on a clone that has not joined yet must not decide the
+/// machine's name, and says how to join.
+#[test]
+fn a_clone_that_has_not_joined_says_to_join_and_keeps_its_name_open() {
+    let harness = TestHarness::new();
+    let (_machine_a, _machine_b) = two_synced_machines(&harness);
+    let newcomer = harness.machine("machine-c", "linux", "goof-c");
+    newcomer.init();
+
+    let refused = newcomer.run_expecting("dotsync status", 1);
+    assert!(
+        render_output(&refused).contains("dotsync init --parent"),
+        "{}",
+        render_output(&refused)
+    );
+
+    newcomer.run_ok("dotsync init --parent linux --name mx-new");
+    let status = parse_stdout_json(&newcomer.run_ok("dotsync status --output json"));
+    assert_eq!(status["machine_scope"], "mx-new", "{status:#}");
 }

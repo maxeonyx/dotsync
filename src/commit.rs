@@ -11,23 +11,22 @@ use jj_lib::merge::Merge;
 use jj_lib::merged_tree::MergedTree;
 use jj_lib::merged_tree_builder::MergedTreeBuilder;
 use jj_lib::object_id::ObjectId;
-use jj_lib::op_store::RefTarget;
-use jj_lib::ref_name::RefNameBuf;
 use jj_lib::repo::Repo as _;
 use jj_lib::rewrite::merge_commit_trees;
 
-use crate::converge;
+use crate::converge::{self, Pin, Pins};
 use crate::error::{DotsyncError, SkippedCommitPath};
 use crate::home::{repo_path_of, Home};
-use crate::machine::machine_signature;
 use crate::paths::DotsyncPaths;
 use crate::pause::{
-    conflicted_paths_of, converge_or_pause, present, publish_or_pause, reject_commit_if_paused,
-    save_paused_run, PausedCommit, PausedRun,
+    conflicted_files, conflicted_paths_of, converge_or_pause, present, publish_or_pause,
+    reject_commit_if_paused, save_paused_run, PausedCommit, PausedRun,
 };
+use crate::place::{carry_out, plan, CarriedOut, Plan, Planned};
 use crate::repo::{scope_head_commit, PushReport};
 use crate::selection::{load_scope_entries, select_changes_to_record, Selection};
 use crate::session::{in_session, Run, Session};
+use crate::status::PausedCascade;
 use crate::sync::{finishing, SyncReport};
 
 #[derive(Debug, Clone)]
@@ -37,6 +36,8 @@ pub struct CommitOptions {
     /// Empty means every managed file this machine has changed, which is the
     /// same set `dotsync status` reports as changes.
     pub paths: Vec<PathBuf>,
+    /// Say what the commit would do, and do none of it.
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -51,7 +52,8 @@ pub struct CommitReport {
     /// every other shape of commit: a bare commit selects what changed rather
     /// than filtering a list, and a path named exactly is refused out loud.
     pub skipped: Vec<SkippedCommitPath>,
-    pub push: PushReport,
+    /// What this run published. `None` for a dry run, which publishes nothing.
+    pub push: Option<PushReport>,
     /// What the commit recorded, or `None` when it found nothing to record.
     ///
     /// A commit with nothing to record writes no history, so it also runs no
@@ -69,7 +71,11 @@ pub struct RecordedCommit {
     /// run that adds files says which ones rather than reading like a run that
     /// changed a line.
     pub newly_tracked: Vec<PathBuf>,
-    pub sync: SyncReport,
+    /// What the commit changes on every machine, and — for a dry run — the
+    /// merge it would stop at.
+    pub planned: Planned,
+    /// The home sync that followed. `None` for a dry run.
+    pub sync: Option<SyncReport>,
 }
 
 impl CommitReport {
@@ -80,7 +86,7 @@ impl CommitReport {
         scope: &str,
         machine_scope: &str,
         skipped: Vec<SkippedCommitPath>,
-        push: PushReport,
+        push: Option<PushReport>,
     ) -> Self {
         Self {
             committed_scope: scope.to_string(),
@@ -120,15 +126,21 @@ async fn commit_in_session(
     // Converge before looking at this commit at all: DESIGN's "commit is
     // converge, add the new commit, converge again". Building a commit on a
     // head that another machine has moved is how a change comes to be recorded
-    // against a version of the scope that no longer exists.
+    // against a version of the scope that no longer exists. A dry run records
+    // none of it, so it converges inside the transaction its plan runs in.
     session.fetch().await?;
     let checkpoint = converge::checkpoint(session.repo().as_ref(), session.graph());
-    converge_or_pause(session, home, &checkpoint).await?;
     // Publish what earlier runs left behind: this commit may turn out to add
     // nothing, and a machine with an interrupted push behind it must still
     // heal. Anything this run goes on to create is published by the push after
     // the second pass.
-    let pending_push = publish_or_pause(session, home, &checkpoint).await?;
+    let pending_push = match options.dry_run {
+        true => None,
+        false => {
+            converge_or_pause(session, home, &checkpoint).await?;
+            Some(publish_or_pause(session, home, &checkpoint).await?)
+        }
+    };
     let graph = session.graph().clone();
 
     if !graph.contains(&options.scope) {
@@ -183,7 +195,15 @@ async fn commit_in_session(
 
     let repo = session.repo().clone();
     let mut tx = repo.start_transaction();
-    let base_commit = scope_head_commit(tx.repo_mut().base_repo().as_ref(), &options.scope)?;
+    let mut converged = false;
+    if options.dry_run {
+        let (moved, stopped) = converge::pass(&mut tx, &graph, &machine_scope, None, None).await?;
+        if let Some(pause) = stopped {
+            return Err(present(session, &machine_scope, &pause.merged, &pause.scope).await?);
+        }
+        converged = moved;
+    }
+    let base_commit = scope_head_commit(tx.repo(), &options.scope)?;
 
     let merge_base_tree =
         commit_merge_base_tree(tx.repo_mut(), &options.scope, &base_commit, &mark).await?;
@@ -216,6 +236,25 @@ async fn commit_in_session(
     })?;
 
     if new_tree.has_conflict() {
+        if options.dry_run {
+            return Ok(CommitReport {
+                committed_scope: options.scope.clone(),
+                machine_scope,
+                skipped,
+                push: None,
+                recorded: Some(RecordedCommit {
+                    newly_tracked,
+                    planned: Planned {
+                        effect: Vec::new(),
+                        stops_at: Some(PausedCascade {
+                            conflicts: conflicted_files(session, &new_tree, &options.scope).await?,
+                            scope: options.scope.clone(),
+                        }),
+                    },
+                    sync: None,
+                }),
+            });
+        }
         let conflicted_paths = conflicted_paths_of(&new_tree, &options.scope)?;
         // Nothing was written, so there is no transaction to keep: the pause
         // resolves against the scope head that is already there.
@@ -248,56 +287,66 @@ async fn commit_in_session(
         ));
     }
 
-    let new_commit = tx
-        .repo_mut()
-        .new_commit(vec![base_commit.id().clone()], new_tree)
-        .set_description(&options.message)
-        .set_author(machine_signature(&machine_scope))
-        .write()
-        .await
-        .map_err(|err| DotsyncError::Jj {
-            message: format!("write commit for {}: {err}", options.scope),
+    // The commit is a pin on the target scope, laid down by the same pass that
+    // then carries it through every scope below — so the cascade is not a
+    // second step, and what the run reports it changed is what the pass did.
+    let mut pinned = Vec::new();
+    for relative in &selected_paths {
+        let path = repo_path_of(relative)?;
+        let value = new_tree.path_value(&path).map_err(|err| DotsyncError::Jj {
+            message: format!("read {} from the commit tree: {err}", relative.display()),
         })?;
-    tx.repo_mut().set_local_bookmark_target(
-        RefNameBuf::from(options.scope.as_str()).as_ref(),
-        RefTarget::normal(new_commit.id().clone()),
-    );
+        pinned.push((path, Pin::Holds(value)));
+    }
+    let pins = Pins {
+        by_scope: [(options.scope.clone(), pinned)].into_iter().collect(),
+        description: options.message.clone(),
+    };
+    let planned = plan(session, home, &mut tx, &pins).await?;
 
-    session
-        .advance_to(
-            tx.commit("dotsync: commit scoped change")
-                .await
-                .map_err(|err| DotsyncError::Jj {
-                    message: format!("commit scoped change for {}: {err}", options.scope),
-                })?,
-        )
-        .await?;
+    if options.dry_run {
+        drop(tx);
+        return Ok(CommitReport {
+            committed_scope: options.scope,
+            machine_scope,
+            skipped,
+            push: None,
+            recorded: Some(RecordedCommit {
+                newly_tracked,
+                planned: planned.report(session).await?,
+                sync: None,
+            }),
+        });
+    }
 
-    // The second pass: this commit moved one scope, and every scope below it
-    // now merges a parent that moved. It is the same operation the run opened
-    // with, which is why there is no cascade to plan.
-    converge_or_pause(session, home, &checkpoint).await?;
-    // Push as soon as the history exists: the home sync below can legitimately
-    // stop on a conflict, and a stop must never strand committed scope
-    // history.
-    let push = publish_or_pause(session, home, &checkpoint).await?;
-    // The same home sync every other command ends with. It needs nothing said
-    // about the paths this commit just recorded: they reached the scope from
-    // home, so the merge that moves home onto the new head finds home's side
-    // and the head's side agreeing, and a local change the commit did not name
-    // is carried across rather than stopped on.
-    let sync =
-        crate::sync::sync_home_to_machine_scope(session, home, crate::sync::LocalChanges::Carry)
-            .await?;
+    let Plan {
+        moved,
+        effect,
+        stop,
+    } = planned;
+    let CarriedOut { push, sync } = carry_out(
+        session,
+        home,
+        &checkpoint,
+        tx,
+        converged || moved,
+        stop,
+        "dotsync: commit scoped change",
+    )
+    .await?;
 
     Ok(CommitReport {
         committed_scope: options.scope,
         machine_scope,
         skipped,
-        push,
+        push: Some(push),
         recorded: Some(RecordedCommit {
             newly_tracked,
-            sync,
+            planned: Planned {
+                effect,
+                stops_at: None,
+            },
+            sync: Some(sync),
         }),
     })
 }

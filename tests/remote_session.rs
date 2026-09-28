@@ -4,12 +4,12 @@
 mod harness;
 use harness::*;
 
-/// `view` reports on every scope, and the report is one answer about one
+/// `files` reports on every scope, and the report is one answer about one
 /// moment — so it is one run, and a run fetches once. Fetching per scope also
-/// makes `view` write an operation per scope into the repo's op log, which is
+/// makes a read write an operation per scope into the repo's op log, which is
 /// the opposite of the read-only command DESIGN describes.
 #[test]
-fn view_reaches_the_remote_once() {
+fn files_reaches_the_remote_once() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
 
@@ -17,7 +17,7 @@ fn view_reaches_the_remote_once() {
     add_hyprland_scope(&machine);
     machine.run_ok("dotsync");
 
-    let (view_output, git_calls) = machine.run_recording_git("dotsync view");
+    let (view_output, git_calls) = machine.run_recording_git("dotsync files");
     assert!(
         view_output.status.success(),
         "{}",
@@ -30,12 +30,12 @@ fn view_reaches_the_remote_once() {
         .count();
     assert_eq!(
         fetches, 1,
-        "one `dotsync view` over 4 scopes must fetch once, not once per scope; git was called: {git_calls:?}"
+        "one `dotsync files` over 4 scopes must fetch once, not once per scope; git was called: {git_calls:?}"
     );
 }
 
 /// One fetch per run is a property of having a session, not a habit of the
-/// code that happens to hold today. `view` grew an N+1 fetch without anyone
+/// code that happens to hold today. The old `view` grew an N+1 fetch without anyone
 /// noticing because nothing counted, and every command is one refactor away
 /// from the same thing.
 #[test]
@@ -114,11 +114,11 @@ fn read_only_commands_report_against_the_last_fetched_state_when_the_remote_is_u
         "diff must still show the drift\n{diff_stderr}"
     );
 
-    let view_output = machine.run("dotsync view");
+    let view_output = machine.run("dotsync files");
     assert_eq!(
         view_output.status.code(),
         Some(0),
-        "view must still list what is checked in\n{}",
+        "files must still list what is checked in\n{}",
         render_output(&view_output)
     );
     assert!(

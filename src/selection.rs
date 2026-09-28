@@ -287,6 +287,38 @@ fn expand_selection_paths(
     Ok(selected)
 }
 
+/// Every file and link under the named home directories, by the same walk a
+/// directory commit makes — links are entries, never followed, and dotsync's
+/// own state is never reached. A name that is not a directory in home names
+/// nothing to walk.
+pub(crate) fn home_files_under(
+    paths: &DotsyncPaths,
+    directories: &[PathBuf],
+) -> Result<BTreeSet<PathBuf>, DotsyncError> {
+    let home = Canonical::of(&paths.home_dir);
+    let repo_root = Canonical::of(&paths.repo_root);
+    let mut found = BTreeSet::new();
+    for directory in directories {
+        let directory: PathBuf = directory
+            .components()
+            .filter(|component| !matches!(component, Component::CurDir))
+            .collect();
+        let home_path = paths.home_dir.join(&directory);
+        if !std::fs::symlink_metadata(&home_path).is_ok_and(|metadata| metadata.is_dir()) {
+            continue;
+        }
+        let mut walk = DirectoryWalk {
+            home_root: &home,
+            repo_root: &repo_root,
+            matched: BTreeSet::new(),
+            skipped: Vec::new(),
+        };
+        walk.walk(&home_path)?;
+        found.extend(walk.matched);
+    }
+    Ok(found)
+}
+
 /// What the paths a commit named resolved to, kept apart by how they were
 /// named. A directory is a bulk selection and filters; a path named exactly is
 /// a claim about that path, and dotsync argues with it rather than quietly

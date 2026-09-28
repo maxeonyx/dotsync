@@ -44,7 +44,7 @@ These scopes form a directed acyclic graph (DAG):
 
 Each scope is a branch. A scope branch merges from its parent(s). So `linux` merges from `all`, `hyprland` merges from `linux`, and `mx-xps-cy` (a machine) merges from `hyprland`.
 
-A machine is just a leaf scope — there's nothing structurally special about it. The only difference is that a machine scope is the one whose files get synced to the live system. dotsync knows which scope is this machine's from the hostname, not from a user-visible checkout, and the scope it names has to be a leaf: config on a scope reaches every machine below it, so a scope something else hangs off cannot be one machine's own.
+A machine is just a leaf scope — there's nothing structurally special about it. The only difference is that a machine scope is the one whose files get synced to the live system. dotsync knows which scope is this machine's from the name it joined under (the hostname unless `init --name` said otherwise), not from a user-visible checkout, and the scope it names has to be a leaf: config on a scope reaches every machine below it, so a scope something else hangs off cannot be one machine's own.
 
 ### Why not a single branch with directory-based scoping?
 
@@ -131,6 +131,19 @@ Kind is not decoration on top of content, and treating a managed path as bytes a
 
 So a difference of kind is a difference: `status` and `diff` report it, and sync replaces rather than writes through. That is the same rule "Repo structure" states for symlinks, generalised to the reason behind it.
 
+### A scope's version has a standing
+
+A scope's tree is already its effective config — the cascade merged its parents into it. What a tree alone cannot say is which of it is the scope's _own_. That is the difference, path by path, between what the scope holds and what its parents give it (the merge of their trees; nothing, for a root):
+
+- **inherited** — it holds exactly what its parents give it;
+- **added** — it holds a path its parents do not;
+- **overridden** — it holds its own version of a path its parents hold;
+- **removed** — it does not hold a path its parents do.
+
+Where an inherited version comes from follows: the nearest scopes above whose own version it is. So "which scope owns this file", "what does this machine hold that nothing shares", "which machines hold identical copies" and "why does this machine's file look like this" are readings of one table, and every read and every placement write is phrased in it. Standing is always read off the fleet as the next writing run would leave it; a parent that has moved and not merged down would otherwise read as the child overriding everything the parent changed.
+
+Standing is derived, never stored, for the reason every derived thing here is: the repo already says it.
+
 ### A conflict is a base plus two sides
 
 A conflict is a first-class object with three parts: the base — the content both sides started from — and the two sides themselves. It is not one side with the other discarded, and it is not a file with `<<<<<<<` in it.
@@ -149,6 +162,7 @@ A reading aid, not a specification: refactoring may move any of it without an ed
 | A scope head, three states | jj's `RefTarget`, which is a merge of optional commit ids — absent, single, or contested |
 | The scope graph | derived in `scope_graph::derive` from the bookmarks and the ancestry of their creation commits |
 | The kind of a managed path | jj's `TreeValue`, whose `File` variant carries the executable bit and whose `Symlink` variant carries a target |
+| A scope's standing at a path | derived in `fleet::Fleet` from the scope's head tree and the merge of its parents' head trees, over the pass predicted in a transaction nothing commits |
 | A conflict | jj's own conflict representation, which is natively a base plus both sides |
 
 Every row is jj's own type or jj's own storage, apart from home itself. That is deliberate, and "The jj decision" below explains why building a parallel model of any of them makes it lossier.
@@ -237,11 +251,15 @@ So dotsync's core operation is a **convergence pass**: for each scope in topolog
 
 Every state a machine can be in — mid-crash, post-failed-push, freshly offline-edited — is just an input to the next convergence pass. There is no separate "recovery."
 
+**Every write is the pass with pins.** A pin says what one scope is to hold at one path once its parents have merged into it: exactly this value, or whatever its parents hold. A write is a set of pins and one pass that lays each down as it reaches the scope, in cascade order — `commit` pins home's edit on its target, `move` and `drop` pin content taken from the repo. So the cascade is never a second step, a write that touches several scopes is one run whose order the graph decides, and "commit to ancestors before descendants" is not a rule anybody has to know: narrowing a file from `linux` to `work-linux` cannot have the deletion on `linux` cascade through the keep on `work-linux`, because the keep lands after `linux` has merged into it.
+
+The same pass, in a transaction nothing commits, is how a write is previewed. Every machine's config is compared before and after the pins, and that comparison is what every write reports — "which machines get this untested" is a computed list, not a guess — and all `--dry-run` does is drop the transaction instead of recording it.
+
 **Pull first, always.** Every mutating command opens with fetch + convergence, so remote changes are integrated _before_ new work builds on top of them — never discovered mid-flow after edits and merges are already in progress. Commit is then: converge, add the new commit, converge again (to cascade it), push.
 
 **Push is a loop, not a step.** A rejected push isn't an error; it means another machine pushed first. Fetch, converge, push again. Push happens immediately after history is created — before the home sync — so a sync-side stop (a conflict with home) never strands committed history unpushed.
 
-**Read-only commands report; they never decide.** `status`, `diff`, and `view` move no scope bookmark, publish nothing, and never write to home. They fetch (when online) and _report_ what convergence would do — including "pulling would conflict on these files in scope X" — by running the convergence pass itself in a transaction nothing commits. Only `dotsync` (sync), `commit`, and `continue` converge for real.
+**Read-only commands report; they never decide.** `status`, `diff`, `scopes`, `files` and `show` move no scope bookmark, publish nothing, and never write to home. They fetch (when online) and _report_ what convergence would do — including "pulling would conflict on these files in scope X" — by running the convergence pass itself in a transaction nothing commits. Only `dotsync` (sync), `commit`, and `continue` converge for real.
 
 Two things they do write, worth stating rather than claiming otherwise:
 
@@ -252,7 +270,7 @@ Two things they do write, worth stating rather than claiming otherwise:
 
 ## Conflict resolution in home
 
-There is deliberately no visible working copy — a working copy next to the live config would mean three copies of everything. But the live config directory **is the working copy for all intents and purposes**, and it gets the full working-copy treatment. The user can never move it backward or sideways to another version or scope (inspection is done via `dotsync view`); it only ever goes forward. And when a merge conflicts, the conflict is put in front of whoever resolves it — in dotsync's own output, never in the file itself; see "The resolution surface" below.
+There is deliberately no visible working copy — a working copy next to the live config would mean three copies of everything. But the live config directory **is the working copy for all intents and purposes**, and it gets the full working-copy treatment. The user can never move it backward or sideways to another version or scope (inspection is done with `dotsync show`, `files` and `diff`, which read any scope without touching home); it only ever goes forward. And when a merge conflicts, the conflict is put in front of whoever resolves it — in dotsync's own output, never in the file itself; see "The resolution surface" below.
 
 ### "Paused" is derived, not stored
 
@@ -270,7 +288,7 @@ Three paused states exist, and each is derived from a different place:
 
 When a merge conflicts, the conflict is put in front of the agent that has to resolve it: every conflicted file, with both sides _and_ the base, each labeled with the scope it came from rather than with a commit id. The base is in because a conflict _is_ a base plus two sides — see "The state space" above — and jj carries all three, so leaving it out would mean discarding a part dotsync already holds. Max: _"Yes the base is supposed to be included."_
 
-**Nothing is written into home.** Conflict markers in a live config file are broken config: the file stops being valid for exactly as long as the pause lasts, so the application it configures reads a broken file precisely while somebody is fixing it. The versions therefore exist only in dotsync's output — which is why `dotsync view` prints them again, for the agent whose session ended or whose terminal scrolled.
+**Nothing is written into home.** Conflict markers in a live config file are broken config: the file stops being valid for exactly as long as the pause lasts, so the application it configures reads a broken file precisely while somebody is fixing it. The versions therefore exist only in dotsync's output — which is why `dotsync status` prints them again, for the agent whose session ended or whose terminal scrolled.
 
 That leaves "I am done" as the one thing dotsync cannot find out for itself: home reads identically before the agent starts and after it decides to keep the version already there. So `continue` exists, and it carries the decision.
 
@@ -296,13 +314,17 @@ This is mostly a corollary of the convergence model: interrupted work leaves loc
 
 ## Commands
 
-The steady-state command is `dotsync`, and it is the one an agent runs by reflex. The others exist because they answer questions `dotsync` cannot: how to join a remote in the first place, what changed here, and what to do when a cascade pauses. `dotsync` itself never splits into commit/cascade/push steps — see "Why one command?" below.
+The steady-state command is `dotsync`, and it is the one an agent runs by reflex. The others exist because they answer questions `dotsync` cannot: how to join a remote in the first place, what changed here, what the fleet holds and where each version comes from, where config should live, and what to do when a cascade pauses. `dotsync` itself never splits into commit/cascade/push steps — see "Why one command?" below.
 
 **`dotsync init <remote-url> [--parent <scope>]...`**: Clone the remote into the hidden repo, create this machine's own scope, and sync it into home. The only command that requires the remote to be reachable: it is the whole of its job.
 
-Joining a remote that already has scopes means naming the parents, and naming one that is not there is a stop that lists the ones that are. This is not a convenience: a hostname cannot tell a `home-linux` from a `work-linux`, the graph is append-only, and a scope guessed into the wrong place cannot be moved afterwards. A remote with no scopes on it has nothing to choose from, so that machine gets the root scope `all`, a scope named for its OS, and its own leaf under that — the one shape dotsync can justify without being told.
+Joining a remote that already has scopes means naming the parents, and naming one that is not there is a stop that lists the ones that are. This is not a convenience: a hostname cannot tell a `home-linux` from a `work-linux`, the graph is append-only, and a scope guessed into the wrong place cannot be moved afterwards. So the choice is made with the fleet in front of you: an `init` that cannot join keeps the clone it made and stops, the read commands answer from that clone, and `dotsync init --parent <scope>` (no URL) finishes the join from it. Nothing else reads the fleet from a machine that is not in it — before this, agents cloned the remote with git.
+
+Home is carried, not discarded. What home holds at a path the scope holds differently is content dotsync has never seen — the new machine's own config — so it is the untracked collision every sync stops on: the first sync stops whole, presents both versions, and leaves home exactly as it was; the machine is joined either way. `dotsync continue` keeps home's version as a local change to commit or discard, and `dotsync discard <path>` takes the scope's. A file home holds identically is simply in sync. A remote with no scopes on it has nothing to choose from, so that machine gets the root scope `all`, a scope named for its OS, and its own leaf under that — the one shape dotsync can justify without being told.
 
 A machine whose scope already exists adopts it, and refuses `--parent`, because where a scope hangs was decided when it was created.
+
+A machine's name is the hostname unless `--name` gives another, and it is a stored fact from then on: the working copy is named for the machine scope when the machine joins, and every later run reads the name back from there rather than re-deriving it. A hostname that changes, or was never the name the fleet wanted, decides nothing after `init` — and a machine whose scope another machine deleted can `init --parent` again under the same name.
 
 **`dotsync create-scope <name> --parent <scope>... [-m "what belongs here"]`**: Create a scope holding everything its parents hold. Machines join a scope with `init --parent`, so a scope created now is for the machines that join under it. Nothing moves an existing machine onto it.
 
@@ -320,21 +342,43 @@ Other machines are told nothing, and need to be: the scope's head on the remote 
 
 **`dotsync`** (no arguments): Pull and converge scope branches (merging remote changes and cascading, pausing on conflicts), sync repo -> system, push. It does not import home edits; use `dotsync status` and `dotsync commit <scope> -m "message" -- <paths...>` when home changes should be recorded.
 
-**`dotsync commit <scope> -m "message" <path>...`**: Commit the selected home-relative file/directory paths to the named scope branch, merge cascade through all descendant scopes, sync repo -> system, push to remote. It refuses a named path whose home content is not a change made on this machine — see the classification above. **The scope must be one this machine belongs to** — its own machine scope or an ancestor of it. Committing to a scope this machine does not descend from is refused (Max, 2026-08-13): home only ever moves forward, and the config it holds is supposed to stay valid, so there is no version of another machine's branch that this machine can claim to have started from. To contribute to a machine family you are not on, put the shared material and the pattern for it on the common ancestor, and leave it to an agent running on that family to add its own drop-ins on its own scope. Note this is only about _choosing_ a commit target: a cascade from a shared ancestor still merges into descendant scopes this machine is not on, so conflicts outside this machine's ancestry remain a normal event — see "Conflict resolution in home".
+**`dotsync commit <scope> -m "message" <path>...`**: Commit the selected home-relative file/directory paths to the named scope branch, merge cascade through all descendant scopes, sync repo -> system, push to remote. It refuses a named path whose home content is not a change made on this machine — see the classification above. **The scope must be one this machine belongs to** — its own machine scope or an ancestor of it. Committing home to a scope this machine does not descend from is refused (Max, 2026-08-13): what a commit records is home, home was built from this machine's own scopes, so there is no version of another machine's scope that the edit can claim to have started from, and what it wrote there would overwrite rather than build on whatever that machine has. Config reaches other scopes through `move` and `drop`, whose content comes from the repo and so has a base on any scope — see "Placement" below. Note this is only about _choosing_ a commit target: a cascade from a shared ancestor still merges into descendant scopes this machine is not on, so conflicts outside this machine's ancestry remain a normal event — see "Conflict resolution in home".
 
 **`dotsync commit <scope> -m "message"`** (no paths): Commit every managed file this machine has changed, which is exactly the set `dotsync status` lists as changes. It does not scan all of home for unrelated new files; new paths are intentionally opted into with explicit path arguments.
 
-**`dotsync status`**: List managed files this machine has changed, and separately the files another machine changed that home has not caught up to. Read-only, and exits 0 either way.
+**`dotsync status [<directory>...]`**: List managed files this machine has changed, and separately the files another machine changed that home has not caught up to. Read-only, and exits 0 either way. Given directories, it also lists every file under them that this machine's scope does not hold — the step Max's procedure had agents do by comparing `~/.config` against a scope listing — and for each, the scopes holding their own version and whether it is identical to home's.
 
-It also reports three things that are true of the machine rather than of home, because each of them describes a machine that is not doing what "no changes" implies: a paused cascade, since that machine can commit nothing until it is resolved; scopes whose head this machine and the remote have each moved, since the next writing run merges them; and scopes committed here that the remote has never seen, since a refused push is otherwise reported by the run that hit it and nowhere else. `diff` and `view` report all three too — `status` is the one an agent runs by reflex, and a fact that only one of the three carries is a fact nobody finds.
+It also reports three things that are true of the machine rather than of home, because each of them describes a machine that is not doing what "no changes" implies: a paused cascade, since that machine can commit nothing until it is resolved; scopes whose head this machine and the remote have each moved, since the next writing run merges them; and scopes committed here that the remote has never seen, since a refused push is otherwise reported by the run that hit it and nowhere else. `diff` and the fleet reads report all three too — `status` is the one an agent runs by reflex, and a fact that only some of them carry is a fact nobody finds. While a merge is waiting, `status` also reprints it in full: every conflicted file, both sides and the base. That is the only copy there is — nothing is written into home and neither side is on a scope this machine syncs from — so an agent whose session ended has somewhere to ask.
 
 **`dotsync diff`**: Show line-oriented diffs for managed home files with local changes. Read-only, and exits 1 when local changes are present so scripts and agents can distinguish clean from dirty state. A file the repo has moved on from while home stayed put is not a local change, so a machine that is merely behind exits 0 — the same answer `status` and plain `dotsync` give.
 
 **`dotsync discard <path>...`**: Throw away the local change at each path you name and write the scope's version there instead, then sync as usual. Every path has to be one of the changes `status` lists; anything else is a stop.
 
-**`dotsync view`**: Show a read-only overview of checked-in scope and file state, marking which scope is this machine. With `--scope <scope>`, show the managed file tree visible on that scope. With `--file <path>`, show the scopes where that file exists and which one owns it — the rootmost, since the rest have it from the cascade. With both, print that file as it exists on that scope.
+### Reading the fleet
 
-While a merge is waiting, the overview also reprints it in full: every conflicted file, both sides and the base. That is the only copy there is — nothing is written into home and neither side is on a scope this machine syncs from — so an agent whose session ended has somewhere to ask.
+Every scope can be read from every machine, including before it has joined. There is no ancestor/non-ancestor distinction anywhere on the read side: an agent deciding whether config should be shared, specialised or left alone needs every scope's version of it, and the first agent to try that could not find how and stopped.
+
+**`dotsync scopes`**: The graph — every scope, its parents and children, whether it is a machine, the machines a change to it reaches, and what its creator said it is for — marking which scope is this machine.
+
+**`dotsync files [<path>...] [--scope <scope>]... [--own]`**: The standing table. One row per scope and path: standing, kind, a content id equal exactly when two versions are identical, and where the version comes from. `--own` keeps only what each scope adds, overrides or removes, which is the audit: what is local to each machine, what could be shared, which copies are identical. Paths narrow to those paths and whatever is under them.
+
+**`dotsync show <scope> <path>`**: One file as one scope holds it, on stdout. A symlink's content is its target, and the payload says which kind it printed.
+
+**`dotsync diff <scope>`** and **`dotsync diff <scope> <scope>`**: What a scope changes over what it inherits, or how the second scope differs from the first, as unified diffs; `-- <path>...` narrows either. Exits 1 when there are differences, like the local form.
+
+### Placement
+
+**`dotsync move <path>... --from <scope> --to <scope> -m "message"`**: `--to` holds the version `--from` held, and `--from` holds nothing of its own there: it inherits. Up is promotion to a scope machines share, down is narrowing config pushed too broad, sideways is handing it over. `--from` has to hold its own version — a scope that only inherits a file has nothing to move, and the stop names where its version comes from.
+
+**`dotsync drop <path>... --from <scope> -m "message"`**: `--from` stops holding a version of its own and takes what it inherits: the shared version for an override, nothing for a file it added, the inherited file again for one it removed.
+
+Both work on any scope, from any machine. The rule that keeps `commit` inside this machine's ancestry is about content from home, which has no base on another machine's scope; a move's content is a scope's own tree entry landing on heads this run has just converged, so it has an exact base wherever it lands. What neither can know is whether the machines it reaches have tried the config, and that is what the per-machine effect is for (Max, 2026-09-28, choosing this over keeping placement inside this machine's ancestry).
+
+Both keep every other scope's own version where it is: they pin each scope that holds its own version to exactly that. They change who owns a file, not what anybody else decided about it — so the only machines whose config changes are the ones that took the file from `--from` or will now take it from `--to`, and neither ever lands a conflict on another machine's scope for this machine to resolve through its own home. A scope pinned to exactly what it now inherits holds nothing of its own, so an identical copy elsewhere unifies as a side effect with no machine changing; unifying a *different* version is a further `drop`, stated rather than implied.
+
+Together they are what Max's own procedure needed and could not say: config starts on the machine that first wants it, and when a second machine wants it the agent there moves it to the scope both share — the first machine's config unchanged by construction — instead of copying bytes through home and meeting an add/add conflict on the first machine's scope; and config pushed too broad moves back down in one run.
+
+Every write — `commit`, `move`, `drop` — reports its effect, per machine and path, and takes `--dry-run` to report it without recording or publishing anything. A dry run reads home the way `status` does, so it is as free of consequence as `status` is. A commit's dry run chooses its paths against what this machine last fetched rather than against the convergence it predicts, so where a parent's change has not merged down yet, `newly_tracked` can differ from the real run's. For this machine, whose home dotsync can see, a path home already holds as the result is not a change: a commit from home changes the scopes, not the home it came from.
 
 **`dotsync continue`**: Continue a paused cascade once the conflict has been resolved, recording the resolved contents on the scope whose merge stopped and publishing everything the pause held back. Refuses a resolution that still holds conflict markers.
 
@@ -355,9 +399,9 @@ Earlier designs had separate `dotsync` (sync), `dotsync commit` (commit + cascad
 
 ## Agent skill
 
-dotsync ships an agent skill (`docs/SKILL.md`) that triggers whenever a home config file is edited: edit in `~/`, run `dotsync status`, choose the root-est scope that owns the change, commit it. The tool is plumbing; the skill is what makes agents use the plumbing correctly, and it is the reason the command surface stays small enough to describe in a page.
+dotsync ships an agent skill (`docs/SKILL.md`) that triggers whenever a home config file is edited: edit in `~/`, run `dotsync status`, commit to this machine's own scope, and move config to the scope machines share once a second machine wants it (Max's own procedure: "Promote it to a shared scope from the second machine that wants it, never the first"). The tool is plumbing; the skill is what makes agents use the plumbing correctly, and it is the reason the command surface stays small enough to describe in a page.
 
-What a scope is for is ordinary commentary, useful when the name is not self-evident and carrying nothing when it is (Max: _"I don't think the scope comments are 'load bearing' lol? they're pretty obvious"_). A scope called `hyprland` says what belongs on it by being called `hyprland`. So whoever creates a scope may say what it is for, in the creation commit, and `dotsync view` shows it — one sentence that cannot drift from the scope it describes.
+What a scope is for is ordinary commentary, useful when the name is not self-evident and carrying nothing when it is (Max: _"I don't think the scope comments are 'load bearing' lol? they're pretty obvious"_). A scope called `hyprland` says what belongs on it by being called `hyprland`. So whoever creates a scope may say what it is for, in the creation commit, and `dotsync scopes` shows it — one sentence that cannot drift from the scope it describes.
 
 ## The JSON contract (`--output json`)
 
@@ -399,7 +443,21 @@ Every payload from a read-only command carries three facts about the machine rat
 
 `status` adds `incoming`, the files another machine changed that home has not caught up to. Neither carries a count; the arrays have lengths.
 
-**`view`** answers in four shapes, one per question asked: `{scopes, files}` for the overview, `{scope, files}`, `{file, scopes, owner}`, and `{scope, path, contents}`. `owner` is the rootmost scope holding the file, which is the one it was committed to. At a pause the overview also carries `conflicts`, the same objects the stop printed. This is a known sharp edge: the shapes are coherent with each other only in the envelope, `scopes` changes type between two of them, and `contents` is UTF-8 lossy.
+**The fleet reads** answer in one row shape each, carrying the machine facts above:
+
+```json
+{"command":"files","diverged_scopes":[],"files":[{"content":"file:8a1f2c3d4e5f","kind":"file","origin":["goof-b"],"path":".apprc","scope":"goof-b","standing":"overridden"}],"machine_scope":"goof-a","status":"ok","unpushed_scopes":[]}
+```
+
+`scopes` answers `{scopes:[{name, parents, children, machine, machines, description}]}`; `show` answers `{scope, path, standing, kind, origin, content, utf8, contents}`; `diff <scope> [<scope>]` answers `{left, right, changes:[{path, left_kind, right_kind, diff}]}`. `kind` is `file`, `executable`, `symlink` or `conflicted`, and `null` on a removal, which holds nothing.
+
+**Every write** carries `effect`, the machines whose config it changes and how, and `dry_run`:
+
+```json
+{"command":"move","dry_run":true,"effect":[{"changes":[{"change":"added","path":".config/tool.conf"}],"machine":"goof-b"}],"from":"goof-a","machine_scope":"goof-b","paths":[".config/tool.conf"],"status":"ok","to":"linux"}
+```
+
+A dry run that would stop at a merge also carries `stops_at: {scope, conflicts}`, the same conflict objects a stop carries. A real run that stops, stops.
 
 **A stop** carries the kind, the message, the facts found, and the conflicted files:
 
