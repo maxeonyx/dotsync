@@ -131,6 +131,10 @@ Kind is not decoration on top of content, and treating a managed path as bytes a
 
 So a difference of kind is a difference: `status` and `diff` report it, and sync replaces rather than writes through. That is the same rule "Repo structure" states for symlinks, generalised to the reason behind it.
 
+A folder is never an entry: dotsync manages files and links, so a path that is a folder holds nothing of its own, and the files in it are entries of their own. That settles the cases where a path changes between a link and a folder — a skill linked into place from a clone becoming the skill's own files, or a folder of files becoming one link to where they now live. A path beneath one of dotsync's own links holds nothing in home; the merge reads a folder term as no entry, so "home removed the files, the scope removed them and put a link there" is the link; and a sync removes before it writes, taking with it the folders its removals emptied. A folder that still holds files dotsync does not manage is never removed: the sync stops before writing anything and names them.
+
+Home is written before the sync is recorded. A sync that stops part-way leaves the mark where it was, so what it did write reads as the change the head makes and merges cleanly next run; recording first would make every file it did not reach read as deleted here.
+
 ### A scope's version has a standing
 
 A scope's tree is already its effective config — the cascade merged its parents into it. What a tree alone cannot say is which of it is the scope's _own_. That is the difference, path by path, between what the scope holds and what its parents give it (the merge of their trees; nothing, for a root):

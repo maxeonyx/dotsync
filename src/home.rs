@@ -684,8 +684,17 @@ impl Home {
         parent: CommitId,
         tree: MergedTree,
     ) -> Result<(), DotsyncError> {
-        self.switch_to(session, parent, tree).await?;
-        self.check_out().await
+        // Home is written before the switch is recorded. A checkout that
+        // stops part-way then leaves the mark where it was, so what it did
+        // write reads as the same change the head makes and merges cleanly
+        // next run — rather than the mark claiming a head home never reached,
+        // and every file the checkout did not get to reading as deleted here.
+        let (tx, new_wc) = self.start_switch(session, parent, tree).await?;
+        self.locked
+            .check_out(&new_wc)
+            .await
+            .map_err(|err| jj_error(format!("materialize into home: {err}")))?;
+        self.record_switch(session, tx, new_wc).await
     }
 
     /// Writes the wc commit's tree into home. Separate from the switch for the
@@ -713,6 +722,17 @@ impl Home {
         parent: CommitId,
         tree: MergedTree,
     ) -> Result<(), DotsyncError> {
+        let (tx, new_wc) = self.start_switch(session, parent, tree).await?;
+        self.record_switch(session, tx, new_wc).await
+    }
+
+    /// The new wc commit, in a transaction nothing has committed yet.
+    async fn start_switch(
+        &self,
+        session: &Session,
+        parent: CommitId,
+        tree: MergedTree,
+    ) -> Result<(jj_lib::transaction::Transaction, Commit), DotsyncError> {
         let old_wc = self.wc_commit.clone();
         let mut tx = session.repo().start_transaction();
         let new_wc = tx
@@ -731,6 +751,15 @@ impl Home {
             .rebase_descendants()
             .await
             .map_err(|err| jj_error(format!("rebase descendants: {err}")))?;
+        Ok((tx, new_wc))
+    }
+
+    async fn record_switch(
+        &mut self,
+        session: &mut Session,
+        tx: jj_lib::transaction::Transaction,
+        new_wc: Commit,
+    ) -> Result<(), DotsyncError> {
         let repo = tx
             .commit("dotsync: sync home")
             .await
@@ -832,9 +861,58 @@ async fn merge_trees(
             (theirs.0, theirs.1.to_string()),
         ],
     );
-    MergedTree::merge(merge)
+    let merged = MergedTree::merge(merge)
         .await
-        .map_err(|err| jj_error(format!("merge trees: {err}")))
+        .map_err(|err| jj_error(format!("merge trees: {err}")))?;
+    settle_folder_terms(merged).await
+}
+
+/// Resolves the conflicts jj reports only because a folder is one of the
+/// terms.
+///
+/// jj merges trees by path, so a folder removed on one side and replaced by a
+/// link on the other is a conflict at the folder's path. Dotsync manages files
+/// and links, never folders: there, the folder is no entry at all, one side
+/// removed the files in it and the other removed the same files and added a
+/// link. Read that way the merge is the link. When the entry-level answer is
+/// nothing and exactly one side holds a folder, that side's folder is the
+/// answer: it is the only side with anything there.
+async fn settle_folder_terms(merged: MergedTree) -> Result<MergedTree, DotsyncError> {
+    use jj_lib::backend::TreeValue;
+    use jj_lib::merge::SameChange;
+    let mut settled = Vec::new();
+    for (path, value) in merged.conflicts() {
+        let value = value.map_err(|err| jj_error(format!("read conflict at {path:?}: {err}")))?;
+        let is_folder = |term: &Option<TreeValue>| matches!(term, Some(TreeValue::Tree(_)));
+        if !value.iter().any(is_folder) {
+            continue;
+        }
+        let as_entries = value.map(|term| match term {
+            Some(TreeValue::Tree(_)) => None,
+            other => other.clone(),
+        });
+        match as_entries.resolve_trivial(SameChange::Accept) {
+            Some(Some(entry)) => settled.push((path, Merge::normal(entry.clone()))),
+            Some(None) => {
+                let mut folders = value.adds().filter(|term| is_folder(term));
+                if let (Some(folder), None) = (folders.next(), folders.next()) {
+                    settled.push((path, Merge::resolved(folder.clone())));
+                }
+            }
+            None => {}
+        }
+    }
+    if settled.is_empty() {
+        return Ok(merged);
+    }
+    let mut builder = MergedTreeBuilder::new(merged);
+    for (path, value) in settled {
+        builder.set_or_remove(path, value);
+    }
+    builder
+        .write_tree()
+        .await
+        .map_err(|err| jj_error(format!("write the merged tree: {err}")))
 }
 
 /// A home-relative path as jj names it. Home-relative because that is how
