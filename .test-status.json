@@ -113,6 +113,7 @@
     "dotsync::init_and_config$a_deleted_scope_is_gone_from_the_remote_and_from_the_graph": "passing",
     "dotsync::init_and_config$a_machine_cannot_delete_the_scope_it_syncs_from": "passing",
     "dotsync::init_and_config$a_machine_holding_an_unpublished_cascade_does_not_bring_a_deleted_scope_back": "passing",
+    "dotsync::init_and_config$a_machine_named_at_init_keeps_that_name": "pending",
     "dotsync::init_and_config$a_scope_created_on_one_machine_is_usable_from_another": "passing",
     "dotsync::init_and_config$a_scope_other_scopes_hang_off_cannot_be_deleted": "passing",
     "dotsync::init_and_config$another_machine_stops_seeing_a_deleted_scope": "passing",
@@ -153,6 +154,7 @@
     "dotsync::read_only$status_clean_shows_no_changes": "passing",
     "dotsync::read_only$status_ignores_unmanaged_files": "passing",
     "dotsync::read_only$status_json_contract": "passing",
+    "dotsync::read_only$status_lists_untracked_files_under_the_directories_named": "pending",
     "dotsync::read_only$status_names_the_scopes_this_machine_has_not_published": "passing",
     "dotsync::read_only$status_shows_deleted_file": "passing",
     "dotsync::read_only$status_shows_modified_file": "passing",
@@ -178,14 +180,5 @@
     "dotsync::sync_and_drift$the_conflict_stop_lists_files_the_way_status_does_and_apart_from_its_instructions": "passing",
     "dotsync::sync_and_drift$v03_plain_sync_ignores_unrelated_home_changes": "passing",
     "dotsync::version_json$version_json_flag_prints_machine_readable_version": "passing"
-  },
-  "renames": {
-    "dotsync::conflicts$reads_say_a_cascade_is_paused": "dotsync::conflicts$view_says_a_cascade_is_paused",
-    "dotsync::conflicts$status_reprints_the_conflict_the_pause_message_showed": "dotsync::conflicts$view_reprints_the_conflict_the_pause_message_showed",
-    "dotsync::hostile_inputs$reads_still_answer_on_every_machine_after_a_scope_joins_the_graph": "dotsync::hostile_inputs$view_still_answers_on_every_machine_after_a_scope_joins_the_graph",
-    "dotsync::read_only$files_says_when_no_scope_holds_a_path": "dotsync::read_only$view_says_when_no_scope_holds_a_file",
-    "dotsync::read_only$files_works_while_local_scopes_are_ahead_of_remote": "dotsync::read_only$view_works_while_local_scopes_are_ahead_of_remote",
-    "dotsync::read_only$scopes_says_what_each_scope_is_for": "dotsync::read_only$view_says_what_each_scope_is_for",
-    "dotsync::remote_session$files_reaches_the_remote_once": "dotsync::remote_session$view_reaches_the_remote_once"
   }
 }
