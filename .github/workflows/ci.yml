@@ -26,6 +26,8 @@ jobs:
   ready:
     name: Ready
     runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.release.outputs.release }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -48,18 +50,23 @@ jobs:
       - name: Prepare cargo-ratchet source
         run: git clone --depth=1 https://github.com/maxeonyx/tdd-ratchet-rs "$RUNNER_TEMP/tdd-ratchet"
 
-      - name: Require a fresh release version
-        run: |
-          tag="v$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
-          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
-            echo "Release tag $tag already exists; bump package.version before integration."
-            exit 1
-          fi
-
       - name: Enforce and test the release guard
         run: |
           python3 scripts/check_main_version_bump.py range --base origin/main --head HEAD
           python3 scripts/test_check_main_version_bump.py
+
+      # The guard has just refused any binary-changing PR whose version is already
+      # released, so an existing tag here means nothing in this PR feeds the binary.
+      - name: Decide whether this integration releases
+        id: release
+        run: |
+          tag="v$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "Release $tag exists; this PR changes nothing that feeds the binary, so it integrates without a release."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -147,7 +154,8 @@ jobs:
 
   release:
     name: Release
-    needs: [build, integrate]
+    if: needs.ready.outputs.release == 'true'
+    needs: [ready, build, integrate]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -167,6 +175,7 @@ jobs:
 
   pages:
     name: Pages
+    if: ${{ !cancelled() && needs.integrate.result == 'success' && needs.release.result != 'failure' }}
     needs: [build, integrate, release]
     runs-on: ubuntu-latest
     environment:
@@ -206,9 +215,11 @@ jobs:
           PAGES_RESULT: ${{ needs.pages.result }}
         run: |
           state=failure
-          if [ "$RELEASE_RESULT" = success ] && [ "$PAGES_RESULT" = success ]; then
-            state=success
-          fi
+          case "$RELEASE_RESULT" in success | skipped)
+            if [ "$PAGES_RESULT" = success ]; then
+              state=success
+            fi
+          esac
           gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$MERGE_SHA" \
             -f state="$state" -f context=integrated-ci \
             -f description='One-run integration and publication result' \
