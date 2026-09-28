@@ -170,16 +170,24 @@
 <body>
   <div class="container">
     <h1>dotsync</h1>
-    <p class="tagline">Agent-first dotfile sync with scope branches and merge cascades.</p>
+    <p class="tagline">Agent-first dotfile sync: layered scopes, merge cascades, and a fleet any machine can read and rearrange.</p>
 
     <div class="commands">
       <div class="command">
         <code>dotsync</code>
-        <p>Sync repo to system, applying whatever other machines have published. Stops and shows a diff for any file that drifted here first.</p>
+        <p>Sync this machine's scope into home, merging in whatever other machines have published and carrying your own edits.</p>
       </div>
       <div class="command">
         <code>dotsync commit &lt;scope&gt; -m "message" &lt;path&gt;...</code>
-        <p>Commit selected home-relative paths to a scope branch, cascade merges through descendants, sync, and push. Omit the paths to commit every managed file this machine has changed.</p>
+        <p>Record home edits on this machine's scope or one above it, cascade them to every scope below, sync, and push — listing the machines whose config changed.</p>
+      </div>
+      <div class="command">
+        <code>dotsync files --own</code>
+        <p>What every scope holds of its own — added, overridden, removed — and which copies are identical. <code>dotsync show &lt;scope&gt; &lt;path&gt;</code> and <code>dotsync diff &lt;scope&gt; &lt;scope&gt;</code> read any scope from any machine.</p>
+      </div>
+      <div class="command">
+        <code>dotsync move &lt;path&gt; --from &lt;scope&gt; --to &lt;scope&gt;</code>
+        <p>Promote config to a shared scope, or narrow it to where it belongs, in one run from any machine. <code>--dry-run</code> says what each machine would receive first.</p>
       </div>
     </div>
 

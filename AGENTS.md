@@ -25,6 +25,31 @@ The repository-serialized run records the required `Ready` check, builds the rel
 
 The trusted ledger workflow runs on every push to an open pull request and commits even when the ledger is unchanged, so every ledger run moves the head SHA. Dispatch only once the ledger run for that push has finished. Dispatch first and the bot's commit lands after `Ready` was recorded, leaving the required status on a commit that is no longer the head, so auto-merge waits for a check that will never arrive and the Merge job fails.
 
+## Design discipline — read before designing anything
+
+This is the stable part: how to decide what dotsync should be. Follow it, and hand it on — to any agent you delegate to, and in any guidance you write.
+
+- **Optimise terminal consequences, not proxies.** The question is what happens to Max, to the agents editing his config, and to the next developer — not whether the architecture looks clean, the diff is small, or the test count went up. Every command, type, flag, test and paragraph has to earn its cost in those consequences.
+- **The current implementation is evidence, not specification.** Understand what it does and why before keeping, changing or deleting it; then keep it only if it still earns its place.
+- **Work from concrete episodes, broadly, before converging.** Actor × goal × state × what they try × what they need to see × what could go wrong × how they verify × how they recover. Max is the primary source of real use cases — ask him. Real transcripts, the dotfiles history, and `~/.config/AGENTS.md` (his own procedure for agents, much of it written to compensate for missing tooling) are the next best evidence. Separate evidenced episodes from generic heuristics.
+- **Generate genuinely competing designs where the choice is consequential**, replay the episodes through each, and compare by consequences. Use independent agents with fresh context for episode mining, competing models and final review when anchoring is a risk — and disposition every material finding they return.
+- **Integrate rather than accumulate.** Before adding a command, flag or special case, look for the one model that makes several problems disappear. The standing table and pins-in-the-pass are this repo's examples: one relation answers every read; one mechanism is every write, its cascade, its preview and its report.
+- **Treat implementation friction as design evidence**, and refactor radically when a better model appears. Represent essential complexity honestly, then delete the compensating machinery it makes redundant, in the same change.
+- **Agents are the primary users, so investigation is a product feature.** Dotsync must expose enough read-side evidence to justify every write it allows, and every write must say what it will do and did. The abstraction boundary is the point: an agent must never need jj, the hidden repo, or a clone of the remote to do ordinary work. Any time one does, dotsync is incomplete.
+- **The development system is part of the product.** Black-box scenario tests over real fleets are what make radical change safe; keep them expressing episodes and invariants rather than implementation accidents.
+- **Before stopping, reconsider the whole system**: if you had known at the start what you know now, would you build exactly this? Take the second-order simplifications. Stop when further passes produce only cosmetic or speculative change.
+- **Keep this guidance true.** Project facts below go stale; when they are wrong, fix them rather than working around them. Propagate this section, recursively, to whoever works next.
+
+## How dotsync thinks — current project facts
+
+Update these when they stop being true.
+
+- **Scopes and standing.** A scope's tree is already its effective config; what matters for every decision is the scope's *own* layer — the difference from the merge of its parents' trees, per path: inherited, added, overridden, removed. `fleet::Fleet` computes it, always over the pass predicted in a transaction nothing commits (a parent not yet merged down would otherwise read as the child overriding it). Every read (`scopes`, `files`, `show`, `diff <scope> [<scope>]`) is a reading of that table, for any scope, from any machine, before joining too.
+- **Every write is pins in the pass.** `converge::Pins`: per scope, per path, what the scope holds once its parents have merged into it (`Holds(value)` or `Inherits`). `commit` pins home's three-way edit on its target; `move`/`drop` (`src/place.rs`) pin repo content and keep every other scope's own version. The pass lays pins in cascade order, so multi-scope writes are one run and ordering is the graph's job. `place::plan` compares every machine's config before and after — that is the effect every write reports, and `--dry-run` is the same plan with the transaction dropped.
+- **Where writes may land.** Content from home may only land on this machine's scope or its ancestors (home has no base on anyone else's scope). Content from the repo may land anywhere (Max, 2026-09-28). What neither can know is whether other machines have tried the config — which is what the effect lists.
+- **The graph is structural**: a scope is a bookmark whose history holds its creation commit; edges are creation-commit ancestry. Create and delete exist; reparent/rename are designed but not built (PLAN, "Graph changes").
+- **Home is jj's working copy**; the mark is the wc commit's parent; a sync is `merge(home, mark, tip)`; nothing about a pause is stored except a stopped commit's own record. `init` carries home: collisions stop the first sync rather than overwrite.
+
 ## Start Here
 
 - Read `DESIGN.md` before changing command behavior, scope semantics, sync rules, or any product requirement. It describes dotsync as it is.
@@ -42,9 +67,9 @@ Tests, review and the ratchet are here because they make the work faster and les
 
 `dotsync` is a Rust CLI that wraps `jj` (Jujutsu) workflows for dotfile synchronization using scope branches and merge cascades.
 
-Home is jj's working copy through dotsync's own `WorkingCopy` implementation; the scope graph is derived from the repo's structure; one convergence pass moves every scope bookmark; a paused merge is recomputed rather than stored. Commands: `dotsync`, `init`, `create-scope`, `delete-scope`, `commit`, `discard`, `status`, `diff`, `view`, `continue`, `abort`, with `--output json` everywhere.
+Home is jj's working copy through dotsync's own `WorkingCopy` implementation; the scope graph is derived from the repo's structure; one convergence pass moves every scope bookmark and lays every write's pins; a paused merge is recomputed rather than stored. Commands: `dotsync`, `init`, `create-scope`, `delete-scope`, `commit`, `move`, `drop`, `discard`, `status`, `diff`, `scopes`, `files`, `show`, `continue`, `abort`, with `--output json` everywhere and `--dry-run` on every write.
 
-`jj` (Jujutsu) is a runtime dependency. It may not be installed in every dev environment yet.
+jj is linked in as a library (`jj-lib`); the jj CLI is never needed. See "Hard-won knowledge" below.
 
 ## Scope Model
 
@@ -55,6 +80,8 @@ Home is jj's working copy through dotsync's own `WorkingCopy` implementation; th
 
 - `DESIGN.md`: read when implementation choices might affect requirements or workflow semantics; it also holds the JSON contract
 - `src/main.rs`: read when modifying CLI parsing, command shapes, or startup behavior
+- `src/fleet.rs`: the standing table and the per-machine effect; read before adding any read or report
+- `src/place.rs`: plans, `move`/`drop`, and how a planned write is carried out; read before adding any write
 - `.github/workflows/ci.yml`: read when changing CI, release, or Pages deployment
 - `docs/index.html`: read when updating the public landing page content or style
 - `docs/SKILL.md`: read when refining end-user agent instructions for dotfiles edits
