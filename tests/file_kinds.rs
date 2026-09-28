@@ -470,3 +470,145 @@ fn status_and_diff_report_a_kind_difference_between_a_link_and_a_file() {
         );
     }
 }
+
+/// Config that was a link becomes real files: an agent skill linked into
+/// place from a clone is replaced by the skill's own folder on a shared scope.
+/// The machine that still has dotsync's link at that path takes the folder on
+/// its next sync — the link was dotsync's own, so nothing of home's is in the
+/// way, and nothing is read through it.
+#[test]
+fn a_link_the_fleet_replaces_with_a_folder_becomes_the_folder_on_the_next_sync() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    symlink_at(
+        Path::new("../../clone/skills/tool"),
+        &machine_a.home_dir.join(".agents/skills/tool"),
+    );
+    machine_a.run_ok("dotsync commit linux -m 'link the skill in' -- .agents/skills/tool");
+    machine_b.run_ok("dotsync");
+    assert!(machine_b.is_symlink(".agents/skills/tool"));
+
+    machine_a.run_ok("dotsync drop .agents/skills/tool --from linux -m 'the skill lives here now'");
+    machine_a.write_file(".agents/skills/tool/SKILL.md", "---\nname: tool\n---\n");
+    machine_a.run_ok("dotsync commit linux -m 'the skill itself' -- .agents/skills/tool");
+
+    let sync = machine_b.run_ok("dotsync");
+    assert!(
+        !machine_b.is_symlink(".agents/skills/tool"),
+        "{}",
+        render_output(&sync)
+    );
+    assert_eq!(
+        machine_b.read_file(".agents/skills/tool/SKILL.md"),
+        "---\nname: tool\n---\n"
+    );
+    assert_stderr_snapshot(
+        &machine_b.run_ok("dotsync status"),
+        "dotsync: no changes for goof-b\n",
+    );
+}
+
+/// The other direction: a folder of config becomes one link to where the
+/// config now lives. The folder only ever held what dotsync put there, so it
+/// goes — the folders dotsync's own removals emptied included — and the link
+/// takes its place.
+#[test]
+fn a_folder_the_fleet_replaces_with_a_link_becomes_the_link_on_the_next_sync() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    machine_a.write_file(".claude/skills/tool/SKILL.md", "---\nname: tool\n---\n");
+    machine_a.run_ok("dotsync commit linux -m 'a skill' -- .claude/skills/tool");
+    machine_b.run_ok("dotsync");
+
+    machine_a.run_ok("dotsync drop .claude/skills --from linux -m 'skills are shared now'");
+    assert!(
+        !machine_a.home_dir.join(".claude/skills").exists(),
+        "the folders a removal empties go with it"
+    );
+    symlink_at(
+        Path::new("../.agents/skills"),
+        &machine_a.home_dir.join(".claude/skills"),
+    );
+    machine_a.run_ok("dotsync commit linux -m 'one link to the shared skills' -- .claude/skills");
+
+    let sync = machine_b.run_ok("dotsync");
+    assert!(
+        machine_b.is_symlink(".claude/skills"),
+        "{}",
+        render_output(&sync)
+    );
+    assert_stderr_snapshot(
+        &machine_b.run_ok("dotsync status"),
+        "dotsync: no changes for goof-b\n",
+    );
+}
+
+/// A folder the fleet now wants a link at, holding files dotsync does not
+/// manage — an application's own state beside the config. Dotsync never
+/// removes what it does not manage, so the sync stops before writing anything
+/// and names what is in the way. It must not leave the machine believing it
+/// arrived: the next sync, once the folder is moved, finishes cleanly and no
+/// file reads as deleted here.
+#[test]
+fn a_folder_holding_files_dotsync_does_not_manage_stops_the_sync_before_anything_is_written() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    machine_a.write_file(".claude/skills/tool/SKILL.md", "---\nname: tool\n---\n");
+    machine_a.run_ok("dotsync commit linux -m 'a skill' -- .claude/skills/tool");
+    machine_b.run_ok("dotsync");
+    machine_b.write_file(".claude/skills/synced/app-state.json", "{}\n");
+
+    machine_a.run_ok("dotsync drop .claude/skills --from linux -m 'skills are shared now'");
+    symlink_at(
+        Path::new("../.agents/skills"),
+        &machine_a.home_dir.join(".claude/skills"),
+    );
+    machine_a.write_file(".config/other.conf", "arrives with it\n");
+    machine_a.run_ok(
+        "dotsync commit linux -m 'one link to the shared skills' -- .claude/skills .config/other.conf",
+    );
+
+    let stopped = machine_b.run("dotsync");
+    assert_eq!(
+        stopped.status.code(),
+        Some(1),
+        "{}",
+        render_output(&stopped)
+    );
+    let stderr = String::from_utf8_lossy(&stopped.stderr);
+    assert!(
+        stderr.contains(".claude/skills") && stderr.contains("synced/app-state.json"),
+        "the stop names the folder and what in it dotsync does not manage\n{stderr}"
+    );
+    assert!(
+        !machine_b.file_exists(".config/other.conf"),
+        "nothing is written when the sync stops"
+    );
+    assert_eq!(
+        machine_b.read_file(".claude/skills/synced/app-state.json"),
+        "{}\n"
+    );
+
+    fs::rename(
+        machine_b.home_dir.join(".claude/skills"),
+        machine_b.home_dir.join("claude-skills-moved-aside"),
+    )
+    .unwrap();
+    let sync = machine_b.run_ok("dotsync");
+    assert!(
+        machine_b.is_symlink(".claude/skills"),
+        "{}",
+        render_output(&sync)
+    );
+    assert_eq!(
+        machine_b.read_file(".config/other.conf"),
+        "arrives with it\n"
+    );
+    assert_stderr_snapshot(
+        &machine_b.run_ok("dotsync status"),
+        "dotsync: no changes for goof-b\n",
+    );
+}
