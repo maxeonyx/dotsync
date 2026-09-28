@@ -178,6 +178,79 @@ fn drop_of_a_file_a_scope_owns_removes_it_from_the_machines_that_had_it() {
     assert!(!machine_a.file_exists(".stale"));
 }
 
+/// Config that is a directory — an agent skill is a folder holding a
+/// `SKILL.md` and whatever scripts it ships — moves as one thing. Naming the
+/// directory moves every entry the scope holds of its own under it, links
+/// included, the way naming a directory to `commit` records everything under it.
+#[test]
+fn move_of_a_directory_moves_everything_the_scope_holds_under_it() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    machine_a.write_file(".agents/skills/tool/SKILL.md", "---\nname: tool\n---\n");
+    machine_a.write_file(".agents/skills/tool/scripts/run.sh", "echo run\n");
+    symlink_at(
+        std::path::Path::new("SKILL.md"),
+        &machine_a.home_dir.join(".agents/skills/tool/README.md"),
+    );
+    machine_a.run_ok("dotsync commit goof-a -m 'try the skill here' -- .agents/skills/tool");
+
+    let moved = parse_stdout_json(&machine_b.run_ok(
+        "dotsync move .agents/skills/tool --from goof-a --to linux -m 'share the skill' --output json",
+    ));
+    assert_eq!(
+        effect(&moved),
+        vec![
+            "goof-b:.agents/skills/tool/README.md:added".to_string(),
+            "goof-b:.agents/skills/tool/SKILL.md:added".to_string(),
+            "goof-b:.agents/skills/tool/scripts/run.sh:added".to_string(),
+        ],
+        "{moved:#}"
+    );
+    assert_eq!(
+        machine_b.read_file(".agents/skills/tool/scripts/run.sh"),
+        "echo run\n"
+    );
+    assert!(machine_b.is_symlink(".agents/skills/tool/README.md"));
+
+    let files = files_json(&machine_b, "--own .agents");
+    assert_eq!(
+        standing(&files, "goof-a", ".agents/skills/tool/SKILL.md"),
+        None,
+        "goof-a holds nothing of its own under the directory any more\n{files:#}"
+    );
+}
+
+/// Removing a skill everywhere is one drop of its directory from the scope
+/// that owns it.
+#[test]
+fn drop_of_a_directory_removes_everything_the_scope_holds_under_it() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    machine_a.write_file(".agents/skills/old/SKILL.md", "---\nname: old\n---\n");
+    machine_a.write_file(".agents/skills/old/notes.md", "notes\n");
+    machine_a.write_file(".agents/skills/kept/SKILL.md", "---\nname: kept\n---\n");
+    machine_a.run_ok("dotsync commit linux -m 'skills' -- .agents/skills");
+    machine_b.run_ok("dotsync");
+
+    let dropped = parse_stdout_json(&machine_b.run_ok(
+        "dotsync drop .agents/skills/old/ --from linux -m 'nothing uses it' --output json",
+    ));
+    assert_eq!(
+        effect(&dropped),
+        vec![
+            "goof-a:.agents/skills/old/SKILL.md:removed".to_string(),
+            "goof-a:.agents/skills/old/notes.md:removed".to_string(),
+            "goof-b:.agents/skills/old/SKILL.md:removed".to_string(),
+            "goof-b:.agents/skills/old/notes.md:removed".to_string(),
+        ],
+        "a trailing slash names the same directory, and a sibling that merely shares the prefix is untouched\n{dropped:#}"
+    );
+    assert!(!machine_b.file_exists(".agents/skills/old/SKILL.md"));
+    assert!(machine_b.file_exists(".agents/skills/kept/SKILL.md"));
+}
+
 /// Moving or dropping a scope's version changes who owns the file; it does not
 /// decide for other scopes that hold their own. Those keep what they have, so
 /// the run never lands a conflict on another machine's scope for this machine
