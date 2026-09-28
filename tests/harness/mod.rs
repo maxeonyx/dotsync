@@ -1130,8 +1130,9 @@ pub fn assert_stderr_snapshot(output: &Output, expected: &str) {
     );
 }
 
-/// Two machines, a base file on `all`, a `linux` override of it, then a
-/// conflicting edit committed to `all` from the second machine — which leaves
+/// Two machines, a base file on `all`, a `linux` override of it the second
+/// machine has not synced, then a conflicting edit committed to `all` from the
+/// second machine — which leaves
 /// that machine with a cascade paused at `linux` over `.config/app.conf`.
 /// Returns the paused machine and the output of the run that paused.
 pub fn pause_a_conflict_on_linux(harness: &TestHarness) -> (MachineEnvironment, Output) {
@@ -1178,6 +1179,14 @@ pub fn pause_a_conflict_on(
         render_output(&commit_base)
     );
 
+    // The second machine has the base and not yet the override: the two
+    // machines' changes cross, which is how two histories come to change the
+    // same file differently. A machine's own edit is always an edit of the
+    // version it holds, so a collision on its own path needs the other
+    // machine's change to be one it has not seen.
+    let sync_b = machine_b.run("dotsync");
+    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
+
     machine_a.write_file(
         ".config/app.conf",
         &format!("setting = \"{override_scope}\"\n"),
@@ -1190,9 +1199,6 @@ pub fn pause_a_conflict_on(
         "{}",
         render_output(&commit_override)
     );
-
-    let sync_b = machine_b.run("dotsync");
-    assert!(sync_b.status.success(), "{}", render_output(&sync_b));
 
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     let conflict =

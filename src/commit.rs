@@ -205,12 +205,45 @@ async fn commit_in_session(
     }
     let base_commit = scope_head_commit(tx.repo(), &options.scope)?;
 
-    let merge_base_tree =
+    let target_base =
         commit_merge_base_tree(tx.repo_mut(), &options.scope, &base_commit, &mark).await?;
-    let mut builder = MergedTreeBuilder::new(merge_base_tree.clone());
+    // Where the target holds a file, the edit is from what home was derived
+    // from — this machine's version — to what home holds. Where no scope
+    // between the target and this machine holds its own version, that is the
+    // target's version as this machine last synced it. Where one does, the
+    // edit is still only the edit: the part only true below the target stays
+    // there, and an edit inside that part is not an edit of anything the
+    // target holds, so it conflicts rather than publishes. Where the target
+    // holds nothing, there is nothing of its own to keep, and it gains the
+    // file as home holds it.
+    let mark_tree = mark.tree();
+    let mut base_builder = MergedTreeBuilder::new(target_base.clone());
+    let mut builder = MergedTreeBuilder::new(target_base.clone());
     for relative in &selected_paths {
-        builder.set_or_remove(repo_path_of(relative)?, home.entry(relative)?);
+        let path = repo_path_of(relative)?;
+        let read = |tree: &MergedTree, what: &str| {
+            tree.path_value(path.as_ref())
+                .map_err(|err| DotsyncError::Jj {
+                    message: format!("read {} as {what}: {err}", relative.display()),
+                })
+        };
+        if !read(&target_base, "the target last held it")?.is_absent() {
+            base_builder.set_or_remove(
+                path.clone(),
+                read(&mark_tree, "this machine last synced it")?,
+            );
+        }
+        builder.set_or_remove(path, home.entry(relative)?);
     }
+    let merge_base_tree = base_builder
+        .write_tree()
+        .await
+        .map_err(|err| DotsyncError::Jj {
+            message: format!(
+                "write the base of the home edit for {}: {err}",
+                options.scope
+            ),
+        })?;
     let home_tree = builder.write_tree().await.map_err(|err| DotsyncError::Jj {
         message: format!("write commit tree for {}: {err}", options.scope),
     })?;
