@@ -678,3 +678,44 @@ fn the_overview_says_which_scope_is_this_machine() {
         "the two machine scopes render identically apart from their names, so the rendering says nothing about where you are\n{stdout}"
     );
 }
+
+/// `status` lists changes to managed files, so a config file nothing tracks
+/// yet is invisible to it — Max's own procedure has agents compare `~/.config`
+/// against a scope listing by hand to find them. Naming directories asks for
+/// them, and for each one whether another scope already holds a version: the
+/// file another machine is already sharing is the one most likely to belong.
+#[test]
+fn status_lists_untracked_files_under_the_directories_named() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    machine_b.write_file(".config/tool/tool.conf", "colour = green\n");
+    machine_b.run_ok("dotsync commit goof-b -m 'tool' -- .config/tool/tool.conf");
+    machine_a.write_file(".config/tool/tool.conf", "colour = green\n");
+    machine_a.write_file(".config/other/new.conf", "fresh = yes\n");
+    machine_a.write_file(".outside-the-named-dirs", "not asked about\n");
+
+    let payload = parse_stdout_json(&machine_a.run_ok("dotsync status .config --output json"));
+    let untracked = payload["untracked"].as_array().expect("untracked");
+    let paths: Vec<&str> = untracked
+        .iter()
+        .map(|file| file["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        vec![".config/other/new.conf", ".config/tool/tool.conf"],
+        "{payload:#}"
+    );
+    let tool = &untracked[1];
+    assert_eq!(
+        tool["elsewhere"],
+        serde_json::json!([{"scope": "goof-b", "same": true}]),
+        "{payload:#}"
+    );
+
+    let plain = parse_stdout_json(&machine_a.run_ok("dotsync status --output json"));
+    assert!(
+        plain.get("untracked").is_none(),
+        "without directories `status` reads nothing it was not asked to\n{plain:#}"
+    );
+}

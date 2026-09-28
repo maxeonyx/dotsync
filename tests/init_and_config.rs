@@ -576,3 +576,35 @@ fn joining_a_fleet_keeps_home_files_that_differ_from_it() {
         "set -g fish_greeting shared\n"
     );
 }
+
+/// A machine's name decides which scope is its own, and a hostname is often
+/// not the name wanted (`mx-manjaro` for a VM the fleet calls `mx-hv-mj`) —
+/// which used to mean exporting `DOTSYNC_HOSTNAME` in every shell for ever.
+/// The name is chosen once, at `init`, and every later run reads it back from
+/// the machine's own record rather than from the hostname.
+#[test]
+fn a_machine_named_at_init_keeps_that_name() {
+    let harness = TestHarness::new();
+    let (_machine_a, _machine_b) = two_synced_machines(&harness);
+    let newcomer = harness.machine("machine-c", "linux", "mx-manjaro");
+
+    newcomer.run_ok(&format!(
+        "dotsync init {} --parent linux --name mx-hv-mj",
+        newcomer.remote_dir.to_str().unwrap()
+    ));
+
+    let status = parse_stdout_json(&newcomer.run_ok("dotsync status --output json"));
+    assert_eq!(status["machine_scope"], "mx-hv-mj", "{status:#}");
+    let scopes = parse_stdout_json(&newcomer.run_ok("dotsync scopes --output json"));
+    let names: Vec<&str> = scopes["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|scope| scope["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"mx-hv-mj"), "{scopes:#}");
+    assert!(!names.contains(&"mx-manjaro"), "{scopes:#}");
+
+    newcomer.write_file(".config/vm.conf", "hypervisor = hyper-v\n");
+    newcomer.run_ok("dotsync commit mx-hv-mj -m 'this VM' -- .config/vm.conf");
+}
