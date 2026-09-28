@@ -12,7 +12,7 @@ Config lives on **scopes**, and scopes inherit from the scopes above them: `all`
 
 1. Run `dotsync` first to pick up anything other machines have published.
 2. Edit config files directly at `~/` (their real locations).
-3. Run `dotsync status` to see what changed. A file dotsync does not track yet will not be there: it lists changes to managed files, and a brand-new one is not a change to anything. Do not read "no changes" as "nothing to commit".
+3. Run `dotsync status` to see what changed. A file dotsync does not track yet will not be there: it lists changes to managed files, and a brand-new one is not a change to anything. Do not read "no changes" as "nothing to commit" — `dotsync status .config .local/bin` also lists the untracked files under those directories, and which other scopes already hold a version of each (identical or different).
 4. Run `dotsync commit <scope> -m "message" -- <paths>` to commit specific files, or `dotsync commit <scope> -m "message"` to commit every changed managed file. A new file has to be named — naming no paths never starts tracking one.
 
 ## Choosing a scope
@@ -42,7 +42,7 @@ Add `--output json` to any of them for rows to process; `content` is equal exact
 When this machine wants config another machine has:
 
 1. `dotsync files --own` to find it, `dotsync show <other-machine> <path>` to read it.
-2. If it works here as it is: `dotsync move <path> --from <other-machine> --to <shared-scope> -m "why"`. The shared scope is the nearest one both machines are under (`dotsync scopes`). The other machine's config does not change; this machine gains the file.
+2. If it works here as it is: `dotsync move <path> --from <other-machine> --to <shared-scope> -m "why"`. The shared scope is the nearest one both machines are under (`dotsync scopes`). The other machine's config does not change; this machine gains the file. Any other scope that already held an identical copy now simply inherits it — it has nothing of its own left to drop — and its machine sees no change.
 3. If it needs changing to work here: write your version into `~/<path>`, `dotsync commit <this-machine> -m "why" -- <path>`, make sure it works, then `dotsync move <path> --from <this-machine> --to <shared-scope> -m "why"`. The other machine keeps its own version until something says otherwise — `dotsync drop <path> --from <other-machine> -m "why"` makes it take the shared one.
 
 Before any write that reaches other machines, add `--dry-run`: it lists, machine by machine, what would change, and changes nothing. Every real write lists the same thing afterwards. Tell the user which machines receive config nobody has tried on them, and what might break there (missing binaries, paths, the platform).
@@ -73,7 +73,7 @@ Until you do one of those, writes refuse to start and nothing this machine has c
 
 ## Setting up a new machine
 
-`dotsync init <remote-url>` clones the fleet. If the fleet already has scopes it stops there, so you can look before choosing where this machine hangs: `dotsync scopes`, `dotsync files --scope <candidate>`, `dotsync show <candidate> <path>`. Then `dotsync init --parent <scope>` joins.
+`dotsync init <remote-url>` clones the fleet. If the fleet already has scopes it stops there, so you can look before choosing where this machine hangs: `dotsync scopes`, `dotsync files --scope <candidate>`, `dotsync show <candidate> <path>`. Then `dotsync init --parent <scope>` joins. The machine's scope is named after its hostname; `--name <name>` picks another, and the machine keeps whichever it joined as.
 
 Files already in home that the fleet holds differently are never overwritten: the first sync stops and shows both versions. Keep this machine's with `dotsync continue` (it stays a local change to commit or discard), or take the fleet's with `dotsync discard <path>`. No backup is needed.
 

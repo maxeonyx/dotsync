@@ -546,9 +546,9 @@ impl DotsyncError {
             "It expects at most one of home and the scope to have changed each file — or, where both did, to have changed different lines of it.",
             "Both sides changed the same part of the same file, so there is no merged version dotsync can work out on its own. Nothing was written: home is untouched, and the incoming changes to every other file are held back with it, because home is derived from one commit and a home built half from each side would make the next run read those incoming changes as edits of yours undoing them.",
             &[
-                "read the three versions of each file below, decide what the file should hold, and write that into the file at its real path in home.",
+                "read the versions of each file below, decide what the file should hold, and write that into the file at its real path in home — leaving it as it is keeps home's version.",
                 &format!(
-                    "then record your decision on a scope: `dotsync commit {scope} -m \"message\" -- <path>`. That is what makes it everybody's version, and it leaves this sync nothing left to merge."
+                    "then run `dotsync continue`: it takes what home holds at those paths as your decision and finishes the sync. The file stays a change of this machine's, listed by `dotsync status`, until you record it on a scope or discard it; `{scope}` is untouched."
                 ),
                 "or, if the version the scope already holds is the one you want, run `dotsync discard <path>` and let the sync finish. That throws away what is in home at the paths you name and nothing else.",
             ])),
