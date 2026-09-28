@@ -324,3 +324,41 @@ fn committing_home_to_another_machines_scope_points_at_move() {
         render_output(&output)
     );
 }
+
+/// A scope under two parents that hold different versions of a file resolves
+/// them with a version of its own. Dropping that version would bring back a
+/// merge nobody can resolve from here — so the drop is refused, names the
+/// disagreement, and records nothing, rather than stopping on another
+/// machine's scope with a pause no later run can find.
+#[test]
+fn dropping_a_version_that_settles_disagreeing_parents_is_refused() {
+    let harness = TestHarness::new();
+    let (machine_a, _machine_b) = two_synced_machines(&harness);
+    machine_a.run_ok("dotsync create-scope work --parent all");
+    let machine_c = harness.machine("machine-c", "linux", "goof-c");
+    machine_c.init_ok_under("linux --parent work");
+
+    machine_c.write_file(".x", "linux\n");
+    machine_c.run_ok("dotsync commit linux -m 'x on linux' -- .x");
+    machine_c.write_file(".x", "work\n");
+    machine_c.run_expecting("dotsync commit work -m 'x on work' -- .x", 1);
+    machine_c.write_file(".x", "settled\n");
+    machine_c.run_ok("dotsync continue");
+    machine_a.run_ok("dotsync");
+
+    for flags in ["--dry-run", ""] {
+        let output = machine_a.run_expecting(
+            &format!("dotsync drop .x --from goof-c -m 'unify' {flags} --output json"),
+            1,
+        );
+        let payload = parse_stdout_json(&output);
+        assert_eq!(
+            payload["error"],
+            "parents_disagree",
+            "{}",
+            render_output(&output)
+        );
+    }
+    let status = parse_stdout_json(&machine_a.run_ok("dotsync status --output json"));
+    assert!(status.get("paused_cascade").is_none(), "{status:#}");
+}

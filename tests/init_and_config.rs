@@ -608,3 +608,37 @@ fn a_machine_named_at_init_keeps_that_name() {
     newcomer.write_file(".config/vm.conf", "hypervisor = hyper-v\n");
     newcomer.run_ok("dotsync commit mx-hv-mj -m 'this VM' -- .config/vm.conf");
 }
+
+/// A machine whose scope was deleted can join again under a new name, and
+/// keeps the new one.
+#[test]
+fn a_machine_rejoining_under_a_new_name_keeps_the_new_name() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+    machine_a.run_ok("dotsync delete-scope goof-b");
+
+    machine_b.run_ok("dotsync init --parent linux --name goof-b2");
+    let status = parse_stdout_json(&machine_b.run_ok("dotsync status --output json"));
+    assert_eq!(status["machine_scope"], "goof-b2", "{status:#}");
+}
+
+/// Reading home on a clone that has not joined yet must not decide the
+/// machine's name, and says how to join.
+#[test]
+fn a_clone_that_has_not_joined_says_to_join_and_keeps_its_name_open() {
+    let harness = TestHarness::new();
+    let (_machine_a, _machine_b) = two_synced_machines(&harness);
+    let newcomer = harness.machine("machine-c", "linux", "goof-c");
+    newcomer.init();
+
+    let refused = newcomer.run_expecting("dotsync status", 1);
+    assert!(
+        render_output(&refused).contains("dotsync init --parent"),
+        "{}",
+        render_output(&refused)
+    );
+
+    newcomer.run_ok("dotsync init --parent linux --name mx-new");
+    let status = parse_stdout_json(&newcomer.run_ok("dotsync status --output json"));
+    assert_eq!(status["machine_scope"], "mx-new", "{status:#}");
+}
