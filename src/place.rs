@@ -128,7 +128,8 @@ async fn place_in_session(
     }
 
     let fleet = Fleet::read(tx.repo(), &graph).await?;
-    let paths: Vec<PathBuf> = options.paths.iter().map(|path| normalized(path)).collect();
+    let named: Vec<PathBuf> = options.paths.iter().map(|path| normalized(path)).collect();
+    let paths = under_directories(&fleet, options, &named);
     let pins = placement_pins(&fleet, options, &paths)?;
     let planned = plan(session, home, &mut tx, &pins).await?;
     // A pause is recomputed by a pass without pins, so one caused by a
@@ -196,11 +197,7 @@ fn placement_pins(
     for path in paths {
         let own = fleet
             .row(&options.from, path)
-            .filter(|row| match options.to {
-                // What moves is a version, so a removal has nothing to carry.
-                Some(_) => matches!(row.standing, Standing::Added | Standing::Overridden),
-                None => row.standing.is_own(),
-            });
+            .filter(|row| placeable(row.standing, options));
         let Some(_) = own else {
             return Err(DotsyncError::NotOwnOnScope {
                 scope: options.from.clone(),
@@ -260,6 +257,49 @@ fn placement_pins(
         by_scope,
         description: options.message.clone(),
     })
+}
+
+/// Whether a scope's standing at a path is something this placement can act
+/// on. What moves is a version, so a removal has nothing to carry; a drop acts
+/// on anything the scope holds of its own.
+fn placeable(standing: Standing, options: &PlacementOptions) -> bool {
+    match options.to {
+        Some(_) => matches!(standing, Standing::Added | Standing::Overridden),
+        None => standing.is_own(),
+    }
+}
+
+/// Every path named, with a directory replaced by what `from` holds of its own
+/// under it — the way a directory named to `commit` stands for what is under
+/// it. A skill is a folder, and moving or removing one is one change.
+///
+/// A path the scope holds an entry at is itself, whatever is under it, and a
+/// directory with nothing placeable under it stays as named, so the refusal
+/// names what the caller typed.
+fn under_directories(fleet: &Fleet, options: &PlacementOptions, named: &[PathBuf]) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for path in named {
+        let under: Vec<PathBuf> = match fleet.row(&options.from, path) {
+            Some(_) => Vec::new(),
+            None => fleet
+                .rows()
+                .iter()
+                .filter(|row| {
+                    row.scope == options.from
+                        && row.path.starts_with(path)
+                        && placeable(row.standing, options)
+                })
+                .map(|row| row.path.clone())
+                .collect(),
+        };
+        match under.is_empty() {
+            true => paths.push(path.clone()),
+            false => paths.extend(under),
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 /// The pins laid down by one more pass over a transaction that has already

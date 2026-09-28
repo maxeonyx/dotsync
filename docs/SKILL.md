@@ -53,7 +53,7 @@ Before any write that reaches other machines, add `--dry-run`: it lists, machine
 - **Stop overriding**: `dotsync drop <path> --from <scope> -m "why"` makes the scope take what it inherits again.
 - **Remove everywhere**: `dotsync drop <path> --from <owner> -m "why"`, where the owner is the scope `dotsync files <path>` says the version comes from. Scopes that hold their own version keep it; `dotsync files --own <path>` lists them, and a `drop` each removes those too.
 
-`move` and `drop` work on any scope from any machine, and leave every other scope's own version alone: they never land a conflict on another machine's scope.
+A directory stands for everything the scope holds of its own under it, so a skill moves or goes with one command: `dotsync drop .agents/skills/<name> --from <owner> -m "why"`. `move` and `drop` work on any scope from any machine, and leave every other scope's own version alone: they never land a conflict on another machine's scope.
 
 ## Ending a local change
 

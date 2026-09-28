@@ -229,7 +229,8 @@ enum Command {
     },
     #[command(name = "move", about = MOVE_ABOUT, long_about = MOVE_LONG_ABOUT)]
     Move {
-        /// Repo paths to move
+        /// Repo paths to move; a directory stands for everything the scope
+        /// holds of its own under it
         #[arg(required = true)]
         paths: Vec<PathBuf>,
 
@@ -251,7 +252,8 @@ enum Command {
     },
     #[command(about = DROP_ABOUT, long_about = DROP_LONG_ABOUT)]
     Drop {
-        /// Repo paths where the scope holds its own version
+        /// Repo paths where the scope holds its own version; a directory stands
+        /// for everything the scope holds of its own under it
         #[arg(required = true)]
         paths: Vec<PathBuf>,
 
