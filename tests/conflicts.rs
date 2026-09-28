@@ -200,13 +200,14 @@ fn shared_scope_conflict_pauses_and_continue_applies_resolution_to_machine_homes
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
     machine_a.run_ok("dotsync commit all -m 'add base config' -- .config/app.conf");
 
+    machine_b.run_ok("dotsync");
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
     machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
 
-    machine_b.run_ok("dotsync");
+    // machine-b has not seen the linux override: the two changes cross.
     assert_eq!(
         machine_b.read_file(".config/app.conf"),
-        "setting = \"linux\"\n"
+        "setting = \"base\"\n"
     );
 
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
@@ -345,13 +346,14 @@ fn continue_preserves_non_conflicting_parent_changes_from_paused_merge() {
     machine_a
         .run_ok("dotsync commit all -m 'add base config' -- .config/app.conf .config/shared.conf");
 
+    machine_b.run_ok("dotsync");
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
     machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
 
-    machine_b.run_ok("dotsync");
+    // machine-b has not seen the linux override: the two changes cross.
     assert_eq!(
         machine_b.read_file(".config/app.conf"),
-        "setting = \"linux\"\n"
+        "setting = \"base\"\n"
     );
     assert_eq!(
         machine_b.read_file(".config/shared.conf"),
@@ -412,10 +414,10 @@ fn continue_json_reports_unpushed_scopes() {
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
     machine_a.run_ok("dotsync commit all -m 'add base config' -- .config/app.conf");
+    machine_b.run_ok("dotsync");
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
     machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
 
-    machine_b.run_ok("dotsync");
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     let conflict =
         machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
@@ -470,10 +472,9 @@ fn commit_while_cascade_paused_is_blocked_without_mutating_scope() {
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
     machine_a.run_ok("dotsync commit all -m 'add base config' -- .config/app.conf");
 
+    machine_b.run_ok("dotsync");
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
     machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
-
-    machine_b.run_ok("dotsync");
 
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     let conflict =
@@ -543,10 +544,10 @@ fn paused_cascade_withholds_publishing_until_it_is_resolved() {
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
     machine_a.run_ok("dotsync commit all -m 'add base config' -- .config/app.conf");
+    machine_b.run_ok("dotsync");
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
     machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
 
-    machine_b.run_ok("dotsync");
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     let conflict =
         machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
@@ -615,13 +616,14 @@ fn abort_paused_cascade_restores_pre_pause_state_and_clears_pause() {
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
     machine_a.run_ok("dotsync commit all -m 'add base config' -- .config/app.conf");
 
+    machine_b.run_ok("dotsync");
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
     machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
 
-    machine_b.run_ok("dotsync");
-    let all_before_pause = bookmark_revision(&machine_b, "all");
-    let linux_before_pause = bookmark_revision(&machine_b, "linux");
-    let machine_before_pause = bookmark_revision(&machine_b, "goof-b");
+    // The shared scopes as published, which is where abort puts them: the
+    // commit fetches the linux override this machine has not synced yet.
+    let all_before_pause = remote_branch_revision(&machine_b, "all");
+    let linux_before_pause = remote_branch_revision(&machine_b, "linux");
 
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     let conflict =
@@ -640,7 +642,7 @@ fn abort_paused_cascade_restores_pre_pause_state_and_clears_pause() {
         &aborted,
         "\
 dotsync: overwrote 1 drifted file(s)
-  M .config/app.conf (edited here since the last sync)
+  C .config/app.conf (edited here, and changed in the repo on another machine)
 --- repo
 +++ system
 @@ -1 +1 @@
@@ -652,9 +654,15 @@ dotsync: discarded the merge paused at `linux` and synced 1 file(s)
 
     assert_eq!(bookmark_revision(&machine_b, "all"), all_before_pause);
     assert_eq!(bookmark_revision(&machine_b, "linux"), linux_before_pause);
+    // The machine's own scope keeps what the fetch brought in — the linux
+    // override — and loses only the commit abort discarded.
     assert_eq!(
-        bookmark_revision(&machine_b, "goof-b"),
-        machine_before_pause
+        String::from_utf8_lossy(
+            &machine_b
+                .run_ok("dotsync show goof-b .config/app.conf")
+                .stdout
+        ),
+        "setting = \"linux\"\n"
     );
     assert_eq!(
         machine_b.read_file(".config/app.conf"),
@@ -683,10 +691,9 @@ fn abort_paused_cascade_restores_non_conflicting_selected_paths() {
     machine_a
         .run_ok("dotsync commit all -m 'add base config' -- .config/app.conf .config/other.conf");
 
+    machine_b.run_ok("dotsync");
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
     machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
-
-    machine_b.run_ok("dotsync");
 
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     machine_b.write_file(".config/other.conf", "other = true\n");
@@ -722,10 +729,9 @@ fn abort_restores_a_drifted_file_outside_the_paused_selection() {
         "dotsync commit all -m 'add base config' -- .config/app.conf .config/unrelated.conf",
     );
 
+    machine_b.run_ok("dotsync");
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
     machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
-
-    machine_b.run_ok("dotsync");
 
     // Drift on a file the paused commit never named.
     machine_b.write_file(".config/unrelated.conf", "unrelated = \"drifted\"\n");
@@ -767,10 +773,10 @@ fn a_paused_cascade_is_the_same_answer_whichever_command_meets_it() {
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
     machine_a.run_ok("dotsync commit all -m 'add base config' -- .config/app.conf");
+    machine_b.run_ok("dotsync");
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
     machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
 
-    machine_b.run_ok("dotsync");
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     let conflict = machine_b
         .run("dotsync --output json commit all -m 'update shared config' -- .config/app.conf");
@@ -835,10 +841,10 @@ fn status_and_diff_say_a_cascade_is_paused() {
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
     machine_a.run_ok("dotsync commit all -m 'add base' -- .config/app.conf");
+    machine_b.run_ok("dotsync");
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
     machine_a.run_ok("dotsync commit linux -m 'linux flavour' -- .config/app.conf");
 
-    machine_b.run_ok("dotsync");
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     machine_b.run_expecting(
         "dotsync commit all -m 'shared change' -- .config/app.conf",
@@ -883,10 +889,10 @@ fn reads_say_a_cascade_is_paused() {
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
     machine_a.run_ok("dotsync commit all -m 'add base' -- .config/app.conf");
+    machine_b.run_ok("dotsync");
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
     machine_a.run_ok("dotsync commit linux -m 'linux flavour' -- .config/app.conf");
 
-    machine_b.run_ok("dotsync");
     machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
     machine_b.run_expecting(
         "dotsync commit all -m 'shared change' -- .config/app.conf",
@@ -1357,9 +1363,9 @@ fn a_conflict_that_came_from_the_remote_is_still_reported_after_abort() {
 
     machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
     machine_a.run_ok("dotsync commit all -m 'add base config' -- .config/app.conf");
+    machine_b.run_ok("dotsync");
     machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
     machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
-    machine_b.run_ok("dotsync");
 
     commit_to_a_scope_with_a_plain_git_client(
         &machine_b,
