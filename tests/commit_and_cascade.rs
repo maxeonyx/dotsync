@@ -433,3 +433,80 @@ fn history_says_which_machine_made_a_change() {
         );
     }
 }
+
+/// A machine whose scope holds its own version of a shared file — the shared
+/// text plus a part only true there — edits the shared part and commits it to
+/// the shared scope. What lands there is the edit, not this machine's whole
+/// version: the part only true here stays here, and the edit reaches this
+/// machine's version and every other machine's alike.
+///
+/// Recording home's bytes as the shared scope's new content instead is how a
+/// work machine's instructions reach every home machine.
+#[test]
+fn an_edit_to_the_shared_part_of_a_file_this_machine_overrides_lands_as_that_edit() {
+    let harness = TestHarness::new();
+    let (machine_a, machine_b) = two_synced_machines(&harness);
+
+    let shared = "shared one\nshared two\nshared three\n";
+    machine_a.write_file(".agents/AGENTS.md", shared);
+    machine_a.run_ok("dotsync commit linux -m 'instructions' -- .agents/AGENTS.md");
+    machine_a.write_file(".agents/AGENTS.md", &format!("{shared}only on goof-a\n"));
+    machine_a.run_ok("dotsync commit goof-a -m 'what is only true here' -- .agents/AGENTS.md");
+    machine_b.run_ok("dotsync");
+
+    machine_a.write_file(
+        ".agents/AGENTS.md",
+        "shared one, edited\nshared two\nshared three\nonly on goof-a\n",
+    );
+    let committed =
+        machine_a.run_ok("dotsync commit linux -m 'edit the shared part' -- .agents/AGENTS.md");
+
+    let on_linux = machine_a.run_ok("dotsync show linux .agents/AGENTS.md");
+    assert_eq!(
+        String::from_utf8_lossy(&on_linux.stdout),
+        "shared one, edited\nshared two\nshared three\n",
+        "linux gains the edit and nothing only true on goof-a\n{}",
+        render_output(&committed)
+    );
+    assert_eq!(
+        machine_a.read_file(".agents/AGENTS.md"),
+        "shared one, edited\nshared two\nshared three\nonly on goof-a\n"
+    );
+    assert_stderr_snapshot(
+        &machine_a.run_ok("dotsync status"),
+        "dotsync: no changes for goof-a\n",
+    );
+    machine_b.run_ok("dotsync");
+    assert_eq!(
+        machine_b.read_file(".agents/AGENTS.md"),
+        "shared one, edited\nshared two\nshared three\n"
+    );
+}
+
+/// An edit to the part only true on this machine, committed to the shared
+/// scope, is not an edit of anything the shared scope holds. It stops rather
+/// than publishing this machine's part.
+#[test]
+fn an_edit_to_the_part_only_this_machine_holds_is_not_committed_to_a_shared_scope() {
+    let harness = TestHarness::new();
+    let (machine_a, _machine_b) = two_synced_machines(&harness);
+
+    let shared = "shared one\nshared two\n";
+    machine_a.write_file(".agents/AGENTS.md", shared);
+    machine_a.run_ok("dotsync commit linux -m 'instructions' -- .agents/AGENTS.md");
+    machine_a.write_file(".agents/AGENTS.md", &format!("{shared}only on goof-a\n"));
+    machine_a.run_ok("dotsync commit goof-a -m 'what is only true here' -- .agents/AGENTS.md");
+
+    machine_a.write_file(
+        ".agents/AGENTS.md",
+        &format!("{shared}only on goof-a, edited\n"),
+    );
+    machine_a.run("dotsync commit linux -m 'wrong scope' -- .agents/AGENTS.md");
+
+    let on_linux = machine_a.run_ok("dotsync show linux .agents/AGENTS.md");
+    assert_eq!(
+        String::from_utf8_lossy(&on_linux.stdout),
+        shared,
+        "nothing only true on goof-a reaches linux"
+    );
+}
