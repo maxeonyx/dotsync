@@ -38,7 +38,7 @@ Creation and deletion are still the whole graph surface, so an existing machine 
 | G1 | New machine joins under an existing scope | `init`, reading the fleet first | done |
 | G2 | New machine needs a scope that does not exist yet (`hyperv` under `home-linux`) | `create-scope`, then `init --parent` | done |
 | G3 | `mx-manjaro` moves under a new `hyperv` scope it will share with a second VM | impossible | the machine's leaf gets new parents; its own layer (what it adds, overrides, removes) survives; its effective config changes only by what `hyperv` holds |
-| G4 | A machine is named after its hostname and should not be (`mx-manjaro` → `mx-hv-mj`) | `DOTSYNC_HOSTNAME` set in every shell, for ever | a machine name chosen at `init` and remembered; renaming a leaf |
+| G4 | A machine is named after its hostname and should not be (`mx-manjaro` → `mx-hv-mj`) | `init --name` at join time; nothing once joined | renaming a joined machine's leaf |
 | G5 | A shared scope was created in the wrong place (`hyprland` under `all` instead of `linux`) | impossible | reparent an inner scope; every scope below keeps its own layer |
 | G6 | An intermediate scope is no longer useful (`home-windows` has one machine) | refused: it has children | delete it, with a stated choice for its own layer: pushed into the scopes below (no machine changes) or gone (the machines that lose it listed) |
 | G7 | Two scopes turn out to mean the same thing (`home` and `home-linux` on a fleet with no home-windows left) | impossible | G6 with the absorbing choice |
@@ -48,13 +48,13 @@ Creation and deletion are still the whole graph surface, so an existing machine 
 
 **What they require:**
 
-1. **A machine's name is a stored fact.** The working-copy record already holds it (the workspace is named for the machine scope), but every run re-derives it from the hostname, so a hostname change orphans the machine and G3/G4 cannot re-point it. `init --name`, and reading the name back from the working-copy record.
+1. **A machine's name is a stored fact** — built: `init --name`, read back from the working-copy record. Rebuilding a machine's leaf under another name has to replace that record, as rejoining after a deletion already does.
 2. **Reparenting is rebuilding.** An edge is a creation commit's ancestry and commits do not change, so a scope gets new parents by getting a new creation commit on them, with its own layer replayed on top (a three-way merge: base what it inherited, ours what it held, theirs what it will inherit). Every scope below it is rebuilt the same way, in cascade order, so each child's new creation commit descends from its parent's: that is what keeps the derived graph a function of current history. The old creation commits end up reachable from no head, so they stop meaning anything. For a leaf (G3, G4) that is one scope.
 3. **A head contested between two creations converges to the newer.** Another machine that cascades into a rebuilt scope before it has seen the rebuild leaves the old lineage on one side of a contested head — the same shape as a head with a deletion on one side, and settled the same way: the rebuild is somebody's decision, and the other side is a cascade merge nobody asked for. Only the scope's own machine commits to a leaf from home, so for leaves the losing side carries nothing of anybody's.
 4. **Deleting a scope with children is rebuilding its children onto its parents**, plus the choice of where its own layer goes (G6/G7) — absorbing into the children is the default because it changes no machine.
 5. **Every graph change is planned and previewed like any write**: pins and creation commits in one transaction, the per-machine effect before and after, `--dry-run`.
 
-**Proposed surface:** `dotsync reparent <scope> --parent <scope>...` (G3, G5), `dotsync rename <scope> <name>` (G4, G8; on a machine scope, run from that machine), `delete-scope` accepting a scope with children given `--absorb` or `--drop` (G6, G7), and `init --name`. All of it reports the effect, and a rearrangement whose effect is not empty says so before anything is written.
+**Proposed surface:** `dotsync reparent <scope> --parent <scope>...` (G3, G5), `dotsync rename <scope> <name>` (G4, G8; on a machine scope, run from that machine), and `delete-scope` accepting a scope with children given `--absorb` or `--drop` (G6, G7). All of it reports the effect, and a rearrangement whose effect is not empty says so before anything is written.
 
 Open: whether a rename of another machine's leaf should be possible at all (that machine would find its name gone and need `init --name` to follow — requirement 1 makes that recoverable, not automatic), and whether "newer" in requirement 3 is decided by commit timestamp or by something that cannot be skewed.
 
@@ -65,8 +65,8 @@ Open: whether a rename of another machine's leaf should be possible at all (that
 
 ### Smaller, unowned
 
-- **Untracked config is found by hand.** `status` lists changes to managed files, so Max's procedure has agents compare `~/.config` and `~/.local/bin` against `dotsync files --scope <this machine>` themselves. A read that lists the unmanaged files under named directories, and says which of them another scope already holds, would make that step a command.
 - **A path's recent history is not readable.** "Deleted on purpose because nothing uses it" lives in a commit message on another scope; an agent pulling config in from other machines can revive something another machine retired (7e6e1f3 against 1ac9129 in the live fleet). Messages of the commits that last changed a path, per scope, would carry it.
+- **A commit's dry run selects paths against the fetched state, not the predicted convergence** (DESIGN, Placement). Making selection read the transaction would need `Home`'s classification to take a repo rather than the session.
 - **`show` of non-UTF-8 content in JSON is lossy.** `utf8: false` says so; nothing in the fleet needs more yet.
 - **A descendant that removed a file conflicts on every later edit of it above.** A removal is a tombstone: each change to the file on a parent is a modify/delete merge on the scope that removed it. `files --own` makes these visible (`D`); nothing yet makes them cheaper.
 - **A conflict's side labels name the scope whose head each input is, not the scope the change was made on.** A change committed to `all` is presented as `` side: scope `linux` `` when `linux`'s head is the commit that came down from `all`. Correct and confusing at once.

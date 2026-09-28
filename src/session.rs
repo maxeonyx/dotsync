@@ -13,7 +13,7 @@ use crate::scope_graph::{self, ScopeGraph};
 ///
 /// One session per run, built at the command boundary and passed down. Before
 /// it, every helper took `&DotsyncPaths` and re-derived the rest — so a single
-/// `dotsync commit` opened the same repo seven times, and `dotsync view`
+/// `dotsync commit` opened the same repo seven times, and the old `dotsync view`
 /// fetched once per scope because each helper in the loop fetched for itself.
 /// Neither of those is reachable from here: the loop body has no repo of its
 /// own to open and no fetch to make.

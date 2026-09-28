@@ -131,6 +131,15 @@ async fn place_in_session(
     let paths: Vec<PathBuf> = options.paths.iter().map(|path| normalized(path)).collect();
     let pins = placement_pins(&fleet, options, &paths)?;
     let planned = plan(session, home, &mut tx, &pins).await?;
+    // A pause is recomputed by a pass without pins, so one caused by a
+    // placement could never be found again. Refused whole, dry or not.
+    if let Some(pause) = &planned.stop {
+        let files = conflicted_files(session, &pause.merged, &pause.scope).await?;
+        return Err(DotsyncError::PlacementWouldConflict {
+            scope: pause.scope.clone(),
+            files,
+        });
+    }
 
     if options.dry_run {
         drop(tx);
@@ -202,6 +211,22 @@ fn placement_pins(
                     .unwrap_or_default(),
             });
         };
+        // Its version may be what settles its parents' disagreement.
+        let parents = fleet
+            .scopes()
+            .iter()
+            .find(|scope| scope.name == options.from)
+            .map(|scope| scope.parents.clone())
+            .unwrap_or_default();
+        if let Some((_, inherited)) = fleet.inherits(&options.from) {
+            if matches!(inherited.get(path), Some(None)) {
+                return Err(DotsyncError::ParentsDisagree {
+                    scope: options.from.clone(),
+                    path: path.clone(),
+                    parents,
+                });
+            }
+        }
         let repo_path = repo_path_of(path)?;
         let value_on = |scope: &str| {
             let (tree, _) = fleet.holds(scope).expect("a scope with a row has a tree");

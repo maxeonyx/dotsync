@@ -44,7 +44,7 @@ These scopes form a directed acyclic graph (DAG):
 
 Each scope is a branch. A scope branch merges from its parent(s). So `linux` merges from `all`, `hyprland` merges from `linux`, and `mx-xps-cy` (a machine) merges from `hyprland`.
 
-A machine is just a leaf scope — there's nothing structurally special about it. The only difference is that a machine scope is the one whose files get synced to the live system. dotsync knows which scope is this machine's from the hostname, not from a user-visible checkout, and the scope it names has to be a leaf: config on a scope reaches every machine below it, so a scope something else hangs off cannot be one machine's own.
+A machine is just a leaf scope — there's nothing structurally special about it. The only difference is that a machine scope is the one whose files get synced to the live system. dotsync knows which scope is this machine's from the name it joined under (the hostname unless `init --name` said otherwise), not from a user-visible checkout, and the scope it names has to be a leaf: config on a scope reaches every machine below it, so a scope something else hangs off cannot be one machine's own.
 
 ### Why not a single branch with directory-based scoping?
 
@@ -378,7 +378,7 @@ Both keep every other scope's own version where it is: they pin each scope that 
 
 Together they are what Max's own procedure needed and could not say: config starts on the machine that first wants it, and when a second machine wants it the agent there moves it to the scope both share — the first machine's config unchanged by construction — instead of copying bytes through home and meeting an add/add conflict on the first machine's scope; and config pushed too broad moves back down in one run.
 
-Every write — `commit`, `move`, `drop` — reports its effect, per machine and path, and takes `--dry-run` to report it without recording, publishing or touching home. For this machine, whose home dotsync can see, a path home already holds as the result is not a change: a commit from home changes the scopes, not the home it came from.
+Every write — `commit`, `move`, `drop` — reports its effect, per machine and path, and takes `--dry-run` to report it without recording or publishing anything. A dry run reads home the way `status` does, so it is as free of consequence as `status` is. A commit's dry run chooses its paths against what this machine last fetched rather than against the convergence it predicts, so where a parent's change has not merged down yet, `newly_tracked` can differ from the real run's. For this machine, whose home dotsync can see, a path home already holds as the result is not a change: a commit from home changes the scopes, not the home it came from.
 
 **`dotsync continue`**: Continue a paused cascade once the conflict has been resolved, recording the resolved contents on the scope whose merge stopped and publishing everything the pause held back. Refuses a resolution that still holds conflict markers.
 

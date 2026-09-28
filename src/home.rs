@@ -111,12 +111,19 @@ impl Home {
         // name alone decides nothing: a machine whose clone has not joined yet
         // can be named after a shared scope, and without this every commit it
         // made "to its own scope" would reach every machine under that one.
-        if let Some(scope) = session.graph().get(&machine_scope) {
-            if !scope.is_leaf() {
+        match session.graph().get(&machine_scope) {
+            Some(scope) if !scope.is_leaf() => {
                 return Err(DotsyncError::MachineScopeIsShared {
                     scope: scope.name.clone(),
                     children: scope.children.clone(),
                 });
+            }
+            Some(_) => {}
+            // No scope to be: a clone that has not joined, or a machine whose
+            // scope was deleted. Nothing is written — a working-copy record
+            // made now would name the machine before it has chosen a name.
+            None => {
+                return Err(crate::sync::machine_scope_missing(session, &machine_scope));
             }
         }
         let workspace: WorkspaceNameBuf = machine_scope.as_str().into();

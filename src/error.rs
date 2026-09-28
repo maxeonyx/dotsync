@@ -432,6 +432,23 @@ pub enum DotsyncError {
     /// failure with a jj message.
     #[error("`{}` is not on scope `{scope}`", path.display())]
     FileNotOnScope { scope: String, path: PathBuf },
+    /// Dropping a scope's version where its parents disagree: the version is
+    /// what settles them, and without it the scope holds a merge nobody here
+    /// can resolve.
+    #[error("the parents of scope `{scope}` hold different versions of `{}`", path.display())]
+    ParentsDisagree {
+        scope: String,
+        path: PathBuf,
+        parents: Vec<String>,
+    },
+    /// A move or drop whose pass would stop at a merge. Refused whole: a pause
+    /// is recomputed without the pins that caused it, so recording one would
+    /// leave a stop no later run can find.
+    #[error("placing that would stop at a merge on scope `{scope}`")]
+    PlacementWouldConflict {
+        scope: String,
+        files: Vec<ConflictedFile>,
+    },
     /// `move --from X --to X`: there is nowhere to move to.
     #[error("`--from` and `--to` both name scope `{scope}`")]
     MoveOntoItself { scope: String },
@@ -768,6 +785,33 @@ impl DotsyncError {
                 "run `dotsync files <path>` to see which scopes hold it.",
                 "run `dotsync files --scope <scope>` to see what that scope does hold.",
             ])),
+        Self::ParentsDisagree { scope, path, parents } => Explanation::stop("parents_disagree", self)
+            .state(vec![format!(
+                "`{scope}` inherits `{}` from {}, which hold different versions; `{scope}`'s own version is what settles them",
+                path.display(),
+                parents.iter().map(|parent| format!("`{parent}`")).collect::<Vec<_>>().join(" and ")
+            )])
+            .teaching(Teaching::new(
+            "its parents disagree about that file",
+            THE_SCOPE_GRAPH,
+            "This flow was about to make a scope take what it inherits at a path.",
+            "It expects what the scope inherits there to be one version.",
+            "The scope's parents hold different versions, so what it inherits is a conflict; its own version is the resolution, and dropping it would leave the scope with a merge nobody here could settle.",
+            &[
+                &format!("run `dotsync diff {} {} -- {}` to see how the parents differ.", parents.first().map(String::as_str).unwrap_or("<parent>"), parents.get(1).map(String::as_str).unwrap_or("<parent>"), path.display()),
+                "agree the parents first — `dotsync move` the version you want to a scope above both, or `dotsync drop` one side — then drop this scope's version.",
+            ])),
+        Self::PlacementWouldConflict { scope, files } => Explanation::stop("placement_would_conflict", self)
+            .conflicts(files.clone())
+            .teaching(Teaching::new(
+            "that placement would stop at a merge",
+            THE_SCOPE_GRAPH,
+            "This flow lays a move or drop through every scope below the ones it names.",
+            &format!("It expects every scope to merge cleanly, and `{scope}` would not."),
+            "Nothing was recorded: a stop partway through a placement would leave a pause that no later run could find.",
+            &[
+                "read the versions below; agree them on the scopes involved first, then run the placement again.",
+            ])),
         Self::MoveOntoItself { .. } => Explanation::stop("move_onto_itself", self)
             .teaching(Teaching::new(
             "that moves nothing",
@@ -905,7 +949,7 @@ impl DotsyncError {
                 children.join("` and `")
             ),
             &[
-                "set DOTSYNC_HOSTNAME to a name that is this machine's alone, then run `dotsync init --parent <scope>` to join as that name.",
+                "join under a name that is this machine's alone: `dotsync init --parent <scope> --name <name>`.",
                 "run `dotsync scopes` to see which scopes exist and what hangs off them.",
             ])),
         Self::MachineScopeAlreadyPlaced { scope, parents } => Explanation::stop("machine_scope_already_placed", self)
@@ -925,11 +969,12 @@ impl DotsyncError {
             .teaching(Teaching::new(
             "this machine has no scope",
             THE_SCOPE_GRAPH,
-            "This flow looked for the scope named after this machine's hostname, which is the one this machine syncs into home.",
+            "This flow looked for this machine's own scope, which is the one it syncs into home.",
             "It expects that scope to be in the repo: `dotsync init` creates it when the machine joins.",
             "Without it there is nothing that says what belongs on this machine, so there is nothing to sync, and nowhere to record a change of its own.",
             &[
                 "run `dotsync scopes` to see the scopes there are.",
+                "join (or join again) with `dotsync init --parent <the scope its config should come from>`; add `--name <name>` to choose what this machine is called.",
                 &format!(
                     "give this machine a scope again with `dotsync create-scope {scope} --parent <the scope its config should come from>`."
                 ),
@@ -939,7 +984,6 @@ impl DotsyncError {
                     ),
                     None => "this repo has no scopes at all, so there is nothing to hang one off — `dotsync init <remote-url>` against the remote that has them.".to_string(),
                 },
-                "if this machine is meant to be called something else, set DOTSYNC_HOSTNAME and rerun.",
             ])),
         Self::ScopeNameTaken { scope } => Explanation::stop("scope_name_taken", self)
             .teaching(Teaching::new(

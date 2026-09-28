@@ -96,9 +96,21 @@ async fn init_repo(
                         path: paths.repo_root.clone(),
                     });
                 }
-                identity.machine_scope = recorded;
+                match options.name.as_deref() {
+                    // Joining again under another name: the old record names a
+                    // scope that is gone, and left in place it would keep
+                    // naming this machine.
+                    Some(name) if name != recorded => {
+                        forget_working_copy(paths, repo, &recorded).await?
+                    }
+                    _ => {
+                        identity.machine_scope = recorded;
+                        repo
+                    }
+                }
+            } else {
+                repo
             }
-            repo
         }
         false => {
             let Some(remote_url) = options.remote_url.as_deref() else {
@@ -140,6 +152,35 @@ async fn init_repo(
     let sync = finishing(home, &session, outcome).await?;
 
     Ok(InitReport { sync, push })
+}
+
+/// Removes this machine's working-copy record and its state, so the machine
+/// joins as a new one. Home is left exactly as it is: the next sync compares
+/// it with the new scope from nothing, so what differs stops as a collision
+/// rather than being overwritten.
+async fn forget_working_copy(
+    paths: &DotsyncPaths,
+    repo: Arc<ReadonlyRepo>,
+    recorded: &str,
+) -> Result<Arc<ReadonlyRepo>, DotsyncError> {
+    let mut tx = repo.start_transaction();
+    tx.repo_mut()
+        .remove_wc_commit(jj_lib::ref_name::WorkspaceNameBuf::from(recorded).as_ref())
+        .await
+        .map_err(|err| jj_error(format!("forget the working copy of {recorded}: {err}")))?;
+    let repo = tx
+        .commit("dotsync: forget the working copy of a scope that is gone")
+        .await
+        .map_err(|err| jj_error(format!("commit forgetting the working copy: {err}")))?;
+    let state = paths.repo_root.join(".jj/working_copy/dotsync-home.json");
+    if state.exists() {
+        std::fs::remove_file(&state).map_err(|source| DotsyncError::Io {
+            doing: "remove",
+            path: state.clone(),
+            source,
+        })?;
+    }
+    Ok(repo)
 }
 
 /// Clones the remote into the hidden repo — or leaves nothing behind.

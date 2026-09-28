@@ -10,7 +10,7 @@ use crate::sync::{classify_home_against_machine_scope, finishing};
 
 /// What is true of the machine, whatever the command was asked.
 ///
-/// Three facts that qualify every answer `status`, `diff` and `view` give:
+/// Three facts that qualify every answer `status`, `diff` and the fleet reads give:
 /// each of them describes a machine that is not doing what an agent reading
 /// "no changes" would assume. They are read in one place and reported in one
 /// place, because a fact carried by two of the three commands and not the

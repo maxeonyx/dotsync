@@ -346,8 +346,8 @@ struct SuccessOutput {
 /// same stream.
 #[derive(Debug, Clone)]
 enum HumanOutput {
-    /// The answer *is* the output: `view` prints a file's contents, a scope's
-    /// file list, the scope graph. A caller may pipe it into something.
+    /// The answer *is* the output: `show` prints a file's contents, `files` the
+    /// standing table, `scopes` the graph, a scope `diff` its diffs. A caller may pipe it into something.
     Stdout(String),
     /// A report about what the run did, which belongs beside a caller's data
     /// rather than in it.
@@ -355,7 +355,7 @@ enum HumanOutput {
 }
 
 impl SuccessOutput {
-    /// A run that reports what it did. The common case: everything but `view`.
+    /// A run that reports what it did. The common case: everything but the fleet reads.
     fn message(json: serde_json::Value, message: String) -> Self {
         Self {
             json,
@@ -1384,7 +1384,7 @@ fn reprinting_any_conflict(answer: SuccessOutput, machine: &MachineState) -> Suc
     SuccessOutput { json, ..answer }.with_notes(human)
 }
 
-/// What `status`, `diff` and `view` say about the machine, whatever they were
+/// What `status`, `diff` and the fleet reads say about the machine, whatever they were
 /// asked, in both channels.
 ///
 /// One function for every read, because these facts are true of the machine

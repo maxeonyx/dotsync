@@ -51,7 +51,7 @@ Before any write that reaches other machines, add `--dry-run`: it lists, machine
 
 - **Too broad**: `dotsync move <path> --from linux --to work-linux -m "why"` narrows config to where it belongs. Machines under `work-linux` keep it unchanged; the others lose it.
 - **Stop overriding**: `dotsync drop <path> --from <scope> -m "why"` makes the scope take what it inherits again.
-- **Remove everywhere**: `dotsync drop <path> --from <owner> -m "why"`, where the owner is the scope `dotsync files <path>` says the version comes from.
+- **Remove everywhere**: `dotsync drop <path> --from <owner> -m "why"`, where the owner is the scope `dotsync files <path>` says the version comes from. Scopes that hold their own version keep it; `dotsync files --own <path>` lists them, and a `drop` each removes those too.
 
 `move` and `drop` work on any scope from any machine, and leave every other scope's own version alone: they never land a conflict on another machine's scope.
 

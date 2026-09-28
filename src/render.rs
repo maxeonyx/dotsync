@@ -243,7 +243,7 @@ pub(crate) fn render_error_json(explanation: &Explanation) -> serde_json::Value 
         "current_state": explanation.current_state,
     });
     // Present only when the run met the state, under the name `status`, `diff`
-    // and `view` already answer with — an agent that reads it off a successful
+    // and the fleet reads already answer with — an agent that reads it off a successful
     // report reads it off a stop the same way.
     if let Some(scope) = &explanation.paused_cascade {
         json["paused_cascade"] = json!(scope);

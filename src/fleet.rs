@@ -139,6 +139,8 @@ pub(crate) struct Fleet {
     holds: BTreeMap<String, (MergedTree, Entries)>,
     inherits: BTreeMap<String, (MergedTree, Entries)>,
     rows: Vec<FileRow>,
+    /// Where each (scope, path) row is in `rows`.
+    index: BTreeMap<(String, PathBuf), usize>,
 }
 
 impl Fleet {
@@ -167,6 +169,7 @@ impl Fleet {
         let mut holds = BTreeMap::new();
         let mut inherits = BTreeMap::new();
         let mut rows: Vec<FileRow> = Vec::new();
+        let mut index: BTreeMap<(String, PathBuf), usize> = BTreeMap::new();
         let mut ordered = Vec::new();
 
         for scope in graph.in_cascade_order() {
@@ -191,9 +194,9 @@ impl Fleet {
                     Standing::Inherited => {
                         let mut origin = BTreeSet::new();
                         for parent in &scope.parents {
-                            if let Some(row) = rows
-                                .iter()
-                                .find(|row| &row.scope == parent && &row.path == path)
+                            if let Some(row) = index
+                                .get(&(parent.clone(), path.clone()))
+                                .map(|at| &rows[*at])
                                 .filter(|row| row.standing != Standing::Removed)
                             {
                                 origin.extend(row.origin.iter().cloned());
@@ -203,6 +206,7 @@ impl Fleet {
                     }
                     _ => vec![scope.name.clone()],
                 };
+                index.insert((scope.name.clone(), path.clone()), rows.len());
                 rows.push(FileRow {
                     scope: scope.name.clone(),
                     path: path.clone(),
@@ -235,6 +239,7 @@ impl Fleet {
             holds,
             inherits,
             rows,
+            index,
         })
     }
 
@@ -248,9 +253,9 @@ impl Fleet {
     }
 
     pub(crate) fn row(&self, scope: &str, path: &Path) -> Option<&FileRow> {
-        self.rows
-            .iter()
-            .find(|row| row.scope == scope && row.path == path)
+        self.index
+            .get(&(scope.to_string(), path.to_path_buf()))
+            .map(|at| &self.rows[*at])
     }
 
     /// What a scope holds, as a tree and path by path.
