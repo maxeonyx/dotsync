@@ -21,12 +21,13 @@ pub(crate) struct Session {
     paths: DotsyncPaths,
     repo: Arc<ReadonlyRepo>,
     graph: ScopeGraph,
-    /// Which machine this is, read from the hostname once per run.
+    /// Which machine this is, read once per run.
     ///
-    /// Held here because every command needs it and none of them can work it
-    /// out from the repo: `view` has no working copy to ask, and the pass
-    /// stamps it on every merge it writes. Detecting it per helper is the
-    /// pattern this type exists to remove.
+    /// The machine's own record says, once it has one: the working copy is
+    /// named for the machine scope when the machine joins, and that name is
+    /// what it keeps — a hostname that changes, or was never the name wanted,
+    /// decides nothing afterwards. Before a machine has joined there is no
+    /// record, and the hostname (or `DOTSYNC_HOSTNAME`) is the proposal.
     machine_scope: String,
     unreachable_remote: Option<UnreachableRemote>,
 }
@@ -44,13 +45,25 @@ impl Session {
         repo: Arc<ReadonlyRepo>,
     ) -> Result<Self, DotsyncError> {
         let graph = scope_graph::derive(repo.as_ref())?;
+        let machine_scope = match recorded_machine_name(repo.as_ref()) {
+            Some(name) => name,
+            None => crate::machine::detect_machine()?.machine_scope,
+        };
         Ok(Self {
             paths: paths.clone(),
             repo,
             graph,
-            machine_scope: crate::machine::detect_machine()?.machine_scope,
+            machine_scope,
             unreachable_remote: None,
         })
+    }
+
+    /// The same session, for a machine about to join under a name of its own
+    /// choosing — the one moment the name comes from the command line rather
+    /// than from the machine's record.
+    pub(crate) fn joining_as(mut self, machine_scope: &str) -> Self {
+        self.machine_scope = machine_scope.to_string();
+        self
     }
 
     pub(crate) fn paths(&self) -> &DotsyncPaths {
@@ -151,6 +164,23 @@ where
     // borrow of it — and every command needs to know where home is throughout.
     let report = command(&mut session, paths).await;
     session.finish(report)
+}
+
+/// The name this machine joined under, from its working-copy record.
+///
+/// jj's own `default` workspace is the repo's, not a machine's; dotsync never
+/// works in it.
+pub(crate) fn recorded_machine_name(repo: &dyn jj_lib::repo::Repo) -> Option<String> {
+    let mut names = repo
+        .view()
+        .wc_commit_ids()
+        .keys()
+        .map(|name| name.as_str())
+        .filter(|name| *name != "default");
+    let name = names.next()?;
+    // Two records is not a state dotsync writes; with no way to prefer one,
+    // the hostname is as good an answer as either.
+    names.next().is_none().then(|| name.to_string())
 }
 
 /// What a command produced, plus what the run it happened in could not do.

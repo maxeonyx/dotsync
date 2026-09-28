@@ -20,7 +20,7 @@ use crate::repo::{
     PushReport,
 };
 use crate::scope_graph::{self, creation_description, ScopeGraph, ROOT_SCOPE};
-use crate::session::{in_session, Run, Session};
+use crate::session::{in_session, recorded_machine_name, Run, Session};
 use crate::sync::{finishing, SyncReport};
 
 #[derive(Debug, Clone)]
@@ -50,13 +50,22 @@ pub struct DeletedScope {
 /// Unlike every other command, `init` cannot carry on against a last-fetched
 /// state, because there isn't one yet — so its run never reports an unreachable
 /// remote as an aside. It reports it as the error it is.
+/// What `dotsync init` was asked.
+#[derive(Debug, Clone, Default)]
+pub struct InitOptions {
+    /// Needed only when there is no clone yet.
+    pub remote_url: Option<String>,
+    pub parents: Vec<String>,
+    /// The name this machine joins under; the hostname when not given.
+    pub name: Option<String>,
+}
+
 pub async fn init(
     paths: &DotsyncPaths,
-    remote_url: Option<&str>,
-    parents: &[String],
+    options: &InitOptions,
 ) -> Run<Result<InitReport, DotsyncError>> {
     Run {
-        report: init_repo(paths, remote_url, parents).await,
+        report: init_repo(paths, options).await,
         unreachable_remote: None,
     }
 }
@@ -71,22 +80,28 @@ pub async fn init(
 /// machine was to clone the remote with git.
 async fn init_repo(
     paths: &DotsyncPaths,
-    remote_url: Option<&str>,
-    parents: &[String],
+    options: &InitOptions,
 ) -> Result<InitReport, DotsyncError> {
-    let identity = detect_machine()?;
+    let mut identity = detect_machine()?;
+    let parents = options.parents.as_slice();
     let repo = match paths.repo_root.exists() {
         true => {
             let repo = fetch_origin(load_repo_direct(paths).await?).await?;
-            if scope_graph::derive(repo.as_ref())?.contains(&identity.machine_scope) {
-                return Err(DotsyncError::RepoAlreadyExists {
-                    path: paths.repo_root.clone(),
-                });
+            // Joined means this machine has a record and its scope is there.
+            // A record whose scope another machine deleted is a machine that
+            // can join again, under the same name.
+            if let Some(recorded) = recorded_machine_name(repo.as_ref()) {
+                if scope_graph::derive(repo.as_ref())?.contains(&recorded) {
+                    return Err(DotsyncError::RepoAlreadyExists {
+                        path: paths.repo_root.clone(),
+                    });
+                }
+                identity.machine_scope = recorded;
             }
             repo
         }
         false => {
-            let Some(remote_url) = remote_url else {
+            let Some(remote_url) = options.remote_url.as_deref() else {
                 return Err(DotsyncError::NotInitialized {
                     path: paths.repo_root.clone(),
                 });
@@ -94,6 +109,9 @@ async fn init_repo(
             clone(paths, remote_url).await?
         }
     };
+    if let Some(name) = &options.name {
+        identity.machine_scope = name.clone();
+    }
 
     let graph = scope_graph::derive(repo.as_ref())?;
     let repo = if graph.names().next().is_none() {
@@ -102,7 +120,9 @@ async fn init_repo(
         join_the_fleet(repo, &graph, &identity, parents).await?
     };
 
-    let mut session = Session::from_repo(paths, repo).await?;
+    let mut session = Session::from_repo(paths, repo)
+        .await?
+        .joining_as(&identity.machine_scope);
     let push = push_scope_updates(&mut session).await?;
     // The scopes exist by now, which is what `Home` needs: it puts the working
     // copy commit on this machine's scope bookmark. Home's own content is

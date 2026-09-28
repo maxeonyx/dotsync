@@ -71,6 +71,26 @@ pub struct StatusReport {
     pub changes: Vec<FileChange>,
     /// The repo moved and home did not. Plain `dotsync` applies these.
     pub incoming: Vec<FileChange>,
+    /// Files under the directories `status` was given that no scope this
+    /// machine syncs holds. `None` when it was given none: finding them means
+    /// walking home, and nobody asked.
+    pub untracked: Option<Vec<UntrackedFile>>,
+}
+
+/// A home file dotsync does not manage on this machine.
+#[derive(Debug, Clone)]
+pub struct UntrackedFile {
+    pub path: PathBuf,
+    /// The scopes that hold their own version of it, and whether that version
+    /// is byte for byte what home holds — the file another machine already
+    /// shares is the one most likely to belong here too.
+    pub elsewhere: Vec<HeldElsewhere>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HeldElsewhere {
+    pub scope: String,
+    pub same: bool,
 }
 
 /// The merge a machine is waiting on, and every version of every file it could
@@ -95,7 +115,10 @@ pub struct FileChange {
     pub state: FileState,
 }
 
-pub async fn status(paths: &DotsyncPaths) -> Run<Result<StatusReport, DotsyncError>> {
+pub async fn status(
+    paths: &DotsyncPaths,
+    directories: &[PathBuf],
+) -> Run<Result<StatusReport, DotsyncError>> {
     in_session(paths, async |session, paths| {
         // `status` acquires home for the same reason a sync does: home's own
         // bytes are one of the three sides of every answer it gives, and the
@@ -104,7 +127,7 @@ pub async fn status(paths: &DotsyncPaths) -> Run<Result<StatusReport, DotsyncErr
         // change to anything a caller can see — no scope bookmark moves and
         // nothing is written into home.
         let mut home = Home::acquire(session, paths).await?;
-        let outcome = status_report(session, &mut home).await;
+        let outcome = status_report(session, &mut home, directories).await;
         finishing(home, session, outcome).await
     })
     .await
@@ -113,6 +136,7 @@ pub async fn status(paths: &DotsyncPaths) -> Run<Result<StatusReport, DotsyncErr
 async fn status_report(
     session: &mut Session,
     home: &mut Home,
+    directories: &[PathBuf],
 ) -> Result<StatusReport, DotsyncError> {
     session.fetch().await?;
     let classified = classify_home_against_machine_scope(session, home).await?;
@@ -126,9 +150,67 @@ async fn status_report(
             .collect::<Vec<_>>()
     };
 
+    let untracked = match directories.is_empty() {
+        true => None,
+        false => Some(untracked_under(session, home, directories, &classified).await?),
+    };
+
     Ok(StatusReport {
         machine: MachineState::read(session).await?,
         changes: file_changes(FileState::is_drift),
         incoming: file_changes(FileState::is_incoming),
+        untracked,
     })
+}
+
+/// Home files under `directories` that this machine's scope does not hold,
+/// each with the scopes that hold their own version of it.
+async fn untracked_under(
+    session: &mut Session,
+    home: &mut Home,
+    directories: &[PathBuf],
+    managed: &std::collections::BTreeMap<PathBuf, crate::drift::ClassifiedPath>,
+) -> Result<Vec<UntrackedFile>, DotsyncError> {
+    let found: Vec<PathBuf> = crate::selection::home_files_under(session.paths(), directories)?
+        .into_iter()
+        .filter(|path| !managed.contains_key(path))
+        .collect();
+    // Read home at each of them, so home's side is bytes and kind rather than
+    // a path — which is what comparing with another scope's version needs.
+    home.observe_paths(
+        session,
+        found
+            .iter()
+            .map(|path| crate::home::repo_path_of(path))
+            .collect::<Result<Vec<_>, DotsyncError>>()?,
+    )
+    .await?;
+    let fleet = crate::fleet::Fleet::predicted(session).await?;
+
+    let mut untracked = Vec::new();
+    for path in found {
+        let here = home.entry(&path)?;
+        let here = here.as_resolved().and_then(Option::as_ref);
+        let elsewhere = fleet
+            .rows()
+            .iter()
+            .filter(|row| {
+                row.path == path
+                    && matches!(
+                        row.standing,
+                        crate::fleet::Standing::Added | crate::fleet::Standing::Overridden
+                    )
+            })
+            .map(|row| HeldElsewhere {
+                scope: row.scope.clone(),
+                same: fleet
+                    .holds(&row.scope)
+                    .and_then(|(_, entries)| entries.get(&path))
+                    .and_then(Option::as_ref)
+                    == here,
+            })
+            .collect();
+        untracked.push(UntrackedFile { path, elsewhere });
+    }
+    Ok(untracked)
 }

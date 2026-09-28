@@ -3,8 +3,8 @@ use dotsync::{
     abort_paused_cascade, commit_and_sync, compare, continue_after_conflict, create_scope,
     delete_scope, diff_home, discard, files, init, place, scopes, show, status, sync,
     CommitOptions, DiffReport, DotsyncError, DotsyncPaths, Explanation, FileRow, FilesQuery,
-    MachineEffect, MachineState, PlacementOptions, Planned, Resumed, Run, ScopeInfo, Standing,
-    UnreachableRemote,
+    InitOptions, MachineEffect, MachineState, PlacementOptions, Planned, Resumed, Run, ScopeInfo,
+    Standing, UnreachableRemote,
 };
 mod render;
 use serde_json::json;
@@ -57,6 +57,8 @@ const INIT_LONG_ABOUT: &str = "REMOTE_URL is the git remote that stores your dot
 Joining a remote that already has scopes means saying where this machine's config comes from: `--parent work-linux`. A hostname cannot tell a `home-linux` from a `work-linux`, so this is the one moment that answer can be given. Run `dotsync init <remote-url>` without `--parent` to clone the fleet and stop: `dotsync scopes`, `dotsync files` and `dotsync show` then read it, and `dotsync init --parent <scope>` finishes joining. Give `--parent` more than once for a machine that inherits from several scopes.
 
 A file home already holds that the scope holds differently is never overwritten: the first sync stops and shows both versions. Keep yours with `dotsync continue`, or take the scope's with `dotsync discard <path>`.
+
+This machine's own scope is named after its hostname unless `--name` says otherwise, and whichever it is, the machine keeps that name: later runs read it from the machine's own record, not from the hostname.
 
 A remote with no scopes on it yet has nothing to choose from: this machine gets the root scope `all`, a scope for its OS, and its own scope under that.
 
@@ -141,6 +143,13 @@ const DIFF_LONG_ABOUT: &str = "With no scope: the diffs of the managed files you
 
 With one scope: what that scope changes over what it inherits. With two: how the second differs from the first. PATHS after `--` narrow either to those paths and whatever is under them. Exits 1 when there are differences.";
 
+const STATUS_ABOUT: &str =
+    "Show what you changed here, what is incoming, and untracked files under named directories";
+
+const STATUS_LONG_ABOUT: &str = "Lists the managed files changed on this machine, and separately the files another machine changed that home has not caught up to. A file dotsync does not track is not a change to anything, so it is not listed — unless you name directories: `dotsync status .config .local/bin` also lists every file under them that this machine's scope does not hold, and which scopes hold their own version of it.
+
+While a merge is waiting, it prints every version of every file that merge could not resolve.";
+
 const CONTINUE_ABOUT: &str = "Continue a paused merge cascade after resolving conflicts";
 const ABORT_ABOUT: &str = "Abort a paused merge cascade and restore the pre-pause state";
 
@@ -178,6 +187,10 @@ enum Command {
         /// Scope this machine's config comes from; repeat for several
         #[arg(long = "parent")]
         parents: Vec<String>,
+
+        /// Name this machine joins under, and keeps; the hostname when omitted
+        #[arg(long)]
+        name: Option<String>,
     },
     #[command(name = "create-scope", about = CREATE_SCOPE_ABOUT, long_about = CREATE_SCOPE_LONG_ABOUT)]
     CreateScope {
@@ -264,8 +277,11 @@ enum Command {
     Continue,
     #[command(about = ABORT_ABOUT)]
     Abort,
-    /// Show managed files that differ from the repo
-    Status,
+    #[command(about = STATUS_ABOUT, long_about = STATUS_LONG_ABOUT)]
+    Status {
+        /// Home directories to also list untracked files under
+        directories: Vec<PathBuf>,
+    },
     #[command(about = DIFF_ABOUT, long_about = DIFF_LONG_ABOUT)]
     Diff {
         /// No scope for your local changes; one scope for what it changes; two
@@ -556,7 +572,8 @@ async fn dispatch(
         Some(Command::Init {
             remote_url,
             parents,
-        }) => run_init(remote_url, parents, context).await,
+            name,
+        }) => run_init(remote_url, parents, name, context).await,
         Some(Command::CreateScope {
             scope,
             parents,
@@ -585,7 +602,7 @@ async fn dispatch(
         Some(Command::Discard { paths }) => run_discard(paths).await,
         Some(Command::Continue) => run_continue().await,
         Some(Command::Abort) => run_abort().await,
-        Some(Command::Status) => run_status().await,
+        Some(Command::Status { directories }) => run_status(directories).await,
         Some(Command::Diff { scopes, paths }) => match scopes.as_slice() {
             [] => run_diff().await,
             [one] => run_compare(one.clone(), None, paths).await,
@@ -626,6 +643,7 @@ fn usage_output(message: &str) -> CliOutput {
 async fn run_init(
     remote_url: Option<String>,
     parents: Vec<String>,
+    name: Option<String>,
     context: CliContext,
 ) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
@@ -642,7 +660,15 @@ async fn run_init(
         },
         None => return Ok(usage_output(INIT_REMOTE_URL_USAGE)),
     };
-    let run = init(&paths, remote_url.as_deref(), &parents).await;
+    let run = init(
+        &paths,
+        &InitOptions {
+            remote_url,
+            parents,
+            name,
+        },
+    )
+    .await;
     Ok(output_of("dotsync init", run, |report| {
         render::synced_output(
             "init",
@@ -833,9 +859,9 @@ async fn run_discard(discard_paths: Vec<PathBuf>) -> Result<CliOutput, DotsyncEr
     }))
 }
 
-async fn run_status() -> Result<CliOutput, DotsyncError> {
+async fn run_status(directories: Vec<PathBuf>) -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
-    let run = status(&paths).await;
+    let run = status(&paths, &directories).await;
     Ok(output_of("dotsync status", run, |report| {
         let answer = reprinting_any_conflict(
             SuccessOutput::message(
@@ -849,7 +875,20 @@ async fn run_status() -> Result<CliOutput, DotsyncError> {
             ),
             &report.machine,
         );
-        with_machine_state(answer, &report.machine)
+        let mut answer = with_machine_state(answer, &report.machine);
+        if let Some(untracked) = &report.untracked {
+            answer.json["untracked"] = json!(untracked
+                .iter()
+                .map(|file| json!({
+                    "path": render::display_path(&file.path),
+                    "elsewhere": file.elsewhere.iter().map(|held| json!({
+                        "scope": held.scope,
+                        "same": held.same,
+                    })).collect::<Vec<_>>(),
+                }))
+                .collect::<Vec<_>>());
+        }
+        answer
     }))
 }
 
@@ -1415,6 +1454,28 @@ fn render_status_human(report: &dotsync::StatusReport) -> String {
                 .iter()
                 .map(|change| render::render_change_line(&change.path, change.state)),
         );
+    }
+
+    if let Some(untracked) = report.untracked.as_ref().filter(|files| !files.is_empty()) {
+        lines.push(format!(
+            "dotsync: {} untracked file(s) under the directories named — commit one to start tracking it",
+            untracked.len()
+        ));
+        for file in untracked {
+            let mut line = format!("  ? {}", render::display_path(&file.path));
+            if !file.elsewhere.is_empty() {
+                let held: Vec<String> = file
+                    .elsewhere
+                    .iter()
+                    .map(|held| match held.same {
+                        true => format!("{} (identical)", held.scope),
+                        false => format!("{} (different)", held.scope),
+                    })
+                    .collect();
+                line.push_str(&format!("  — also on {}", held.join(", ")));
+            }
+            lines.push(line);
+        }
     }
 
     if lines.is_empty() {

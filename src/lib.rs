@@ -19,7 +19,7 @@ mod sync;
 mod working_copy;
 
 pub use crate::bootstrap::{
-    create_scope, delete_scope, init, CreatedScope, DeletedScope, InitReport,
+    create_scope, delete_scope, init, CreatedScope, DeletedScope, InitOptions, InitReport,
 };
 pub use crate::commit::{commit_and_sync, CommitOptions, CommitReport, RecordedCommit};
 pub use crate::drift::FileState;
@@ -41,5 +41,7 @@ pub use crate::pause::{
 pub use crate::place::{place, CarriedOut, PlacementOptions, PlacementReport, Planned};
 pub use crate::repo::PushReport;
 pub use crate::session::{Run, UnreachableRemote};
-pub use crate::status::{status, FileChange, MachineState, PausedCascade, StatusReport};
+pub use crate::status::{
+    status, FileChange, HeldElsewhere, MachineState, PausedCascade, StatusReport, UntrackedFile,
+};
 pub use crate::sync::{discard, sync, FileDrift, SyncCommandReport, SyncReport};
