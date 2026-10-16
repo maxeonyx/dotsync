@@ -56,7 +56,7 @@ use jj_lib::working_copy::{LockedWorkingCopy as _, SnapshotOptions, WorkingCopyF
 
 use crate::error::{jj_error, DotsyncError};
 use crate::machine::machine_signature;
-use crate::paths::{DotsyncPaths, SHED_SYNC_STATE_RELATIVE_PATH};
+use crate::paths::{repo_path_of, DotsyncPaths, SHED_SYNC_STATE_RELATIVE_PATH};
 use crate::repo::scope_head_commit;
 use crate::session::Session;
 use crate::working_copy::{HomeLockedWorkingCopy, HomeWorkingCopy};
@@ -913,18 +913,6 @@ async fn settle_folder_terms(merged: MergedTree) -> Result<MergedTree, DotsyncEr
         .write_tree()
         .await
         .map_err(|err| jj_error(format!("write the merged tree: {err}")))
-}
-
-/// A home-relative path as jj names it. Home-relative because that is how
-/// dotsync records a path and how every machine on the scope reads it back.
-pub(crate) fn repo_path_of(
-    relative: &std::path::Path,
-) -> Result<jj_lib::repo_path::RepoPathBuf, DotsyncError> {
-    let relative_str = relative.to_str().ok_or_else(|| DotsyncError::NonUtf8Path {
-        path: relative.to_path_buf(),
-    })?;
-    jj_lib::repo_path::RepoPathBuf::from_internal_string(relative_str)
-        .map_err(|err| jj_error(format!("invalid repo path {}: {err}", relative.display())))
 }
 
 fn tree_paths(tree: &MergedTree) -> Result<Vec<jj_lib::repo_path::RepoPathBuf>, DotsyncError> {

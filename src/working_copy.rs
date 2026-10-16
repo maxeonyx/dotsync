@@ -94,30 +94,30 @@ fn checkout_error(
 }
 
 /// Resolves a repo path to its on-disk location without ever passing through
-/// a symlink, and refuses paths inside dotsync's own repo directory.
+/// a symlink, and refuses paths inside dotsync's own repo directory and names
+/// this platform cannot hold.
 ///
 /// Following a symlinked parent is how a managed write escapes the managed
 /// set (the `selflink` sweep), and writing under the repo root is
-/// how a sync clobbers dotsync's own `git_target`. Both guards
-/// live here — the single place every home read and write goes through — so
-/// no caller can forget them.
+/// how a sync clobbers dotsync's own `git_target`. A name like `a\b` is one
+/// file on Linux and two folders deep on Windows, where writing it would land
+/// on some other entry's file. These guards live here — the single place
+/// every home read and write goes through — so no caller can forget them.
 fn home_disk_path(home: &Path, repo_root: &Path, path: &RepoPathBuf) -> Result<PathBuf, String> {
-    let mut disk = home.to_path_buf();
-    let components: Vec<&str> = path.as_internal_file_string().split('/').collect();
-    for (index, component) in components.iter().enumerate() {
-        disk.push(component);
-        let is_last = index == components.len() - 1;
-        if !is_last {
-            match std::fs::symlink_metadata(&disk) {
-                Ok(md) if md.file_type().is_symlink() => {
-                    return Err(format!(
-                        "{} traverses a symlink at {}: dotsync never follows links",
-                        path.as_internal_file_string(),
-                        disk.display()
-                    ));
-                }
-                _ => {}
-            }
+    let disk = fs_path(home, path)?;
+    let mut ancestor = home.to_path_buf();
+    for component in path
+        .parent()
+        .into_iter()
+        .flat_map(|parent| parent.components())
+    {
+        ancestor.push(component.as_internal_str());
+        if std::fs::symlink_metadata(&ancestor).is_ok_and(|md| md.file_type().is_symlink()) {
+            return Err(format!(
+                "{} traverses a symlink at {}: dotsync never follows links",
+                path.as_internal_file_string(),
+                ancestor.display()
+            ));
         }
     }
     if disk.starts_with(repo_root) {
@@ -127,6 +127,17 @@ fn home_disk_path(home: &Path, repo_root: &Path, path: &RepoPathBuf) -> Result<P
         ));
     }
     Ok(disk)
+}
+
+/// Where a repo path lives under home, if every one of its names can be a
+/// file name on this platform.
+fn fs_path(home: &Path, path: &RepoPathBuf) -> Result<PathBuf, String> {
+    path.to_fs_path(home).map_err(|_| {
+        format!(
+            "{} cannot be a file name on this platform",
+            path.as_internal_file_string()
+        )
+    })
 }
 
 /// What is on disk at a managed path, as a tree entry: a file (with its
@@ -190,8 +201,14 @@ async fn read_disk_entry(
 /// The executable bit a snapshot records: the file's own, or, on a
 /// filesystem that has none, the bit home was last given at this path — so a
 /// machine that cannot see the bit never changes it for the fleet.
-fn snapshot_executable(on_disk: Option<bool>, _last_given: Option<&TreeValue>) -> bool {
-    on_disk.unwrap_or(false)
+fn snapshot_executable(on_disk: Option<bool>, last_given: Option<&TreeValue>) -> bool {
+    on_disk.unwrap_or(matches!(
+        last_given,
+        Some(TreeValue::File {
+            executable: true,
+            ..
+        })
+    ))
 }
 
 #[cfg(unix)]
@@ -531,17 +548,49 @@ impl LockedWorkingCopy for HomeLockedWorkingCopy {
 
         // Everything that stands in a write's way is checked before anything
         // is written, so a checkout that cannot finish changes nothing.
-        let removed: Vec<PathBuf> = removals
-            .iter()
-            .map(|path| self.home.join(path.as_internal_file_string()))
+        let mut refused = Vec::new();
+        let mut disk_path = |path: &RepoPathBuf| {
+            fs_path(&self.home, path)
+                .map_err(|message| refused.push(message))
+                .ok()
+        };
+        let removals: Vec<(RepoPathBuf, PathBuf)> = removals
+            .into_iter()
+            .filter_map(|path| Some((path.clone(), disk_path(&path)?)))
             .collect();
-        for (path, _) in &writes {
-            let disk = self.home.join(path.as_internal_file_string());
-            let unmanaged = unmanaged_files_under(&disk, &removed);
+        let writes: Vec<(RepoPathBuf, PathBuf, TreeValue)> = writes
+            .into_iter()
+            .filter_map(|(path, value)| Some((path.clone(), disk_path(&path)?, value)))
+            .collect();
+        if !cfg!(unix) {
+            refused.extend(
+                writes
+                    .iter()
+                    .filter(|(_, _, value)| matches!(value, TreeValue::Symlink(_)))
+                    .map(|(path, _, _)| {
+                        format!(
+                            "{} is a symlink on the scope, and dotsync makes symlinks only on Linux",
+                            path.as_internal_file_string()
+                        )
+                    }),
+            );
+        }
+        if !refused.is_empty() {
+            return Err(checkout_error(
+                format!(
+                    "home cannot hold what the scope holds, so dotsync changed nothing in it:\n  {}",
+                    refused.join("\n  ")
+                ),
+                "refused path",
+            ));
+        }
+        let removed: Vec<PathBuf> = removals.iter().map(|(_, disk)| disk.clone()).collect();
+        for (path, disk, _) in &writes {
+            let unmanaged = unmanaged_files_under(disk, &removed);
             if !unmanaged.is_empty() {
                 let listed: Vec<String> = unmanaged
                     .iter()
-                    .filter_map(|file| file.strip_prefix(&disk).ok())
+                    .filter_map(|file| file.strip_prefix(disk).ok())
                     .map(|file| format!("  {}", file.display()))
                     .collect();
                 return Err(checkout_error(
@@ -555,7 +604,9 @@ impl LockedWorkingCopy for HomeLockedWorkingCopy {
             }
         }
 
-        for path in removals {
+        // Resolved again as each one is reached, because a removal can take
+        // away a link that stood in a later write's path.
+        for (path, _) in removals {
             let disk = home_disk_path(&self.home, &self.repo_root, &path)
                 .map_err(|message| checkout_error(message, "refused path"))?;
             if std::fs::symlink_metadata(&disk).is_ok() {
@@ -565,7 +616,7 @@ impl LockedWorkingCopy for HomeLockedWorkingCopy {
             }
             remove_emptied_folders(&self.home, &disk);
         }
-        for (path, value) in writes {
+        for (path, _, value) in writes {
             let disk = home_disk_path(&self.home, &self.repo_root, &path)
                 .map_err(|message| checkout_error(message, "refused path"))?;
             // A folder here held only folders dotsync's removals emptied: the
@@ -790,7 +841,10 @@ fn make_symlink(target: &str, disk: &Path) -> Result<(), CheckoutError> {
 #[cfg(not(unix))]
 fn make_symlink(_target: &str, disk: &Path) -> Result<(), CheckoutError> {
     Err(checkout_error(
-        "symlinks are not materialized on this platform",
+        format!(
+            "{} is a symlink on the scope, and dotsync makes symlinks only on Linux",
+            disk.display()
+        ),
         "symlink on non-unix platform",
     ))
 }

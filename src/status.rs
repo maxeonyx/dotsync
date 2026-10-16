@@ -181,7 +181,7 @@ async fn untracked_under(
         session,
         found
             .iter()
-            .map(|path| crate::home::repo_path_of(path))
+            .map(|path| crate::paths::repo_path_of(path))
             .collect::<Result<Vec<_>, DotsyncError>>()?,
     )
     .await?;

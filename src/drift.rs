@@ -5,7 +5,7 @@ use jj_lib::backend::TreeValue;
 use jj_lib::merged_tree::MergedTree;
 
 use crate::error::{jj_error, DotsyncError};
-use crate::home::repo_path_of;
+use crate::paths::repo_path_of;
 use crate::repo::{collect_managed_tree_entries, managed_tree_entries};
 
 /// Where one managed path stands across the three sides dotsync knows about:

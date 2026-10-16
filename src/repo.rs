@@ -21,7 +21,7 @@ use jj_lib::settings::UserSettings;
 use jj_lib::str_util::StringExpression;
 
 use crate::error::{jj_error, DotsyncError};
-use crate::paths::DotsyncPaths;
+use crate::paths::{repo_path_of, DotsyncPaths};
 use crate::scope_graph::ScopeGraph;
 use crate::session::Session;
 
@@ -553,11 +553,8 @@ pub(crate) async fn read_tree_entry_bytes(
     relative: &Path,
     value: &TreeValue,
 ) -> Result<Vec<u8>, DotsyncError> {
-    let relative_str = relative.to_str().ok_or_else(|| DotsyncError::NonUtf8Path {
-        path: relative.to_path_buf(),
-    })?;
-    let repo_path = jj_lib::repo_path::RepoPath::from_internal_string(relative_str)
-        .map_err(|err| jj_error(format!("invalid repo path {}: {err}", relative.display())))?;
+    let repo_path = repo_path_of(relative)?;
+    let repo_path = repo_path.as_ref();
     match value {
         TreeValue::File { id, .. } => {
             let mut reader = store

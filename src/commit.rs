@@ -16,8 +16,8 @@ use jj_lib::rewrite::merge_commit_trees;
 
 use crate::converge::{self, Pin, Pins};
 use crate::error::{DotsyncError, SkippedCommitPath};
-use crate::home::{repo_path_of, Home};
-use crate::paths::DotsyncPaths;
+use crate::home::Home;
+use crate::paths::{repo_path_of, DotsyncPaths};
 use crate::pause::{
     conflicted_files, conflicted_paths_of, converge_or_pause, present, publish_or_pause,
     reject_commit_if_paused, save_paused_run, PausedCommit, PausedRun,
