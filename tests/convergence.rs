@@ -420,6 +420,7 @@ fn a_divergence_over_one_file_is_a_conflict_to_resolve_rather_than_a_wall() {
 /// stops trying. Worse than the report, the state it leaves behind is the
 /// diverged one, so the rerun an agent would reach for is a dead end too.
 #[test]
+#[cfg_attr(not(unix), ignore = "the git shim is a shell script")]
 fn a_push_another_machine_won_the_race_to_is_retried_within_the_run() {
     let harness = TestHarness::new();
     let (_machine_a, machine_b) = two_synced_machines(&harness);

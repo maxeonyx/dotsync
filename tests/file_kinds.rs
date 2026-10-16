@@ -14,6 +14,7 @@ use harness::*;
 /// exactly has to be refused, and every other read of home has to refuse it
 /// too, because a tracked path can become one at any time.
 #[test]
+#[cfg_attr(not(unix), ignore = "fifos are unix-only")]
 fn a_named_path_that_is_not_a_regular_file_is_refused_rather_than_read() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
@@ -66,6 +67,7 @@ fn a_named_path_that_is_not_a_regular_file_is_refused_rather_than_read() {
 /// has no such link. Refused in one place, `working_copy::home_disk_path`, so
 /// no route into home can forget it.
 #[test]
+#[cfg_attr(not(unix), ignore = "symlink fixtures are unix-only")]
 fn a_path_that_reaches_its_file_through_a_symlink_is_refused() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
@@ -117,6 +119,7 @@ fn a_path_that_reaches_its_file_through_a_symlink_is_refused() {
 /// refused outright — the conservative placeholder that stood in for this
 /// decision.
 #[test]
+#[cfg_attr(not(unix), ignore = "symlink fixtures are unix-only")]
 fn commit_records_a_symlink_as_a_symlink() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
@@ -157,6 +160,7 @@ fn commit_records_a_symlink_as_a_symlink() {
 /// entry, so there is no directory to walk. That is the claim here — recording
 /// the link is allowed, and home's contents still do not reach the remote.
 #[test]
+#[cfg_attr(not(unix), ignore = "symlink fixtures are unix-only")]
 fn a_symlink_to_home_records_one_entry_rather_than_sweeping_home() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
@@ -197,6 +201,7 @@ fn a_symlink_to_home_records_one_entry_rather_than_sweeping_home() {
 /// client puts it on `all` and an ordinary cascade carries it down — which is
 /// why this is reachable today and is the sharpest statement of the decision.
 #[test]
+#[cfg_attr(not(unix), ignore = "symlink fixtures are unix-only")]
 fn a_symlink_on_a_scope_materialises_in_home_as_a_symlink() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
@@ -232,6 +237,7 @@ fn a_symlink_on_a_scope_materialises_in_home_as_a_symlink() {
 /// home so the loss is unambiguous, and its content is asserted explicitly:
 /// that byte comparison is the data loss.
 #[test]
+#[cfg_attr(not(unix), ignore = "symlink fixtures are unix-only")]
 fn a_sync_replaces_a_home_symlink_instead_of_writing_through_it() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
@@ -284,6 +290,7 @@ fn a_sync_replaces_a_home_symlink_instead_of_writing_through_it() {
 /// skips the link, machine A publishes only the script, and machine B has no
 /// link at all.
 #[test]
+#[cfg_attr(not(unix), ignore = "symlink fixtures are unix-only")]
 fn a_symlink_to_a_sibling_script_survives_the_round_trip_to_another_machine() {
     let harness = TestHarness::new();
     let machine_a = harness.machine("machine-a", "linux", "box1");
@@ -326,6 +333,7 @@ fn a_symlink_to_a_sibling_script_survives_the_round_trip_to_another_machine() {
 /// the three sides, and the content is the same on all three. The tree entries
 /// are not: `TreeValue::File` carries the bit.
 #[test]
+#[cfg_attr(not(unix), ignore = "Windows has no executable bit")]
 fn making_a_managed_file_executable_is_a_change_that_reaches_another_machine() {
     let harness = TestHarness::new();
     let (machine_a, machine_b) = two_synced_machines(&harness);
@@ -394,6 +402,7 @@ fn making_a_managed_file_executable_is_a_change_that_reaches_another_machine() {
 /// Exit codes are the 2026-08-13 decision: `status` is concise and always
 /// exits 0, `diff` exits 1 when it finds anything.
 #[test]
+#[cfg_attr(not(unix), ignore = "symlink fixtures are unix-only")]
 fn status_and_diff_report_a_kind_difference_between_a_link_and_a_file() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
@@ -477,6 +486,7 @@ fn status_and_diff_report_a_kind_difference_between_a_link_and_a_file() {
 /// its next sync — the link was dotsync's own, so nothing of home's is in the
 /// way, and nothing is read through it.
 #[test]
+#[cfg_attr(not(unix), ignore = "symlink fixtures are unix-only")]
 fn a_link_the_fleet_replaces_with_a_folder_becomes_the_folder_on_the_next_sync() {
     let harness = TestHarness::new();
     let (machine_a, machine_b) = two_synced_machines(&harness);
@@ -514,6 +524,7 @@ fn a_link_the_fleet_replaces_with_a_folder_becomes_the_folder_on_the_next_sync()
 /// goes — the folders dotsync's own removals emptied included — and the link
 /// takes its place.
 #[test]
+#[cfg_attr(not(unix), ignore = "symlink fixtures are unix-only")]
 fn a_folder_the_fleet_replaces_with_a_link_becomes_the_link_on_the_next_sync() {
     let harness = TestHarness::new();
     let (machine_a, machine_b) = two_synced_machines(&harness);
@@ -552,6 +563,7 @@ fn a_folder_the_fleet_replaces_with_a_link_becomes_the_link_on_the_next_sync() {
 /// arrived: the next sync, once the folder is moved, finishes cleanly and no
 /// file reads as deleted here.
 #[test]
+#[cfg_attr(not(unix), ignore = "symlink fixtures are unix-only")]
 fn a_folder_holding_files_dotsync_does_not_manage_stops_the_sync_before_anything_is_written() {
     let harness = TestHarness::new();
     let (machine_a, machine_b) = two_synced_machines(&harness);

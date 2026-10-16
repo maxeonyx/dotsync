@@ -9,6 +9,7 @@ use harness::*;
 /// makes a read write an operation per scope into the repo's op log, which is
 /// the opposite of the read-only command DESIGN describes.
 #[test]
+#[cfg_attr(not(unix), ignore = "the git shim is a shell script")]
 fn files_reaches_the_remote_once() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
@@ -39,6 +40,7 @@ fn files_reaches_the_remote_once() {
 /// noticing because nothing counted, and every command is one refactor away
 /// from the same thing.
 #[test]
+#[cfg_attr(not(unix), ignore = "the git shim is a shell script")]
 fn status_diff_sync_and_commit_each_reach_the_remote_once() {
     let harness = TestHarness::new();
     let machine = harness.machine("machine-a", "linux", "mx-xps-cy");
