@@ -10,6 +10,8 @@ Run `cargo ratchet`, not plain `cargo test`. A new test must be red when first i
 
 **[tdd-ratchet](https://tdd-ratchet.maxeonyx.com)'s ledger, `.test-status.json`, is bot-written output.** Never commit it by hand. Declare a deliberate rename or removal under `renames` or `removals` in `.tdd-ratchet.json`, commit that alongside the change, and delete the instruction file in the next commit — a leftover instruction fails every later ratchet run with `removal target is not present in committed status`. Renames are the common case here: nextest ids carry the module path, so moving a test renames it, and commit `39f73c6` moved all 146 scenarios out of `tests/user_flows.rs` into eleven area files.
 
+**The suite also runs on Windows**, outside the ratchet: integration runs every test the ledger records as `passing` on `windows-latest`. A behaviour that differs only on Windows cannot go red on Linux, so that run is its test. A test whose fixture cannot exist on Windows (a symlink, a fifo, an executable bit, a shell-script git shim) carries `#[cfg_attr(not(unix), ignore = "<why>")]`.
+
 **Don't run `cargo ratchet` from a git hook.** It fails there: git's `GIT_DIR`/`GIT_WORK_TREE` leak into the test processes, so every test that shells out to git resolves against the wrong repository ([tdd-ratchet-rs#4](https://github.com/maxeonyx/tdd-ratchet-rs/issues/4)).
 
 ## Integration workflow
@@ -90,7 +92,7 @@ jj is linked in as a library (`jj-lib`); the jj CLI is never needed. See "Hard-w
 
 PRs in this repo can be merged without approval (Max, 2026-08-12).
 
-Single explicitly dispatched `ci.yml` integration workflow: PR/base validation, actionlint, release-guard tests, format, lint, the test ratchet, Linux and Windows builds, auto-merge, GitHub Release, Pages, then an `integrated-ci` status on the exact merge commit.
+Single explicitly dispatched `ci.yml` integration workflow: PR/base validation, actionlint, release-guard tests, format, lint, the test ratchet, the test suite on Windows, Linux and Windows builds, auto-merge, GitHub Release, Pages, then an `integrated-ci` status on the exact merge commit.
 
 Each integration run publishes a fresh release, so its PR must use a new version in `Cargo.toml`, `Cargo.lock`, and `docs/version.json`. The existing release guard still verifies that artifact-changing work actually moved these versions together. `docs/version.json` is deployed verbatim to Pages and read by the agent-tools umbrella.
 
