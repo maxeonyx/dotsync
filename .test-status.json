@@ -82,6 +82,7 @@
     "dotsync::convergence$two_machines_that_both_moved_a_scope_converge_into_a_merge": "passing",
     "dotsync::dotsync$scope_graph::tests::a_scope_creation_is_read_however_the_release_that_wrote_it_worded_it": "passing",
     "dotsync::dotsync$tests::tdd_ratchet_gatekeeper": "passing",
+    "dotsync::dotsync$working_copy::tests::a_filesystem_without_an_executable_bit_keeps_the_one_home_was_given": "pending",
     "dotsync::file_kinds$a_folder_holding_files_dotsync_does_not_manage_stops_the_sync_before_anything_is_written": "passing",
     "dotsync::file_kinds$a_folder_the_fleet_replaces_with_a_link_becomes_the_link_on_the_next_sync": "passing",
     "dotsync::file_kinds$a_link_the_fleet_replaces_with_a_folder_becomes_the_folder_on_the_next_sync": "passing",
