@@ -1,6 +1,10 @@
 use help_test::HelpTest;
 
 #[test]
+#[cfg_attr(
+    not(unix),
+    ignore = "its fixture names a folder `<url>`, which Windows refuses"
+)]
 fn help_examples() {
     HelpTest::new("dotsync")
         .allow_short_flags(&["m"])

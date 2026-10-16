@@ -183,6 +183,7 @@ fn drop_of_a_file_a_scope_owns_removes_it_from_the_machines_that_had_it() {
 /// directory moves every entry the scope holds of its own under it, links
 /// included, the way naming a directory to `commit` records everything under it.
 #[test]
+#[cfg_attr(not(unix), ignore = "symlink fixtures are unix-only")]
 fn move_of_a_directory_moves_everything_the_scope_holds_under_it() {
     let harness = TestHarness::new();
     let (machine_a, machine_b) = two_synced_machines(&harness);

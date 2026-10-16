@@ -82,6 +82,25 @@ jobs:
             -f description='Offline-equivalent checks passed' \
             -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
+  windows-tests:
+    name: Windows tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      # The ratchet runs on Linux; this asks only whether every test the
+      # ledger expects to pass also passes on Windows.
+      - name: Run every test the ledger expects to pass
+        shell: bash
+        run: |
+          filter='not test(tdd_ratchet_gatekeeper)'
+          for name in $(jq -r '.tests | to_entries[] | select(.value == "pending") | .key | sub(".*\\$"; "")' .test-status.json); do
+            filter="$filter and not test(=$name)"
+          done
+          cargo nextest run --no-fail-fast -E "$filter"
+
   build:
     name: Build (${{ matrix.target }})
     needs: ready
@@ -116,7 +135,7 @@ jobs:
 
   integrate:
     name: Merge
-    needs: [ready, build]
+    needs: [ready, windows-tests, build]
     runs-on: ubuntu-latest
     outputs:
       merge_sha: ${{ steps.merge.outputs.merge_sha }}

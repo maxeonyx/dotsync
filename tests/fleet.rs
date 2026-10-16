@@ -68,6 +68,7 @@ fn show_says_when_the_scope_does_not_hold_the_file() {
 /// says which kind it is, because two scopes holding the same bytes as
 /// different kinds are different config.
 #[test]
+#[cfg_attr(not(unix), ignore = "symlink fixtures are unix-only")]
 fn show_says_what_kind_of_entry_it_printed() {
     let harness = TestHarness::new();
     let (machine_a, _machine_b) = two_synced_machines(&harness);

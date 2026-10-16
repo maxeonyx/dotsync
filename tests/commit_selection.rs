@@ -114,7 +114,7 @@ Expected:
 It expects every path you name to be a config file inside your home directory, named relative to it, and to exist either in home or on the target scope already.
 
 Current state found:
-`nonexistent-file` matched nothing: no file exists at or under {}/nonexistent-file, and scope `all` tracks no file at or under `nonexistent-file`.
+`nonexistent-file` matched nothing: no file exists at or under {}, and scope `all` tracks no file at or under `nonexistent-file`.
 
 Why dotsync stopped:
 Dotsync stopped before recording anything. A commit records every path you named or none of them, so fixing the paths above and rerunning the same command is safe.
@@ -124,7 +124,7 @@ Correct flow:
 - do not use `~/`, absolute paths, or `..`; dotsync resolves every path against your home directory already, and records it verbatim.
 - run `dotsync status` to see which managed files changed.
 ",
-            machine.home_dir.display()
+            machine.home_dir.join("nonexistent-file").display()
         ),
     );
 
