@@ -139,6 +139,7 @@ async fn read_disk_entry(
     store: &Arc<Store>,
     path: &RepoPathBuf,
     disk: &Path,
+    last_given: Option<&TreeValue>,
 ) -> Result<Merge<Option<TreeValue>>, SnapshotError> {
     let metadata = match std::fs::symlink_metadata(disk) {
         Err(_) => return Ok(Merge::absent()),
@@ -176,7 +177,7 @@ async fn read_disk_entry(
     }
     let bytes = std::fs::read(disk)
         .map_err(|err| snapshot_error(format!("read file {}", disk.display()), err))?;
-    let executable = file_is_executable(&metadata);
+    let executable = snapshot_executable(disk_executable(&metadata), last_given);
     let mut reader = bytes.as_slice();
     let file_id = store.write_file(path.as_ref(), &mut reader).await?;
     Ok(Merge::normal(TreeValue::File {
@@ -186,15 +187,22 @@ async fn read_disk_entry(
     }))
 }
 
+/// The executable bit a snapshot records: the file's own, or, on a
+/// filesystem that has none, the bit home was last given at this path — so a
+/// machine that cannot see the bit never changes it for the fleet.
+fn snapshot_executable(on_disk: Option<bool>, _last_given: Option<&TreeValue>) -> bool {
+    on_disk.unwrap_or(false)
+}
+
 #[cfg(unix)]
-fn file_is_executable(metadata: &std::fs::Metadata) -> bool {
+fn disk_executable(metadata: &std::fs::Metadata) -> Option<bool> {
     use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode() & 0o111 != 0
+    Some(metadata.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(not(unix))]
-fn file_is_executable(_metadata: &std::fs::Metadata) -> bool {
-    false
+fn disk_executable(_metadata: &std::fs::Metadata) -> Option<bool> {
+    None
 }
 
 /// The paths a tree holds, which is the definition of "managed" — the
@@ -459,7 +467,14 @@ impl LockedWorkingCopy for HomeLockedWorkingCopy {
             }
             let disk = home_disk_path(&self.home, &self.repo_root, path)
                 .map_err(|message| snapshot_error(message, "refused path"))?;
-            let value = read_disk_entry(&self.store, path, &disk).await?;
+            let last_given = self.tree.path_value(path.as_ref())?;
+            let value = read_disk_entry(
+                &self.store,
+                path,
+                &disk,
+                last_given.as_resolved().and_then(Option::as_ref),
+            )
+            .await?;
             builder.set_or_remove(path.clone(), value);
         }
         let tree = builder.write_tree().await?;
@@ -778,4 +793,31 @@ fn make_symlink(_target: &str, disk: &Path) -> Result<(), CheckoutError> {
         "symlinks are not materialized on this platform",
         "symlink on non-unix platform",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use jj_lib::backend::{CopyId, FileId, TreeValue};
+
+    use super::snapshot_executable;
+
+    fn file(executable: bool) -> TreeValue {
+        TreeValue::File {
+            id: FileId::new(vec![0; 20]),
+            executable,
+            copy_id: CopyId::placeholder(),
+        }
+    }
+
+    /// Windows has no executable bit, so every file reads as not executable
+    /// there. Recording that would make a clean sync of a `100755` script
+    /// show as edited, and committing it would strip the bit fleet-wide.
+    #[test]
+    fn a_filesystem_without_an_executable_bit_keeps_the_one_home_was_given() {
+        assert!(snapshot_executable(None, Some(&file(true))));
+        assert!(!snapshot_executable(None, Some(&file(false))));
+        assert!(!snapshot_executable(None, None));
+        assert!(snapshot_executable(Some(true), Some(&file(false))));
+        assert!(!snapshot_executable(Some(false), Some(&file(true))));
+    }
 }
