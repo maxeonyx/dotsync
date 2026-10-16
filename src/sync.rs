@@ -7,8 +7,8 @@ use jj_lib::repo::Repo as _;
 use crate::converge;
 use crate::drift::{changed_paths, classify_managed_trees, ClassifiedPath, FileState};
 use crate::error::{jj_error, ConflictRole, ConflictedFile, ConflictedVersion, DotsyncError};
-use crate::home::{repo_path_of, Home, Materialized};
-use crate::paths::DotsyncPaths;
+use crate::home::{Home, Materialized};
+use crate::paths::{normalized, repo_path_of, DotsyncPaths};
 use crate::pause::{converge_or_pause, publish_or_pause};
 use crate::repo::{
     collect_managed_tree_entries, read_entry_bytes, scope_head, scope_head_commit, scope_head_tree,
@@ -100,7 +100,8 @@ pub async fn discard(
 ) -> Run<Result<SyncCommandReport, DotsyncError>> {
     in_session(paths, async |session, paths| {
         let mut home = Home::acquire(session, paths).await?;
-        let outcome = discard_home(session, &mut home, targets).await;
+        let targets: Vec<PathBuf> = targets.iter().map(|target| normalized(target)).collect();
+        let outcome = discard_home(session, &mut home, &targets).await;
         finishing(home, session, outcome).await
     })
     .await

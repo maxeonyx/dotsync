@@ -27,8 +27,8 @@ use jj_lib::transaction::Transaction;
 use crate::converge::{self, Pause, Pin, Pins};
 use crate::error::{jj_error, DotsyncError};
 use crate::fleet::{effect, machine_entries, Fleet, MachineEffect, Standing};
-use crate::home::{repo_path_of, Home};
-use crate::paths::DotsyncPaths;
+use crate::home::Home;
+use crate::paths::{normalized, repo_path_of, DotsyncPaths};
 use crate::pause::{conflicted_files, pause_at, publish_or_pause, reject_commit_if_paused};
 use crate::repo::{collect_managed_tree_entries, PushReport};
 use crate::session::{in_session, Run, Session};
@@ -402,11 +402,4 @@ async fn stop_before_planning(
             .await?;
     }
     pause_at(session, home, checkpoint, pause).await
-}
-
-/// A path as the repo spells it: relative, forward slashes, no trailing
-/// separator.
-pub(crate) fn normalized(path: &std::path::Path) -> PathBuf {
-    let spelled = path.to_string_lossy().replace('\\', "/");
-    PathBuf::from(spelled.trim_start_matches("./").trim_end_matches('/'))
 }

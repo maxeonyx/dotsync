@@ -26,8 +26,8 @@ use crate::error::{
     CommitPathProblem, DotsyncError, RefusedCommitPath, RejectedCommitPath, SkipReason,
     SkippedCommitPath,
 };
-use crate::home::{repo_path_of, Home};
-use crate::paths::DotsyncPaths;
+use crate::home::Home;
+use crate::paths::{normalized, repo_path_of, DotsyncPaths};
 use crate::repo::{collect_managed_tree_entries, scope_head_commit};
 use crate::session::Session;
 use crate::sync::classify_home_against_head;
@@ -198,15 +198,11 @@ fn expand_selection_paths(
     let mut rejected = Vec::new();
     for named in selection_paths {
         // `.config/fish/` and `.config/fish` name the same directory, and
-        // `./x` names `x` — but dotsync records the path it is given verbatim,
-        // as a repo path, which accepts neither trailing separators nor `.`
-        // components. Normalising here rather than at the repo layer keeps it
-        // a question about the selection, answered where the teaching messages
-        // are; what gets quoted back to the user is still what they typed.
-        let selection_path = &named
-            .components()
-            .filter(|component| !matches!(component, Component::CurDir))
-            .collect::<PathBuf>();
+        // `./x` names `x`. Normalising here rather than at the repo layer keeps
+        // it a question about the selection, answered where the teaching
+        // messages are; what gets quoted back to the user is still what they
+        // typed.
+        let selection_path = &normalized(named);
         if let Some(problem) = unusable_commit_path(paths, selection_path, repo_relative.as_deref())
         {
             rejected.push(RejectedCommitPath {
@@ -299,10 +295,7 @@ pub(crate) fn home_files_under(
     let repo_root = Canonical::of(&paths.repo_root);
     let mut found = BTreeSet::new();
     for directory in directories {
-        let directory: PathBuf = directory
-            .components()
-            .filter(|component| !matches!(component, Component::CurDir))
-            .collect();
+        let directory = normalized(directory);
         let home_path = paths.home_dir.join(&directory);
         if !std::fs::symlink_metadata(&home_path).is_ok_and(|metadata| metadata.is_dir()) {
             continue;
@@ -474,7 +467,7 @@ impl DirectoryWalk<'_> {
             let Ok(relative) = resolved_dir
                 .join(entry.file_name())
                 .strip_prefix(self.home_root.path())
-                .map(Path::to_path_buf)
+                .map(normalized)
             else {
                 continue;
             };
