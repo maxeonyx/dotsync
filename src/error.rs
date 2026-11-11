@@ -590,12 +590,12 @@ impl DotsyncError {
                 // The mode switch, stated where the reader cannot miss it and
                 // before it starts editing: the file in home is about to stop
                 // being this machine's config.
-                Some(machine_scope) => format!("More than one of them changed the same part of the same file, so there is no merged version dotsync can work out on its own. Nothing was written: the scope's head has not moved and no other machine can see this state.\n\nThis machine is `{machine_scope}`, which does not descend from `{scope}`, so what you are resolving is not this machine's config — the file in home is a scratch buffer for `{scope}`'s merge. `{machine_scope}`'s own version comes back after `dotsync continue` or `dotsync abort`."),
+                Some(machine_scope) => format!("More than one of them changed the same part of the same file, so there is no merged version dotsync can work out on its own. Nothing was written: the scope's head has not moved and no other machine can see this state.\n\nThis machine is `{machine_scope}`, which does not descend from `{scope}`, so what you are resolving is not this machine's config — the file in home is a scratch buffer for `{scope}`'s merge. `{machine_scope}`'s own version comes back after `dotsync continue`; `dotsync abort` leaves home as it is, so anything you wrote there stays a local change until you discard it."),
             },
             &[
                 "read the versions of each file below, decide what it should hold, and write that into the file at its real path in home; take out any marker lines you paste in.",
                 "run `dotsync continue` from the same machine to record your decision and finish converging. Leaving a file exactly as it is says you decided on the version already there.",
-                "or run `dotsync abort` from the same machine to discard it; that reverts the conflicted files in home to this machine's scope state, so save anything you want to keep outside home first.",
+                "or run `dotsync abort` from the same machine to discard it; home is left as it is.",
             ])),
         Self::UnresolvedConflict { scope, paths } => Explanation::stop("unresolved_conflict", self)
             .paused_at(scope)
@@ -617,7 +617,7 @@ impl DotsyncError {
                         .unwrap_or_default()
                 ),
                 "take the marker lines out, leave the contents you want, then run `dotsync continue`.",
-                "or run `dotsync abort` to discard the merge; that reverts the conflicted files in home to this machine's scope state, so save anything you want to keep outside home first.",
+                "or run `dotsync abort` to discard the merge; home is left as it is.",
                 "if the file is genuinely meant to contain lines of `<<<<<<<` and `>>>>>>>`, `continue` cannot record it: abort, and commit it to the scope directly instead.",
             ])),
         Self::PausedCascadeInProgress { scope } => Explanation::stop("paused_cascade_in_progress", self)
@@ -632,7 +632,7 @@ impl DotsyncError {
             &[
                 "edit each conflicted file at its real path in home so it holds the merged contents you want; take out any marker lines you paste in.",
                 "run `dotsync continue` to finish the paused cascade.",
-                "or run `dotsync abort` to discard the paused cascade; that reverts the conflicted files in home to this machine's scope state.",
+                "or run `dotsync abort` to discard the paused cascade; home is left as it is.",
                 "after `dotsync continue` succeeds, rerun the new commit if it is still needed.",
             ])),
         Self::UnusableCommitPaths { scope, rejected } => {

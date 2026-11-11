@@ -8,20 +8,16 @@ use similar::TextDiff;
 use std::path::{Path, PathBuf};
 
 /// Output for a command whose job is to bring home up to its machine scope:
-/// `init`, plain `dotsync`, `continue`, and `abort`. They differ in what they
-/// did to get there and in nothing else they report, so they answer in one
-/// shape rather than in four copies of it.
-///
-/// `push` is `None` only for `abort`, which is the one of the four that
-/// publishes nothing — so a command that does publish cannot quietly omit what
-/// it left unpublished.
+/// `init`, plain `dotsync`, `continue`, `discard`, `move` and `drop`. They
+/// differ in what they did to get there and in nothing else they report, so
+/// they answer in one shape rather than in a copy of it each.
 pub(crate) fn synced_output(
     command: &str,
     headline: String,
     sync: &SyncReport,
-    push: Option<&PushReport>,
+    push: &PushReport,
 ) -> SuccessOutput {
-    let mut json = json!({
+    let json = json!({
         "status": "ok",
         "command": command,
         "machine_scope": sync.current_scope,
@@ -30,7 +26,7 @@ pub(crate) fn synced_output(
         // reached this report is a drift the run was allowed to overwrite —
         // anything else stopped it — so this is exactly the home content this
         // run discarded. Named for what happened to the file rather than for
-        // the command, because `discard`, `init` and `abort` all do it.
+        // the command, because `discard` and `init` both do it.
         "overwritten_files": display_paths(
             &sync.drifts.iter().map(|drift| drift.repo_path.clone()).collect::<Vec<_>>(),
         ),
@@ -39,12 +35,10 @@ pub(crate) fn synced_output(
         // machine holding uncommitted work, and an agent reading only the
         // headline would have no way to know the second half.
         "carried_changes": changes_json(&sync.carried_changes),
+        "unpushed_scopes": push.unpushed_scopes(),
     });
-    if let Some(push) = push {
-        json["unpushed_scopes"] = json!(push.unpushed_scopes());
-    }
     let mut notes = carried_change_notes(&sync.carried_changes);
-    notes.extend(success_notes(&sync.drifts, push));
+    notes.extend(success_notes(&sync.drifts, Some(push)));
     SuccessOutput {
         json,
         human: HumanOutput::Message(headline),

@@ -59,7 +59,7 @@ use crate::machine::machine_signature;
 use crate::paths::{repo_path_of, DotsyncPaths, SHED_SYNC_STATE_RELATIVE_PATH};
 use crate::repo::scope_head_commit;
 use crate::session::Session;
-use crate::working_copy::{HomeLockedWorkingCopy, HomeWorkingCopy};
+use crate::working_copy::{only_at, HomeLockedWorkingCopy, HomeWorkingCopy};
 
 /// The run's handle on home: the locked working copy plus the wc commit, kept
 /// in step with each other by construction — every method that moves one
@@ -469,38 +469,21 @@ impl Home {
         Ok(Materialized::Applied)
     }
 
-    /// Moves home to `head` with home's side of the merge dropped: the head's
-    /// tree is materialized whole and every local change at a managed path is
-    /// gone.
-    ///
-    /// It cannot be answered by `materialize`, whose whole job is to carry
-    /// local changes across. `init` and `abort` are the commands that ask it:
-    /// both exist to take the head's side of everything. `discard` asks the
-    /// same question about named paths, through `materialize_taking_head_at`.
-    pub(crate) async fn materialize_discarding_local(
-        &mut self,
-        session: &mut Session,
-        head: &Commit,
-    ) -> Result<Materialized, DotsyncError> {
-        // Observed even though home's side is about to be dropped: check_out
-        // diffs against the snapshot, so an unobserved path on disk would
-        // read as absent and be blindly overwritten instead of counted as a
-        // local change this discard is discarding.
-        self.observe(session, &head.tree()).await?;
-        let mark = self.mark().await?;
-        if head.id() == mark.id() && self.wc_commit.tree_ids() == head.tree().tree_ids() {
-            return Ok(Materialized::AlreadyThere);
-        }
-        self.switch_and_check_out(session, head.id().clone(), head.tree())
-            .await?;
-        Ok(Materialized::Applied)
-    }
-
     /// Ends the run at the home boundary: persists which operation home has
     /// seen. Call it after the last transaction, with the session's final
     /// operation.
-    pub(crate) async fn finish(self, session: &Session) -> Result<(), DotsyncError> {
+    ///
+    /// What it persists names only the mark's paths. A run reads other paths
+    /// — the untracked files `status <dirs>` lists, the files a commit looks
+    /// at and does not record, an incoming head that stopped — and none of
+    /// them is home content dotsync put there.
+    pub(crate) async fn finish(mut self, session: &Session) -> Result<(), DotsyncError> {
         let op_id: OperationId = session.repo().op_id().clone();
+        let managed = tree_paths(&self.mark().await?.tree())?;
+        self.locked
+            .keep_only(&managed)
+            .await
+            .map_err(|err| jj_error(format!("persist working copy state: {err}")))?;
         Box::new(self.locked)
             .finish(op_id)
             .await
@@ -508,13 +491,13 @@ impl Home {
         Ok(())
     }
 
-    /// Reads home. The probe set is every path any relevant tree knows: what
-    /// was last materialized (already in the probe), what the wc commit
-    /// holds, and what the mark holds — the mark's paths keep a
-    /// deleted-then-recreated file visible until the deletion is committed.
+    /// Reads home at the paths dotsync manages here — what the mark holds —
+    /// and at whatever this run has asked to read besides. Nothing else: a
+    /// file an earlier run only read, or that a scope this machine is not on
+    /// holds, is not home content dotsync put there, and a snapshot that
+    /// recorded it would hand it to the next checkout to delete.
     async fn snapshot_home(&mut self) -> Result<MergedTree, DotsyncError> {
         let mark = self.mark().await?;
-        self.locked.probe_also(tree_paths(&self.wc_commit.tree())?);
         self.locked.probe_also(tree_paths(&mark.tree())?);
 
         // Asked before the snapshot opens anything, so a tracked path that is
@@ -592,6 +575,34 @@ impl Home {
         workspace: &WorkspaceNameBuf,
     ) -> Result<(), DotsyncError> {
         let target_tree = self.wc_commit.tree();
+        // The old mark is recovered from the operation the state file names:
+        // that operation's view holds the wc commit as it was when home was
+        // last materialized, and its parent is the mark home still derives
+        // from.
+        let old_mark_id = match self.last_materialized_mark(session, workspace).await? {
+            Some(id) => id,
+            // The state's operation predates this machine's first wc commit —
+            // a run of the release whose migration wrote the state before
+            // creating the commit. Nothing was ever materialized by this
+            // model, so home derives from what the wc commit was created on:
+            // its parent.
+            None => self.mark().await?.id().clone(),
+        };
+        let old_mark = session
+            .repo()
+            .store()
+            .get_commit(&old_mark_id)
+            .map_err(|err| jj_error(format!("load the last materialized mark: {err}")))?;
+        // What home was materialized from is the record at the old mark's
+        // paths and nowhere else, which is all `finish` records — but a
+        // record written before that names files a read only looked at, and
+        // taking those as materialized would remove them from home.
+        let materialized_tree = only_at(self.locked.old_tree(), &tree_paths(&old_mark.tree())?)
+            .await
+            .map_err(|err| jj_error(format!("read what home was materialized from: {err}")))?;
+        // What the interrupted sync may have been removing is read too, or a
+        // removal it never reached would read as already done.
+        self.locked.probe_also(tree_paths(&materialized_tree)?);
         let snapshot = self.snapshot_home().await?;
 
         // The crash was after materializing (between check_out and finish):
@@ -601,7 +612,6 @@ impl Home {
             return Ok(());
         }
 
-        let materialized_tree = self.locked.old_tree().clone();
         let merged = merge_trees(
             (snapshot.clone(), "local changes in home"),
             (materialized_tree, "what this machine last materialized"),
@@ -622,19 +632,7 @@ impl Home {
         // seen the target, so make the wc commit say what is true — home is
         // an edit of the *old* mark — and let this run's ordinary sync leg
         // re-meet the head and present the conflict through the ordinary
-        // channel. The old mark is recovered from the operation the state
-        // file names: that operation's view holds the wc commit as it was
-        // when home was last materialized, and its parent is the mark home
-        // still derives from.
-        let old_mark_id = match self.last_materialized_mark(session, workspace).await? {
-            Some(id) => id,
-            // The state's operation predates this machine's first wc commit —
-            // a run of the release whose migration wrote the state before
-            // creating the commit. Nothing was ever materialized by this
-            // model, so home derives from what the wc commit was created on:
-            // its parent.
-            None => self.mark().await?.id().clone(),
-        };
+        // channel.
         self.switch_to(session, old_mark_id, snapshot).await?;
         Ok(())
     }
@@ -674,7 +672,7 @@ impl Home {
     ///
     /// Every command that moves home to a new head ends here — the ordinary
     /// merge, the resolution `continue` writes, and the head-wins tree
-    /// `abort` and `discard` ask for — because the difference between them is entirely in
+    /// `discard` asks for — because the difference between them is entirely in
     /// which tree they arrive with. Keeping the pair in one place is what makes
     /// "the wc commit describes home" hold by construction rather than by three
     /// call sites each remembering the second half.
