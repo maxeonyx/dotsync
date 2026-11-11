@@ -1,6 +1,9 @@
 {
   "$schema": "https://tdd-ratchet.maxeonyx.com/schema/test-status.v1.json",
   "tests": {
+    "dotsync::abort_containment$abort_leaves_alone_files_written_while_the_merge_waited": "pending",
+    "dotsync::abort_containment$abort_leaves_alone_untracked_files_a_status_listed": "pending",
+    "dotsync::abort_containment$abort_leaves_home_untouched_outside_what_the_cascade_wrote": "pending",
     "dotsync::cli_contract$a_run_that_stops_lists_each_thing_it_found_separately": "passing",
     "dotsync::cli_contract$a_usage_error_has_the_same_shape_as_every_other_error": "passing",
     "dotsync::cli_contract$a_user_never_meets_the_backends_vocabulary": "passing",
@@ -111,6 +114,9 @@
     "dotsync::help_text$init_help_explains_remote_url_and_setup": "passing",
     "dotsync::help_text$top_level_help_documents_the_exit_codes": "passing",
     "dotsync::help_text$top_level_help_explains_scope_and_basic_workflow": "passing",
+    "dotsync::home_containment$a_home_polluted_by_0_13_2_reads_keeps_its_untracked_files": "pending",
+    "dotsync::home_containment$reads_leave_the_recorded_home_content_as_they_found_it": "pending",
+    "dotsync::home_containment$writes_after_reading_untracked_folders_change_only_their_own_paths": "pending",
     "dotsync::hostile_inputs$a_branch_deleted_from_the_remote_does_not_stop_this_machine": "passing",
     "dotsync::hostile_inputs$a_branch_rewound_on_the_remote_is_not_pushed_back": "passing",
     "dotsync::hostile_inputs$a_machine_named_after_a_shared_scope_does_not_publish_its_private_config": "passing",
