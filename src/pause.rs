@@ -119,14 +119,18 @@ pub struct AbortReport {
     /// aborted — the cascade was — and it is not the scope the discarded commit
     /// was made on either, which is why it says which of the three it is.
     pub paused_scope: String,
-    pub sync: SyncReport,
+    pub machine_scope: String,
+    /// Home's changes against this machine's scope, left standing: abort
+    /// writes nothing to home, so the edit the discarded commit was recording
+    /// is among them, uncommitted again.
+    pub local_changes: Vec<FileChange>,
     /// The scope the pass still stops at, when discarding this run's own work
     /// was not enough to end the conflict.
     ///
     /// `abort` takes back what this machine committed, and a conflict that
     /// came from the remote is not that: `all` moved on the shared remote,
     /// `linux` collides with it, and nothing local is in the way. So the run
-    /// puts home back, says the conflict is still there, and exits with the
+    /// says the conflict is still there, and exits with the
     /// code that means one is waiting — rather than reporting success and
     /// leaving the next command to disagree.
     pub still_paused: Option<String>,
@@ -607,21 +611,29 @@ async fn abort_in_session(
     }
     remove_paused_run(session.paths())?;
 
-    // Abort is a full sync of home back to the machine scope's pre-pause tip,
-    // not a selective restore: the home edit that started the cascade is
-    // exactly what abort exists to discard, so it cannot also be a reason to
-    // refuse. Drift outside the paused selection goes the same way, which is
-    // what DESIGN.md's "reverts all the config files" says and what the old
-    // selective restore quietly did not do.
-    let sync =
-        crate::sync::sync_home_to_machine_scope(session, home, LocalChanges::Discard).await?;
+    // Home is not written. A run that stops writes nothing to home — every
+    // pause returns before the home sync — so there is nothing of the run's
+    // in home to take back, and anything else there is somebody's: the edit
+    // the stopped commit was recording, another session's uncommitted work,
+    // files dotsync has only ever read. What is still uncommitted is reported,
+    // because it is still this machine's to decide about.
+    let classified = crate::sync::classify_home_against_machine_scope(session, home).await?;
+    let local_changes = changed_paths(&classified, FileState::is_drift)
+        .into_iter()
+        .map(|(path, classified)| FileChange {
+            path,
+            state: classified.state,
+        })
+        .collect();
 
+    let still_paused = pending_pause(session, &machine_scope, None)
+        .await?
+        .map(|paused| paused.scope);
     Ok(AbortReport {
         paused_scope: stopped_at,
-        sync,
-        still_paused: pending_pause(session, &machine_scope, None)
-            .await?
-            .map(|paused| paused.scope),
+        machine_scope,
+        local_changes,
+        still_paused,
     })
 }
 

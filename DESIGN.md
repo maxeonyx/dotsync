@@ -191,7 +191,7 @@ An open question: some config files may end up with sections that shouldn't be c
 
 ### Local changes and the mark
 
-Home is jj's working copy, through dotsync's own `WorkingCopy` implementation over the managed paths. Each run snapshots home into a working-copy commit whose parent is the mark, so the two per-machine facts live in jj's own view — which scope is this machine's (the workspace name) and which commit home last materialized (the parent) — and move atomically with the history they describe. This enables two things:
+Home is jj's working copy, through dotsync's own `WorkingCopy` implementation over the managed paths: the paths the mark holds, plus whatever one run has to read besides (a head it is heading for, a path a commit names, the untracked files `status <dirs>` lists). What a run only read is never recorded as home content, so no later run treats it as something to remove. Each run snapshots home into a working-copy commit whose parent is the mark, so the two per-machine facts live in jj's own view — which scope is this machine's (the workspace name) and which commit home last materialized (the parent) — and move atomically with the history they describe. This enables two things:
 
 1. **Deletion semantics** — a file in the mark's tree but gone from the repo was materialized here and should be removed; a file never in the mark's tree was never managed.
 
@@ -222,7 +222,7 @@ When a sync stops on a conflict it touches nothing: home is one coherent derivat
 
 On a machine with no working-copy record yet — a fresh `init`, or the first run after upgrading from a release that kept a state file — the working-copy commit is created as an empty-diff child of the machine scope's bookmark, and whatever home actually holds surfaces as ordinary local changes on the first snapshot. Nothing is removed from home and no missing file is read as a deletion, because there is no record of having put anything there.
 
-**A local change ends in one of two ways, and both name paths.** `dotsync commit <scope> -- <paths>` makes it everybody's; `dotsync discard <paths>` decides against it, writing the scope's version into home instead. Deleting the file yourself is neither, because a deletion is a local change too — home would come back empty rather than canonical, which is why discarding needs a command of its own. Naming a path that holds no change of yours is a stop rather than a run that discarded nothing: discarding cannot be undone, and a mistyped path is likelier than a change of mind. What a run discarded is reported as `overwritten_files`, the same field `init` and `abort` use, because all three take the head's side of something.
+**A local change ends in one of two ways, and both name paths.** `dotsync commit <scope> -- <paths>` makes it everybody's; `dotsync discard <paths>` decides against it, writing the scope's version into home instead. Deleting the file yourself is neither, because a deletion is a local change too — home would come back empty rather than canonical, which is why discarding needs a command of its own. Naming a path that holds no change of yours is a stop rather than a run that discarded nothing: discarding cannot be undone, and a mistyped path is likelier than a change of mind. What a run discarded is reported as `overwritten_files`, the same field every command that moves home uses.
 
 ## The jj decision
 
@@ -298,7 +298,7 @@ That leaves "I am done" as the one thing dotsync cannot find out for itself: hom
 
 - **`continue` is the pass again with an answer supplied.** It recomputes the merge that stopped, takes home's bytes at exactly the paths that merge could not resolve, and hands those to the pass — so the resolution is recorded on the scope that stopped, and everything below it merges a parent that moved, which is ordinary convergence. There is no remaining cascade to remember: the pass finds what is left by looking. An answer that does not cover a second conflict leaves that merge conflicted, and the pass stops there as it would have anyway, which is what keeps home's bytes off a conflict nobody has been shown. `commit` refuses while a merge is waiting, pointing at the resolution flow.
 - **"Resolved" is a property of the content, and refusing markers is the whole of it.** `continue` refuses a file that still holds conflict markers, since markers recorded as the merged contents cascade to every descendant and reach every other machine's live config. It refuses nothing else. In particular an unchanged file is a resolution — the agent read both versions and kept the one already there — so the pause says as much, and the tempting "unchanged means unresolved" check is the thing to avoid: it is silently wrong for exactly the agent that did the work properly. Markers are detected by a start line _and_ an end line, because a lone run of seven `=` or `-` characters is ordinary config.
-- **Conflicts outside this machine's ancestry** (e.g. a cascade from `all` conflicting only in the `windows` subtree while this machine is linux) don't appear in home naturally, and resolving one borrows the home path as a scratch buffer for somebody else's config. The pause states the switch loudly — "this machine is `mx-xps-cy`, which does not descend from `windows`, so what you are resolving is not this machine's config; `mx-xps-cy`'s own version comes back after `continue` or `abort`" — because without it the agent reads another machine's settings as its own.
+- **Conflicts outside this machine's ancestry** (e.g. a cascade from `all` conflicting only in the `windows` subtree while this machine is linux) don't appear in home naturally, and resolving one borrows the home path as a scratch buffer for somebody else's config. The pause states the switch loudly — "this machine is `mx-xps-cy`, which does not descend from `windows`, so what you are resolving is not this machine's config; `mx-xps-cy`'s own version comes back after `continue`" — because without it the agent reads another machine's settings as its own.
 
   The borrowing has to end, and that is one rule rather than a mode: **`continue` lets the scope decide the conflicted paths again**, taking the head's side at exactly those paths and carrying every other local change as usual. Where the merge was on this machine's own path the resolution has just cascaded into its scope, so the head's side _is_ what the agent typed and nothing moves. Where it was another machine's, home gets its own config back — without which the resolution stays a local change that no scope this machine syncs from can ever settle, so `status` reports it for ever. The run says which of the two happened, because a sync that discards home content and does not say why reads as lost work.
 
@@ -306,9 +306,9 @@ That leaves "I am done" as the one thing dotsync cannot find out for itself: hom
 
   All or nothing, because the cause of a cascade conflict is a commit on a scope that merged cleanly: `dotsync commit all` collides at `linux`, and `all` is the scope that is fine. Publish `all` and no local command can take it back, so every later run re-derives the same conflict and `dotsync abort` can never clear it. Withholding keeps abort able to undo what the run did, and keeps the shared remote free of conflict encodings that plain git tooling renders poorly — at the cost that only the machine holding the conflict can resolve it.
 
-- **`abort` takes back what the run that stopped committed, and puts home back.** Every scope it moved returns to where that run found it, and home is synced to the machine scope's restored tip — reverting **all** the config files, not a selective restore. Whatever the pause put into home, and the home edit that caused the aborted commit, are both gone from home afterward; that's the point of abort. Nothing published is touched, because a pause publishes nothing, so everything discarded is local-only. Clean remote integration discarded along the way costs nothing: the next convergence pass re-derives it.
+- **`abort` takes back what the run that stopped committed, and touches nothing in home.** Every scope it moved returns to where that run found it. Abort may change in home only what the paused run wrote there, restoring it as home held it before the pause — and a run that stops writes nothing to home, because every pause comes before the home sync. So home is byte-for-byte what it was: the edit the stopped commit was recording is an uncommitted local change again, and so is every other session's work in progress, and files dotsync has merely read are left alone. The run lists what is still uncommitted, because it is still this machine's to commit or `discard`. Nothing published is touched, because a pause publishes nothing, so everything discarded is local-only. Clean remote integration discarded along the way costs nothing: the next convergence pass re-derives it.
 
-  **Abort is not a way out of every conflict, and says so when it is not.** When the colliding change arrived from the remote instead of from this machine, there was nothing of this machine's in the way: home goes back, the merge still stops in the same place, and the run reports that and exits with the code that means a merge is waiting. Only a resolution ends that one. Which is not a dead end — `continue` is the way through, and abort names it.
+  **Abort is not a way out of every conflict, and says so when it is not.** When the colliding change arrived from the remote instead of from this machine, there was nothing of this machine's in the way: the merge still stops in the same place, and the run reports that and exits with the code that means a merge is waiting. Only a resolution ends that one. Which is not a dead end — `continue` is the way through, and abort names it.
 
 ## Failure model: no dead ends
 
@@ -388,7 +388,7 @@ Every write — `commit`, `move`, `drop` — reports its effect, per machine and
 
 **`dotsync continue`**: Continue a paused cascade once the conflict has been resolved, recording the resolved contents on the scope whose merge stopped and publishing everything the pause held back. Refuses a resolution that still holds conflict markers.
 
-**`dotsync abort`**: Discard what the run that stopped committed, restoring every scope it moved to where that run found it, and sync the current machine home back to the restored state. Says so, and stops, if the merge is still waiting afterwards — which is what a conflict that came from the remote does.
+**`dotsync abort`**: Discard what the run that stopped committed, restoring every scope it moved to where that run found it. Home is not written; what is still uncommitted there is listed. Says so, and stops, if the merge is still waiting afterwards — which is what a conflict that came from the remote does.
 
 ### Exit codes
 
@@ -417,13 +417,15 @@ The envelope is two fields. `status` is `"ok"` or `"error"`, and `command` names
 
 Every payload from a read-only command carries three facts about the machine rather than about the question asked — `diverged_scopes`, `unpushed_scopes` and `machine_scope`, plus `paused_cascade` when a merge is waiting — because a fact carried by two of the three commands is a fact nobody finds.
 
-**The commands that move home** — `dotsync`, `init`, `continue`, `abort`, `discard` — answer in one shape:
+**The commands that move home** — `dotsync`, `init`, `continue`, `discard` — answer in one shape:
 
 ```json
 {"carried_changes":[],"command":"discard","machine_scope":"goof-b","overwritten_files":[".apprc"],"status":"ok","synced_files":[".apprc"],"unpushed_scopes":[]}
 ```
 
-`overwritten_files` is home content this run discarded in favour of the repo, and `carried_changes` is home content it merged around and left standing — the two halves of what a sync did to your edits. `unpushed_scopes` lists scopes committed here that the remote does not have. `abort` adds `paused_scope`, where the run that stopped had stopped.
+`overwritten_files` is home content this run discarded in favour of the repo, and `carried_changes` is home content it merged around and left standing — the two halves of what a sync did to your edits. `unpushed_scopes` lists scopes committed here that the remote does not have.
+
+**`abort`** moves no home file, so it answers with what it discarded and what home still holds: `paused_scope`, where the run that stopped had stopped, and `local_changes`, home's uncommitted changes against this machine's scope, in `status`'s shape — plus `paused_cascade` when the merge is still waiting.
 
 **`commit`** says which of its two outcomes it had, because they are different events: one wrote history and synced home, the other did neither and so has no `synced_files` or `newly_tracked` at all rather than empty ones.
 

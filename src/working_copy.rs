@@ -377,7 +377,7 @@ impl HomeWorkingCopy {
             old_operation_id: current.operation_id,
             old_tree: current.tree.clone(),
             tree: current.tree,
-            probe: current.tracked,
+            probe: Vec::new(),
             _lock: lock,
         })
     }
@@ -392,20 +392,40 @@ pub(crate) struct HomeLockedWorkingCopy {
     old_operation_id: OperationId,
     old_tree: MergedTree,
     tree: MergedTree,
-    /// The paths snapshot examines: the materialized tree's paths, plus
-    /// whatever the session adds via `probe_also` (the mark's paths, so a
-    /// file deleted from home and then recreated is still seen until the
-    /// deletion is committed).
+    /// The paths snapshot examines, and the only ones it records: whatever
+    /// the session adds via `probe_also` — the mark's paths, and the paths
+    /// this run has to read besides. Empty until then, because what an earlier
+    /// run read is not a reason for this one to hold anything about it.
     probe: Vec<RepoPathBuf>,
     _lock: FileLock,
 }
 
 impl HomeLockedWorkingCopy {
+    /// Forgets every recorded path but these, so that what is persisted
+    /// names only paths a scope holds. Home's files are not touched: this is
+    /// the record, not the disk.
+    pub(crate) async fn keep_only(
+        &mut self,
+        paths: &[RepoPathBuf],
+    ) -> Result<(), WorkingCopyStateError> {
+        let mut builder = MergedTreeBuilder::new(self.tree.clone());
+        for path in tree_paths(&self.tree)? {
+            if !paths.contains(&path) {
+                builder.set_or_remove(path, Merge::absent());
+            }
+        }
+        self.tree = builder
+            .write_tree()
+            .await
+            .map_err(|err| state_error("forget paths no scope holds", err))?;
+        Ok(())
+    }
+
     /// Adds paths to the set snapshot examines, and says whether any of them
     /// were new — so a caller can tell a widening that needs another read of
     /// home from one that changes nothing.
     ///
-    /// The working copy itself only knows what it materialized; the caller also
+    /// The working copy itself only knows what it materialized; the caller
     /// knows the mark (the wc commit's parent) and the head it is heading for,
     /// and calls this with their paths.
     pub(crate) fn probe_also(&mut self, paths: impl IntoIterator<Item = RepoPathBuf>) -> bool {
@@ -472,7 +492,13 @@ impl LockedWorkingCopy for HomeLockedWorkingCopy {
         &mut self,
         _options: &SnapshotOptions,
     ) -> Result<(MergedTree, SnapshotStats), SnapshotError> {
-        let mut builder = MergedTreeBuilder::new(self.tree.clone());
+        // From nothing rather than from what was last recorded: the snapshot
+        // is home at exactly the paths this run reads, so a path no run
+        // reads stops being one dotsync holds anything about.
+        let mut builder = MergedTreeBuilder::new(MergedTree::resolved(
+            self.store.clone(),
+            self.store.empty_tree_id().clone(),
+        ));
         for path in &self.probe {
             // A path beneath one of dotsync's own links holds nothing in home:
             // the link is what home holds there, and it is never read

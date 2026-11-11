@@ -67,7 +67,7 @@ A commit merges the change through every descendant scope, and a sync merges wha
 
 That is not a failure to retry. It is a question. Decide what each file should hold, write that into it at its real path in `~/`, and run `dotsync continue`. Dotsync reads the resolution back out of the file, so leaving one exactly as it is says you decided on the version already there. `continue` refuses a file that still holds conflict markers, since those would cascade to every other machine's live config.
 
-`dotsync abort` is the other way out: it discards what this machine committed, including the home edit that started it. Note what it cannot do — when the change you collided with came from another machine, there is nothing of yours in the way, so home goes back and the merge is still waiting. Resolving is the only way through that one.
+`dotsync abort` is the other way out: it discards what this machine committed and leaves home exactly as it is, so the edit that started it is an uncommitted change again — commit it to the right scope, or `dotsync discard` it. Note what abort cannot do — when the change you collided with came from another machine, there is nothing of yours in the way, so the merge is still waiting. Resolving is the only way through that one.
 
 Until you do one of those, writes refuse to start and nothing this machine has committed is published. `dotsync status` says so, and prints the whole conflict again — the place to go if the original message has scrolled away, since those versions exist nowhere else.
 

@@ -151,7 +151,8 @@ const STATUS_LONG_ABOUT: &str = "Lists the managed files changed on this machine
 While a merge is waiting, it prints every version of every file that merge could not resolve.";
 
 const CONTINUE_ABOUT: &str = "Continue a paused merge cascade after resolving conflicts";
-const ABORT_ABOUT: &str = "Abort a paused merge cascade and restore the pre-pause state";
+const ABORT_ABOUT: &str =
+    "Abort a paused merge cascade, putting its scopes back; home is not touched";
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum OutputFormat {
@@ -785,27 +786,46 @@ async fn run_abort() -> Result<CliOutput, DotsyncError> {
     let paths = discover_paths()?;
     let run = abort_paused_cascade(&paths).await;
     Ok(output_of("dotsync abort", run, |report| {
-        // `abort` publishes nothing, so it has no push to report — and the one
-        // thing it knows that the other syncing commands do not is where the
-        // cascade it discarded had stopped.
-        let synced = report.sync.synced_paths.len();
-        let mut output = render::synced_output(
-            "abort",
-            match &report.still_paused {
+        // `abort` moves scopes and nothing else: it publishes nothing and
+        // writes nothing to home. What it says about home is what is still
+        // uncommitted there — the edit the discarded commit was recording
+        // among it — because that is still this machine's to decide about.
+        let mut notes = Vec::new();
+        if !report.local_changes.is_empty() {
+            notes.push(format!(
+                "dotsync: {} local change(s) are still only in home",
+                report.local_changes.len()
+            ));
+            notes.extend(
+                report
+                    .local_changes
+                    .iter()
+                    .map(|change| render::render_change_line(&change.path, change.state)),
+            );
+            notes.push("dotsync: commit them with `dotsync commit <scope> -m \"message\" -- <path>`, or put the scope's version back with `dotsync discard <path>`.".to_string());
+        }
+        let mut output = SuccessOutput {
+            json: json!({
+                "status": "ok",
+                "command": "abort",
+                "machine_scope": report.machine_scope,
+                "paused_scope": report.paused_scope,
+                "local_changes": render::changes_json(&report.local_changes),
+            }),
+            human: HumanOutput::Message(match &report.still_paused {
                 None => format!(
-                    "dotsync: discarded the merge paused at `{}` and synced {synced} file(s)",
+                    "dotsync: discarded the merge paused at `{}`; home was not touched",
                     report.paused_scope
                 ),
-                // Home went back, and that is all that happened: saying the
-                // merge was discarded would be describing the pause as over.
+                // Saying the merge was discarded would be describing the
+                // pause as over.
                 Some(scope) => format!(
-                    "dotsync: put home back and synced {synced} file(s); the merge at `{scope}` is still waiting"
+                    "dotsync: home was not touched; the merge at `{scope}` is still waiting"
                 ),
-            },
-            &report.sync,
-            None,
-        );
-        output.json["paused_scope"] = json!(report.paused_scope);
+            }),
+            notes,
+            exit_code: 0,
+        };
         // Abort discards what this machine committed, so a conflict that came
         // from the remote is still there afterwards. Reported under the name
         // every other command uses, with the code that means a pause is
@@ -815,8 +835,8 @@ async fn run_abort() -> Result<CliOutput, DotsyncError> {
             return output;
         };
         output.json["paused_cascade"] = json!(scope);
-        // The run did not do what it says on the tin: home went back, and the
-        // merge it was asked to end is still waiting.
+        // The run did not do what it says on the tin: the merge it was asked
+        // to end is still waiting.
         output.exit_code = 1;
         output.notes.extend([
             format!("dotsync: the conflict at `{scope}` came from the remote rather than from anything this machine committed, so there was nothing to take back and it is still waiting"),

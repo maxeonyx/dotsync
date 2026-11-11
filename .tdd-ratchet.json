@@ -1,0 +1,6 @@
+{
+  "removals": [
+    "dotsync::conflicts$abort_paused_cascade_restores_non_conflicting_selected_paths",
+    "dotsync::conflicts$abort_restores_a_drifted_file_outside_the_paused_selection"
+  ]
+}

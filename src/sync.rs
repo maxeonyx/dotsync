@@ -173,9 +173,6 @@ pub(crate) enum LocalChanges {
     /// Merged in: the ordinary sync, and the reason a local edit is an input
     /// rather than a wall.
     Carry,
-    /// Dropped whole: `init` and `abort`, which exist to take the head's side
-    /// and are given no choice about it.
-    Discard,
     /// Dropped at these paths, carried everywhere else: `discard`, and the end
     /// of a resolution, where the conflicted files go back to being whatever
     /// this machine's scope says they are.
@@ -185,7 +182,7 @@ pub(crate) enum LocalChanges {
 /// The home sync itself: `merge(home, mark, head)` and what it came to.
 ///
 /// Every command that writes home ends here — plain `dotsync`, `commit`,
-/// `continue`, `abort` and `init` — because moving home is one operation
+/// `continue`, `discard` and `init` — because moving home is one operation
 /// whatever moved the head first. What differs between them is only what they
 /// do with home's own changes.
 ///
@@ -208,7 +205,6 @@ pub(crate) async fn sync_home_to_machine_scope(
 
     let materialized = match &local {
         LocalChanges::Carry => home.materialize(session, &head).await?,
-        LocalChanges::Discard => home.materialize_discarding_local(session, &head).await?,
         LocalChanges::DiscardAt(paths) => {
             home.materialize_taking_head_at(session, &head, paths)
                 .await?
@@ -223,7 +219,6 @@ pub(crate) async fn sync_home_to_machine_scope(
     // their content — the classification carried tree entries, not bytes.
     let discarded = |relative: &PathBuf| match &local {
         LocalChanges::Carry => false,
-        LocalChanges::Discard => true,
         LocalChanges::DiscardAt(paths) => paths.contains(relative),
     };
     let mut drifts = Vec::new();

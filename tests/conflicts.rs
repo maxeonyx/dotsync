@@ -101,7 +101,7 @@ More than one of them changed the same part of the same file, so there is no mer
 Correct flow:
 - read the versions of each file below, decide what it should hold, and write that into the file at its real path in home; take out any marker lines you paste in.
 - run `dotsync continue` from the same machine to record your decision and finish converging. Leaving a file exactly as it is says you decided on the version already there.
-- or run `dotsync abort` from the same machine to discard it; that reverts the conflicted files in home to this machine's scope state, so save anything you want to keep outside home first.
+- or run `dotsync abort` from the same machine to discard it; home is left as it is.
 
 Conflicted files:
   C .config/shared.conf
@@ -242,7 +242,7 @@ More than one of them changed the same part of the same file, so there is no mer
 Correct flow:
 - read the versions of each file below, decide what it should hold, and write that into the file at its real path in home; take out any marker lines you paste in.
 - run `dotsync continue` from the same machine to record your decision and finish converging. Leaving a file exactly as it is says you decided on the version already there.
-- or run `dotsync abort` from the same machine to discard it; that reverts the conflicted files in home to this machine's scope state, so save anything you want to keep outside home first.
+- or run `dotsync abort` from the same machine to discard it; home is left as it is.
 
 Conflicted files:
   C .config/app.conf
@@ -304,20 +304,17 @@ fn conflict_messages_agree_that_resolving_means_editing_home() {
         render_output(&pause)
     );
 
-    // `dotsync abort` syncs home back to the machine scope, so a message that
-    // says "abort, then commit the contents you want" hands the agent the
-    // contents abort just destroyed. Both messages have to say the same thing
-    // about that, because an agent acts on whichever one it is looking at.
+    // What abort does to home decides whether "abort, then commit the
+    // contents you want" is advice the agent can follow. Both messages have to
+    // say the same thing about that, because an agent acts on whichever one it
+    // is looking at.
     machine.write_file(
         ".config/app.conf",
         "<<<<<<< all\nsetting = \"all\"\n=======\nsetting = \"linux\"\n>>>>>>> linux\n",
     );
     let refusal = machine.run("dotsync continue");
     let refusal_stderr = String::from_utf8_lossy(&refusal.stderr).into_owned();
-    for said in [
-        "reverts the conflicted files in home to this machine's scope state",
-        "save anything you want to keep outside home first",
-    ] {
+    for said in ["`dotsync abort`", "home is left as it is"] {
         assert!(
             pause_stderr.contains(said),
             "the pause must say `{said}`\n{}",
@@ -521,7 +518,7 @@ Dotsync stopped before fetching, committing, or syncing because starting another
 Correct flow:
 - edit each conflicted file at its real path in home so it holds the merged contents you want; take out any marker lines you paste in.
 - run `dotsync continue` to finish the paused cascade.
-- or run `dotsync abort` to discard the paused cascade; that reverts the conflicted files in home to this machine's scope state.
+- or run `dotsync abort` to discard the paused cascade; home is left as it is.
 - after `dotsync continue` succeeds, rerun the new commit if it is still needed.
 "
     );
@@ -636,19 +633,15 @@ fn abort_paused_cascade_restores_pre_pause_state_and_clears_pause() {
     );
 
     let aborted = machine_b.run_ok("dotsync abort");
-    // Abort reverts home, so it says what it reverted: the edit that started
-    // the cascade is gone, and that is the point of the command.
+    // Abort writes nothing to home, so it says what is still uncommitted
+    // there: the edit the discarded commit was recording.
     assert_stderr_snapshot(
         &aborted,
         "\
-dotsync: overwrote 1 drifted file(s)
+dotsync: 1 local change(s) are still only in home
   C .config/app.conf (edited here, and changed in the repo on another machine)
---- repo
-+++ system
-@@ -1 +1 @@
--setting = \"linux\"
-+setting = \"all\"
-dotsync: discarded the merge paused at `linux` and synced 1 file(s)
+dotsync: commit them with `dotsync commit <scope> -m \"message\" -- <path>`, or put the scope's version back with `dotsync discard <path>`.
+dotsync: discarded the merge paused at `linux`; home was not touched
 ",
     );
 
@@ -666,100 +659,27 @@ dotsync: discarded the merge paused at `linux` and synced 1 file(s)
     );
     assert_eq!(
         machine_b.read_file(".config/app.conf"),
-        "setting = \"linux\"\n"
+        "setting = \"all\"\n"
     );
 
+    // The pause is over, and the edit is the machine's to decide about again.
     let status = machine_b.run_ok("dotsync status");
-    assert_stderr_snapshot(&status, "dotsync: no changes for goof-b\n");
+    assert_stderr_snapshot(
+        &status,
+        "\
+dotsync: 1 changed managed file(s) for goof-b
+  C .config/app.conf (edited here, and changed in the repo on another machine)
+",
+    );
 
+    // Deciding against it is the ordinary way out, and the machine writes again.
+    machine_b.run_ok("dotsync discard .config/app.conf");
+    assert_eq!(
+        machine_b.read_file(".config/app.conf"),
+        "setting = \"linux\"\n"
+    );
     machine_b.write_file(".config/other.conf", "other = true\n");
     machine_b.run_ok("dotsync commit goof-b -m 'commit after abort' -- .config/other.conf");
-}
-
-#[test]
-fn abort_paused_cascade_restores_non_conflicting_selected_paths() {
-    let harness = TestHarness::new();
-    let machine_a = harness.machine("machine-a", "linux", "goof-a");
-    let machine_b = harness.machine("machine-b", "linux", "goof-b");
-
-    machine_a.init_ok();
-    machine_b.init_ok_under("linux");
-    machine_a.run_ok("dotsync");
-
-    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
-    machine_a.write_file(".config/other.conf", "other = false\n");
-    machine_a
-        .run_ok("dotsync commit all -m 'add base config' -- .config/app.conf .config/other.conf");
-
-    machine_b.run_ok("dotsync");
-    machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
-    machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
-
-    machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
-    machine_b.write_file(".config/other.conf", "other = true\n");
-    let conflict = machine_b
-        .run("dotsync commit all -m 'update shared config' -- .config/app.conf .config/other.conf");
-    assert_eq!(
-        conflict.status.code(),
-        Some(1),
-        "conflicting all-to-linux cascade should pause\n{}",
-        render_output(&conflict)
-    );
-
-    machine_b.run_ok("dotsync abort");
-
-    assert_eq!(
-        machine_b.read_file(".config/app.conf"),
-        "setting = \"linux\"\n"
-    );
-    assert_eq!(machine_b.read_file(".config/other.conf"), "other = false\n");
-
-    let status = machine_b.run_ok("dotsync status");
-    assert_stderr_snapshot(&status, "dotsync: no changes for goof-b\n");
-}
-
-#[test]
-fn abort_restores_a_drifted_file_outside_the_paused_selection() {
-    let harness = TestHarness::new();
-    let (machine_a, machine_b) = two_synced_machines(&harness);
-
-    machine_a.write_file(".config/app.conf", "setting = \"base\"\n");
-    machine_a.write_file(".config/unrelated.conf", "unrelated = \"base\"\n");
-    machine_a.run_ok(
-        "dotsync commit all -m 'add base config' -- .config/app.conf .config/unrelated.conf",
-    );
-
-    machine_b.run_ok("dotsync");
-    machine_a.write_file(".config/app.conf", "setting = \"linux\"\n");
-    machine_a.run_ok("dotsync commit linux -m 'customize linux config' -- .config/app.conf");
-
-    // Drift on a file the paused commit never named.
-    machine_b.write_file(".config/unrelated.conf", "unrelated = \"drifted\"\n");
-    machine_b.write_file(".config/app.conf", "setting = \"all\"\n");
-    let conflict =
-        machine_b.run("dotsync commit all -m 'update shared config' -- .config/app.conf");
-    assert_eq!(
-        conflict.status.code(),
-        Some(1),
-        "conflicting all-to-linux cascade should pause\n{}",
-        render_output(&conflict)
-    );
-
-    let aborted = machine_b.run("dotsync abort");
-    assert!(
-        aborted.status.success(),
-        "abort reverts all the config files, so unrelated drift cannot block it\n{}",
-        render_output(&aborted)
-    );
-    assert_eq!(
-        machine_b.read_file(".config/app.conf"),
-        "setting = \"linux\"\n"
-    );
-    assert_eq!(
-        machine_b.read_file(".config/unrelated.conf"),
-        "unrelated = \"base\"\n",
-        "abort is a full sync of home, not a selective restore"
-    );
 }
 
 /// A paused cascade is one state with one remedy, so every command that meets
@@ -1379,7 +1299,7 @@ fn a_conflict_that_came_from_the_remote_is_still_reported_after_abort() {
     assert_eq!(
         aborted.status.code(),
         Some(1),
-        "abort put home back and took nothing away from the remote, so the machine is still paused — and 3 is what says a pause is waiting\n{}",
+        "abort took nothing away from the remote, so the machine is still paused — and 3 is what says a pause is waiting\n{}",
         render_output(&aborted)
     );
 
