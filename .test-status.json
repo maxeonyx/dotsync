@@ -113,7 +113,7 @@
     "dotsync::help_text$top_level_help_documents_the_exit_codes": "passing",
     "dotsync::help_text$top_level_help_explains_scope_and_basic_workflow": "passing",
     "dotsync::home_containment$a_home_polluted_by_0_13_2_reads_keeps_its_untracked_files": "passing",
-    "dotsync::home_containment$a_run_killed_after_0_13_2_reads_leaves_their_files_to_the_next_run": "pending",
+    "dotsync::home_containment$a_run_killed_after_0_13_2_reads_leaves_their_files_to_the_next_run": "passing",
     "dotsync::home_containment$reads_leave_the_recorded_home_content_as_they_found_it": "passing",
     "dotsync::home_containment$writes_after_reading_untracked_folders_change_only_their_own_paths": "passing",
     "dotsync::hostile_inputs$a_branch_deleted_from_the_remote_does_not_stop_this_machine": "passing",
