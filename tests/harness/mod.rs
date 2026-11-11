@@ -21,6 +21,7 @@
 
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -1499,4 +1500,125 @@ pub fn the_line_naming<'a>(text: &'a str, needle: &str) -> &'a str {
         "`{needle}` is named on more than one line, so there is no single rendering of it to compare\n{text}"
     );
     line
+}
+
+/// Every file and link in home, by path relative to home: its kind, bytes and
+/// executable bit. Dotsync's own state and the harness's scratch clones are
+/// left out, because they are not home's content.
+pub fn home_tree(machine: &MachineEnvironment) -> BTreeMap<String, String> {
+    fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, String>) {
+        for entry in fs::read_dir(dir).expect("list home") {
+            let entry = entry.expect("list home");
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(root)
+                .expect("under home")
+                .to_string_lossy()
+                .replace('\\', "/");
+            if relative == ".local/share/dotsync" || relative.starts_with("remote-") {
+                continue;
+            }
+            let kind = entry.file_type().expect("file type");
+            if kind.is_dir() {
+                walk(root, &path, out);
+            } else if kind.is_symlink() {
+                let target = fs::read_link(&path).expect("read link");
+                out.insert(relative, format!("link -> {}", target.display()));
+            } else {
+                let bytes = fs::read(&path).expect("read file");
+                #[cfg(unix)]
+                let executable = {
+                    use std::os::unix::fs::PermissionsExt;
+                    entry.metadata().expect("metadata").permissions().mode() & 0o111 != 0
+                };
+                #[cfg(not(unix))]
+                let executable = false;
+                out.insert(
+                    relative,
+                    format!(
+                        "{}{}",
+                        if executable { "(x) " } else { "" },
+                        String::from_utf8_lossy(&bytes)
+                    ),
+                );
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(&machine.home_dir, &machine.home_dir, &mut out);
+    out
+}
+
+/// The paths whose content differs between two home trees.
+pub fn changed_between(
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut paths: Vec<String> = before
+        .keys()
+        .chain(after.keys())
+        .filter(|path| before.get(*path) != after.get(*path))
+        .cloned()
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// Leaves this machine's working copy in the state dotsync 0.13.2's reads
+/// left it in: `status <dirs>` and `commit --dry-run` read every file under
+/// the folders they were given into the tree the working copy records as
+/// materialized, and every later run then treated those files as home content
+/// it had put there. The files themselves are untouched; only the record
+/// names them.
+pub fn record_as_materialized_like_0_13_2(machine: &MachineEnvironment, relatives: &[&str]) {
+    use jj_lib::backend::{CopyId, TreeId};
+    use jj_lib::merge::Merge;
+    use jj_lib::merged_tree::MergedTree;
+    use jj_lib::merged_tree_builder::MergedTreeBuilder;
+    use jj_lib::repo_path::RepoPathBuf;
+
+    let state_file = machine.repo_dir.join(".jj/working_copy/dotsync-home.json");
+    let raw = fs::read_to_string(&state_file).expect("read working-copy state");
+    let mut state: serde_json::Value = serde_json::from_str(&raw).expect("parse state");
+    let repo = load_repo_direct(&machine.repo_dir);
+    let store = repo.store().clone();
+    let tree_id =
+        TreeId::try_from_hex(state["tree_id"].as_str().expect("tree id")).expect("hex tree id");
+    let mut builder = MergedTreeBuilder::new(MergedTree::resolved(store.clone(), tree_id));
+    for relative in relatives {
+        let path = RepoPathBuf::from_internal_string(*relative).expect("repo path");
+        let bytes = fs::read(machine.home_dir.join(relative)).expect("read home file");
+        let id =
+            block_on(store.write_file(path.as_ref(), &mut bytes.as_slice())).expect("write file");
+        builder.set_or_remove(
+            path,
+            Merge::normal(TreeValue::File {
+                id,
+                executable: false,
+                copy_id: CopyId::placeholder(),
+            }),
+        );
+    }
+    let tree = block_on(builder.write_tree()).expect("write tree");
+    state["tree_id"] = serde_json::json!(tree.tree_ids().as_resolved().expect("resolved").hex());
+    fs::write(&state_file, serde_json::to_string_pretty(&state).unwrap()).expect("write state");
+}
+
+/// Every path this machine's working copy records as home content dotsync
+/// materialized.
+pub fn recorded_as_materialized(machine: &MachineEnvironment) -> Vec<String> {
+    use jj_lib::backend::TreeId;
+    use jj_lib::merged_tree::MergedTree;
+
+    let state_file = machine.repo_dir.join(".jj/working_copy/dotsync-home.json");
+    let raw = fs::read_to_string(&state_file).expect("read working-copy state");
+    let state: serde_json::Value = serde_json::from_str(&raw).expect("parse state");
+    let repo = load_repo_direct(&machine.repo_dir);
+    let tree_id =
+        TreeId::try_from_hex(state["tree_id"].as_str().expect("tree id")).expect("hex tree id");
+    MergedTree::resolved(repo.store().clone(), tree_id)
+        .entries()
+        .map(|(path, _)| path.as_internal_file_string().to_string())
+        .collect()
 }
