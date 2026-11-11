@@ -32,6 +32,8 @@ fn a_home_with_untracked_files(harness: &TestHarness) -> (MachineEnvironment, Ma
     for relative in UNTRACKED {
         machine_b.write_file(relative, &format!("{relative}\n"));
     }
+    // The bit only exists on unix; the bytes are what Windows checks.
+    #[cfg(unix)]
     machine_b.make_executable(".local/bin/dotsync");
     (machine_a, machine_b)
 }

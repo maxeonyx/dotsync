@@ -64,6 +64,8 @@ fn incident_fleet(harness: &TestHarness) -> (MachineEnvironment, MachineEnvironm
     machine_a.run_ok("dotsync commit linux -m 'linux settings' -- .claude/settings.json");
 
     machine_b.write_file(".local/bin/dotsync", "\x7fELF pretend binary\n");
+    // The bit only exists on unix; the bytes are what Windows checks.
+    #[cfg(unix)]
     machine_b.make_executable(".local/bin/dotsync");
     for task in [
         "prioritize-morning",
