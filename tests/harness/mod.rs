@@ -1588,14 +1588,22 @@ pub fn record_as_materialized_like_0_13_2(machine: &MachineEnvironment, relative
     let mut builder = MergedTreeBuilder::new(MergedTree::resolved(store.clone(), tree_id));
     for relative in relatives {
         let path = RepoPathBuf::from_internal_string(*relative).expect("repo path");
-        let bytes = fs::read(machine.home_dir.join(relative)).expect("read home file");
+        let disk = machine.home_dir.join(relative);
+        let bytes = fs::read(&disk).expect("read home file");
+        #[cfg(unix)]
+        let executable = {
+            use std::os::unix::fs::PermissionsExt;
+            fs::metadata(&disk).expect("metadata").permissions().mode() & 0o111 != 0
+        };
+        #[cfg(not(unix))]
+        let executable = false;
         let id =
             block_on(store.write_file(path.as_ref(), &mut bytes.as_slice())).expect("write file");
         builder.set_or_remove(
             path,
             Merge::normal(TreeValue::File {
                 id,
-                executable: false,
+                executable,
                 copy_id: CopyId::placeholder(),
             }),
         );

@@ -128,3 +128,26 @@ fn a_home_polluted_by_0_13_2_reads_keeps_its_untracked_files() {
     record_as_materialized_like_0_13_2(&machine_b, &UNTRACKED);
     every_write_changes_only_its_own_paths(&machine_a, &machine_b);
 }
+
+/// The first run of a new build on a machine 0.13.2's reads had polluted is
+/// killed after it has committed and before it has recorded what it left in
+/// home — a push that hangs until the agent's timeout, say. The next run
+/// repairs what that one was doing, and the files 0.13.2 only read are not
+/// part of it.
+#[test]
+fn a_run_killed_after_0_13_2_reads_leaves_their_files_to_the_next_run() {
+    let harness = TestHarness::new();
+    let (_machine_a, machine_b) = a_home_with_untracked_files(&harness);
+    record_as_materialized_like_0_13_2(&machine_b, &UNTRACKED);
+    let state_file = machine_b
+        .repo_dir
+        .join(".jj/working_copy/dotsync-home.json");
+    let as_0_13_2_left_it = std::fs::read(&state_file).expect("read working-copy state");
+
+    machine_b.write_file(".claude/cc-writes", "line one\nmine\n");
+    machine_b.run_ok("dotsync commit goof-b -m 'mine' -- .claude/cc-writes");
+    // Killed before it persisted its working copy.
+    std::fs::write(&state_file, as_0_13_2_left_it).expect("put the state back");
+
+    assert_changes_home_only_at(&machine_b, "dotsync status", &[]);
+}
