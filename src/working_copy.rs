@@ -233,6 +233,23 @@ fn tree_paths(tree: &MergedTree) -> Result<Vec<RepoPathBuf>, WorkingCopyStateErr
     Ok(paths)
 }
 
+/// `tree` without every path but `paths`.
+pub(crate) async fn only_at(
+    tree: &MergedTree,
+    paths: &[RepoPathBuf],
+) -> Result<MergedTree, WorkingCopyStateError> {
+    let mut builder = MergedTreeBuilder::new(tree.clone());
+    for path in tree_paths(tree)? {
+        if !paths.contains(&path) {
+            builder.set_or_remove(path, Merge::absent());
+        }
+    }
+    builder
+        .write_tree()
+        .await
+        .map_err(|err| state_error("forget paths no scope holds", err))
+}
+
 pub(crate) struct HomeWorkingCopy {
     store: Arc<Store>,
     home: PathBuf,
@@ -408,16 +425,7 @@ impl HomeLockedWorkingCopy {
         &mut self,
         paths: &[RepoPathBuf],
     ) -> Result<(), WorkingCopyStateError> {
-        let mut builder = MergedTreeBuilder::new(self.tree.clone());
-        for path in tree_paths(&self.tree)? {
-            if !paths.contains(&path) {
-                builder.set_or_remove(path, Merge::absent());
-            }
-        }
-        self.tree = builder
-            .write_tree()
-            .await
-            .map_err(|err| state_error("forget paths no scope holds", err))?;
+        self.tree = only_at(&self.tree, paths).await?;
         Ok(())
     }
 

@@ -59,7 +59,7 @@ use crate::machine::machine_signature;
 use crate::paths::{repo_path_of, DotsyncPaths, SHED_SYNC_STATE_RELATIVE_PATH};
 use crate::repo::scope_head_commit;
 use crate::session::Session;
-use crate::working_copy::{HomeLockedWorkingCopy, HomeWorkingCopy};
+use crate::working_copy::{only_at, HomeLockedWorkingCopy, HomeWorkingCopy};
 
 /// The run's handle on home: the locked working copy plus the wc commit, kept
 /// in step with each other by construction — every method that moves one
@@ -575,9 +575,34 @@ impl Home {
         workspace: &WorkspaceNameBuf,
     ) -> Result<(), DotsyncError> {
         let target_tree = self.wc_commit.tree();
+        // The old mark is recovered from the operation the state file names:
+        // that operation's view holds the wc commit as it was when home was
+        // last materialized, and its parent is the mark home still derives
+        // from.
+        let old_mark_id = match self.last_materialized_mark(session, workspace).await? {
+            Some(id) => id,
+            // The state's operation predates this machine's first wc commit —
+            // a run of the release whose migration wrote the state before
+            // creating the commit. Nothing was ever materialized by this
+            // model, so home derives from what the wc commit was created on:
+            // its parent.
+            None => self.mark().await?.id().clone(),
+        };
+        let old_mark = session
+            .repo()
+            .store()
+            .get_commit(&old_mark_id)
+            .map_err(|err| jj_error(format!("load the last materialized mark: {err}")))?;
+        // What home was materialized from is the record at the old mark's
+        // paths and nowhere else, which is all `finish` records — but a
+        // record written before that names files a read only looked at, and
+        // taking those as materialized would remove them from home.
+        let materialized_tree = only_at(self.locked.old_tree(), &tree_paths(&old_mark.tree())?)
+            .await
+            .map_err(|err| jj_error(format!("read what home was materialized from: {err}")))?;
         // What the interrupted sync may have been removing is read too, or a
         // removal it never reached would read as already done.
-        self.locked.probe_also(tree_paths(self.locked.old_tree())?);
+        self.locked.probe_also(tree_paths(&materialized_tree)?);
         let snapshot = self.snapshot_home().await?;
 
         // The crash was after materializing (between check_out and finish):
@@ -587,7 +612,6 @@ impl Home {
             return Ok(());
         }
 
-        let materialized_tree = self.locked.old_tree().clone();
         let merged = merge_trees(
             (snapshot.clone(), "local changes in home"),
             (materialized_tree, "what this machine last materialized"),
@@ -608,19 +632,7 @@ impl Home {
         // seen the target, so make the wc commit say what is true — home is
         // an edit of the *old* mark — and let this run's ordinary sync leg
         // re-meet the head and present the conflict through the ordinary
-        // channel. The old mark is recovered from the operation the state
-        // file names: that operation's view holds the wc commit as it was
-        // when home was last materialized, and its parent is the mark home
-        // still derives from.
-        let old_mark_id = match self.last_materialized_mark(session, workspace).await? {
-            Some(id) => id,
-            // The state's operation predates this machine's first wc commit —
-            // a run of the release whose migration wrote the state before
-            // creating the commit. Nothing was ever materialized by this
-            // model, so home derives from what the wc commit was created on:
-            // its parent.
-            None => self.mark().await?.id().clone(),
-        };
+        // channel.
         self.switch_to(session, old_mark_id, snapshot).await?;
         Ok(())
     }
@@ -660,7 +672,7 @@ impl Home {
     ///
     /// Every command that moves home to a new head ends here — the ordinary
     /// merge, the resolution `continue` writes, and the head-wins tree
-    /// `abort` and `discard` ask for — because the difference between them is entirely in
+    /// `discard` asks for — because the difference between them is entirely in
     /// which tree they arrive with. Keeping the pair in one place is what makes
     /// "the wc commit describes home" hold by construction rather than by three
     /// call sites each remembering the second half.

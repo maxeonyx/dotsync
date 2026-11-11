@@ -681,7 +681,7 @@ async fn run_init(
                 report.sync.synced_paths.len()
             ),
             &report.sync,
-            Some(&report.push),
+            &report.push,
         )
     }))
 }
@@ -763,7 +763,7 @@ async fn run_continue() -> Result<CliOutput, DotsyncError> {
                 ),
             },
             &report.sync,
-            Some(&report.push),
+            &report.push,
         );
         // The sync reports discarding the resolution out of home, which is
         // correct and reads exactly like losing work. What makes it not that
@@ -858,7 +858,7 @@ async fn run_sync() -> Result<CliOutput, DotsyncError> {
                 report.sync.current_scope
             ),
             &report.sync,
-            Some(&report.push),
+            &report.push,
         )
     }))
 }
@@ -876,7 +876,7 @@ async fn run_discard(discard_paths: Vec<PathBuf>) -> Result<CliOutput, DotsyncEr
                 report.sync.current_scope
             ),
             &report.sync,
-            Some(&report.push),
+            &report.push,
         )
     }))
 }
@@ -1134,8 +1134,7 @@ async fn run_place(
         };
         let mut output = match &report.carried_out {
             Some(done) => {
-                let mut output =
-                    render::synced_output(command, headline, &done.sync, Some(&done.push));
+                let mut output = render::synced_output(command, headline, &done.sync, &done.push);
                 output.json["dry_run"] = json!(false);
                 output
             }
