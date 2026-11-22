@@ -7,6 +7,7 @@ use dotsync::{
     Standing, UnreachableRemote,
 };
 mod render;
+mod update;
 use serde_json::json;
 use std::env;
 use std::io::{self, IsTerminal, Write};
@@ -456,6 +457,7 @@ fn output_of<T, E: Into<DotsyncError>>(
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    update::update_then_run();
     if try_handle_version_json_request() {
         return;
     }
