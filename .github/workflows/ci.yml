@@ -26,6 +26,8 @@ jobs:
   ready:
     name: Ready
     runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.release.outputs.release }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -48,12 +50,18 @@ jobs:
       - name: Prepare cargo-ratchet source
         run: git clone --depth=1 https://github.com/maxeonyx/tdd-ratchet-rs "$RUNNER_TEMP/tdd-ratchet"
 
-      - name: Require a fresh release version
+      # A new version is the decision to release. The guard below refuses a
+      # change to what `cargo build` produces without one, so a version that
+      # is already tagged means the binary is unchanged and nothing is minted.
+      - name: Decide whether this integration releases
+        id: release
         run: |
           tag="v$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
           if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
-            echo "Release tag $tag already exists; bump package.version before integration."
-            exit 1
+            echo "$tag is already released; this integration merges without a release."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Enforce and test the release guard
@@ -166,7 +174,8 @@ jobs:
 
   release:
     name: Release
-    needs: [build, integrate]
+    needs: [ready, build, integrate]
+    if: needs.ready.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -187,6 +196,7 @@ jobs:
   pages:
     name: Pages
     needs: [build, integrate, release]
+    if: always() && needs.integrate.result == 'success' && (needs.release.result == 'success' || needs.release.result == 'skipped')
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -225,7 +235,7 @@ jobs:
           PAGES_RESULT: ${{ needs.pages.result }}
         run: |
           state=failure
-          if [ "$RELEASE_RESULT" = success ] && [ "$PAGES_RESULT" = success ]; then
+          if { [ "$RELEASE_RESULT" = success ] || [ "$RELEASE_RESULT" = skipped ]; } && [ "$PAGES_RESULT" = success ]; then
             state=success
           fi
           gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$MERGE_SHA" \
