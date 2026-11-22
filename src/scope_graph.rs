@@ -12,6 +12,11 @@ use crate::error::{jj_error, DotsyncError};
 /// a root scope is a scope with no parents, whatever it is called.
 pub(crate) const ROOT_SCOPE: &str = "all";
 
+/// The scope Windows machines hang off. Writes keep off every scope above a
+/// machine below it whatever Windows cannot hold (`place::plan`), so a scope
+/// is Windows-safe by where it sits rather than by a setting.
+pub(crate) const WINDOWS_SCOPE: &str = "windows";
+
 /// One scope, and where it sits.
 #[derive(Debug, Clone)]
 pub(crate) struct Scope {

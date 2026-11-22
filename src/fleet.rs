@@ -131,7 +131,7 @@ impl ScopeInfo {
     }
 }
 
-type Entries = BTreeMap<PathBuf, Option<TreeValue>>;
+pub(crate) type Entries = BTreeMap<PathBuf, Option<TreeValue>>;
 
 /// Every scope's tree, the tree it inherits, and the table relating them.
 pub(crate) struct Fleet {

@@ -449,6 +449,13 @@ pub enum DotsyncError {
         scope: String,
         files: Vec<ConflictedFile>,
     },
+    /// A write that would hand a Windows machine a path Windows cannot hold.
+    #[error("{} would reach Windows {}", one_or_many(paths.len(), &format!("`{}`", paths[0].0.display()), "{n} paths"), one_or_many(machines.len(), &format!("machine `{}`", machines[0]), &format!("machines {}", machines.join(", "))))]
+    WindowsCannotHold {
+        /// Each path, and why Windows cannot hold it.
+        paths: Vec<(PathBuf, String)>,
+        machines: Vec<String>,
+    },
     /// `move --from X --to X`: there is nowhere to move to.
     #[error("`--from` and `--to` both name scope `{scope}`")]
     MoveOntoItself { scope: String },
@@ -811,6 +818,19 @@ impl DotsyncError {
             "Nothing was recorded: a stop partway through a placement would leave a pause that no later run could find.",
             &[
                 "read the versions below; agree them on the scopes involved first, then run the placement again.",
+            ])),
+        Self::WindowsCannotHold { paths, machines } => Explanation::stop("windows_cannot_hold", self)
+            .state(paths.iter().map(|(path, why)| format!("{}: {why}", path.display())).collect())
+            .teaching(Teaching::new(
+            "Windows cannot hold that",
+            THE_SCOPE_GRAPH,
+            "This flow writes a version of a file onto a scope, and so onto every machine below it.",
+            &format!("It expects every machine the write reaches to be able to hold it, and {} {} Windows.", machines.join(", "), one_or_many(machines.len(), "runs", "run")),
+            "Nothing was recorded: a Windows machine handed a name it cannot spell, or a symlink, refuses it on every run until a machine that can hold it takes it off the scope.",
+            &[
+                "commit it to a scope only Linux machines take instead, such as `linux`: `dotsync commit linux -m \"message\" -- <path>`.",
+                "or rename it to a name Windows can hold, and commit that.",
+                "to take a version already on a shared scope back off it, run `dotsync drop <path> --from <scope> -m \"message\"`.",
             ])),
         Self::MoveOntoItself { .. } => Explanation::stop("move_onto_itself", self)
             .teaching(Teaching::new(
