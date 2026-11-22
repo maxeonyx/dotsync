@@ -71,7 +71,6 @@ Open: whether a rename of another machine's leaf should be possible at all (that
 - **A descendant that removed a file conflicts on every later edit of it above.** A removal is a tombstone: each change to the file on a parent is a modify/delete merge on the scope that removed it. `files --own` makes these visible (`D`); nothing yet makes them cheaper.
 - **A conflict's side labels name the scope whose head each input is, not the scope the change was made on.** A change committed to `all` is presented as `` side: scope `linux` `` when `linux`'s head is the commit that came down from `all`. Correct and confusing at once.
 - **Convergence merge commit ids are not reproducible, and could be.** `machine_signature` stamps `Timestamp::now()`, so predicting the pass twice writes two objects for the same merge. Deriving a convergence merge's timestamp from its inputs would make it byte-identical on every machine that computes it — which would also mean two machines converging the same scopes independently never diverge.
-- **Auto-update** — Max, 2026-08-19: he wouldn't mind implementing it at some point. Workspace-level, since every tool would want it.
 
 ### Backlog triage
 

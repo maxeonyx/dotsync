@@ -11,6 +11,8 @@ curl -Lo ~/.local/bin/dotsync https://github.com/maxeonyx/dotsync/releases/lates
 chmod +x ~/.local/bin/dotsync
 ```
 
+After that it keeps itself on the newest release.
+
 ## Learn more
 
 - Read `DESIGN.md` when you want the full design story, scope model, and command contract.

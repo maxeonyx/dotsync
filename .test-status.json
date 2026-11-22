@@ -4,6 +4,8 @@
     "dotsync::abort_containment$abort_leaves_alone_files_written_while_the_merge_waited": "passing",
     "dotsync::abort_containment$abort_leaves_alone_untracked_files_a_status_listed": "passing",
     "dotsync::abort_containment$abort_leaves_home_untouched_outside_what_the_cascade_wrote": "passing",
+    "dotsync::auto_update$a_newer_release_replaces_the_binary_and_runs_the_command": "passing",
+    "dotsync::auto_update$the_workspace_forced_update_replaces_the_binary_from_a_local_file": "passing",
     "dotsync::cli_contract$a_run_that_stops_lists_each_thing_it_found_separately": "passing",
     "dotsync::cli_contract$a_usage_error_has_the_same_shape_as_every_other_error": "passing",
     "dotsync::cli_contract$a_user_never_meets_the_backends_vocabulary": "passing",

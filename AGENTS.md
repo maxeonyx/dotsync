@@ -102,14 +102,7 @@ CI compares the PR head with `origin/main` in `range` mode and runs `scripts/tes
 
 When preparing a clone for local release work, set `git config core.hooksPath .githooks` so the repo-local `pre-push` hook actually runs.
 
-**After pushing a release:** install the new binary locally:
-
-```bash
-gh release download <tag> --repo maxeonyx/dotsync --pattern 'dotsync-x86_64-linux' --dir /tmp/ --clobber
-chmod +x /tmp/dotsync-x86_64-linux
-cp /tmp/dotsync-x86_64-linux ~/.local/bin/dotsync
-dotsync --version  # verify
-```
+**Releases install themselves.** Before any command, a release build of dotsync reads `https://dotsync.maxeonyx.com/version.json` and, when it names a newer version, downloads that binary from the same site, checks it runs as that version, puts it in place and runs the command on it (`src/update.rs`). Every machine, work ones included, is on a new release the first time it runs dotsync after Pages deploys. A debug build updates only when `DOTSYNC_UPDATE_URL` names a site, which is how `tests/auto_update.rs` drives it.
 
 ## Hard-won knowledge
 
