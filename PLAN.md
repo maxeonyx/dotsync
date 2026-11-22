@@ -65,6 +65,11 @@ Open: whether a rename of another machine's leaf should be possible at all (that
 
 ### Smaller, unowned
 
+- **A dotsync run killed partway can still write old content over your edits** (#57's remaining case). A run that reads files it does not manage (`files`, `show`, a dry run) forgets them only when it finishes; killed before that, the next run can put back what it read over edits made since. Making the next run's repair ignore what the last run only read would close it.
+- **Claude Code rewrites `settings.json` in its own key order, so identical settings conflict between machines.** Merging JSON by key (a merge provider) would end those conflicts. Max (2026-11-22): it "makes sense", and counts as robustify rather than simplify — extra complexity.
+- **On Windows, a tracked name Windows cannot hold stops every command**, and the stop does not say how to get rid of it. Since 0.16.0 no machine can add one, so this only matters while a machine is older than that; the fix is `dotsync drop <path> --from <scope>` from a Linux machine, and the stop could say so.
+- **`src/update.rs` is the workspace's auto-update, built in dotsync first.** agent-tools' `auto-update-integration` concern wants every tool on a shared `agent-tools-updater` crate; moving this module there is what makes the concern pass, and gives every tool the same update.
+
 - **A path's recent history is not readable.** "Deleted on purpose because nothing uses it" lives in a commit message on another scope; an agent pulling config in from other machines can revive something another machine retired (7e6e1f3 against 1ac9129 in the live fleet). Messages of the commits that last changed a path, per scope, would carry it.
 - **A commit's dry run selects paths against the fetched state, not the predicted convergence** (DESIGN, Placement). Making selection read the transaction would need `Home`'s classification to take a repo rather than the session.
 - **`show` of non-UTF-8 content in JSON is lossy.** `utf8: false` says so; nothing in the fleet needs more yet.
