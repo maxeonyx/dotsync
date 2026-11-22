@@ -8,7 +8,7 @@
 - The next-gen rewrite is done. Home is jj's working copy, the scope graph is derived from the repo's own structure, one convergence pass moves every scope bookmark, "paused" is recomputed rather than stored, and each error carries its own explanation. Two files exist per machine: the home files, and the hidden repo — plus one record of a run that stopped, which is a fact about that run rather than about the repo.
 - This repo is developed standalone; agent-tools pins it as `tools/dotsync`. For the current version, run `dotsync --version` or check the releases; don't record it here, it rots.
 - Live fleet: remote `git@github.com:maxeonyx/dotfiles.git`, `all` → `home`/`work`/`linux`/`windows` → intersections → machines (`mc-wsl-fd`, `mx-hv-mj`, `mx-pc-win`, `mx-xps-cy`); `dotsync scopes` lists them.
-- **mc-wsl-fd is the only machine upgraded.** `mx-xps-cy` and `maxeonyx-pc-windows` are on ≤0.4.6 and every command on them exits 1 with `config missing on all scope` until their binary is upgraded, because `config.toml` was deleted from the `all` scope on 2026-09-08. That is Max's own decision rather than an open question: upgrade the binary, then run `dotsync`.
+- **A machine on a release before 0.15.0 needs 0.15.0 installed by hand once**; from then on it updates itself. mx-hv-mj and mx-pc-win are on 0.15.0 (2026-11-22).
 - One test is red on purpose: `read_only_commands_leave_the_scope_bookmarks_where_they_found_them`. What moves the bookmark is jj's import of what the fetch brought, which is the fast-forward case of convergence — the case that creates nothing. Meeting it needs a run that answers from a fetched view it never records, which is a change to how a run holds the repo. Whoever wants it should take it as its own piece.
 
 ## Standing constraints
@@ -60,8 +60,8 @@ Open: whether a rename of another machine's leaf should be possible at all (that
 
 ### Windows
 
-- **What a scope may hold is constrained by what its machines can represent** ([#28](https://github.com/maxeonyx/dotsync/issues/28)). Symlinks, executable bits, non-UTF-8 text: the constraint is the union over every leaf a scope reaches, which makes `all` the _most_ constrained scope rather than the least. The issue holds the model and the one open question — whether the constraint comes from machine leaves that exist, or from the OS scopes in the graph.
-- **Path separators are unconfirmed on Windows.** The directory walk builds relative paths with `read_dir` separators and feeds `from_internal_string`, which would record `.config\fish\config.fish` as a tree entry name; `render::display_path` is `Path::display()`, so JSON would carry backslashes in some fields and forward slashes in others; and `canonicalize` returns the on-disk casing, so on a case-insensitive filesystem `dotsync commit all -- .APPRC` may look like a link to somewhere else and be refused. All inferred from source. Needs one Windows run.
+- **Only names and symlinks are kept off Windows machines** (`place::plan`). Executable bits and non-UTF-8 content are not checked.
+- **Case-insensitive names are unconfirmed on Windows.** `canonicalize` returns the on-disk casing, so `dotsync commit all -- .APPRC` may look like a link to somewhere else and be refused. Inferred from source.
 
 ### Smaller, unowned
 

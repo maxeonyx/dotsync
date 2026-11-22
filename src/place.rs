@@ -22,15 +22,18 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use jj_lib::backend::TreeValue;
 use jj_lib::transaction::Transaction;
 
 use crate::converge::{self, Pause, Pin, Pins};
 use crate::error::{jj_error, DotsyncError};
-use crate::fleet::{effect, machine_entries, Fleet, MachineEffect, Standing};
+use crate::fleet::{effect, machine_entries, Entries, Fleet, MachineEffect, Standing};
 use crate::home::Home;
+use crate::paths::windows_cannot_name;
 use crate::paths::{normalized, repo_path_of, DotsyncPaths};
 use crate::pause::{conflicted_files, pause_at, publish_or_pause, reject_commit_if_paused};
 use crate::repo::{collect_managed_tree_entries, PushReport};
+use crate::scope_graph::{ScopeGraph, WINDOWS_SCOPE};
 use crate::session::{in_session, Run, Session};
 use crate::status::PausedCascade;
 use crate::sync::{finishing, sync_home_to_machine_scope, LocalChanges, SyncReport};
@@ -337,11 +340,63 @@ pub(crate) async fn plan(
     let before = machine_entries(tx.repo(), graph).await?;
     let (moved, stop) = converge::pass(tx, graph, home.machine_scope(), None, Some(pins)).await?;
     let after = machine_entries(tx.repo(), graph).await?;
+    refuse_what_windows_cannot_hold(graph, &before, &after)?;
     let home_entries = collect_managed_tree_entries(&home.snapshot_tree())?;
     Ok(Plan {
         moved,
         effect: effect(&before, &after, Some((home.machine_scope(), &home_entries))),
         stop,
+    })
+}
+
+/// A write may not hand a Windows machine a name Windows cannot spell or a
+/// symlink: its checkout would refuse them, and the machine would stop on
+/// every run until someone fixed the scope from a machine that can. Only what
+/// the write changes is judged, so content already on a scope never blocks an
+/// unrelated write.
+fn refuse_what_windows_cannot_hold(
+    graph: &ScopeGraph,
+    before: &BTreeMap<String, Entries>,
+    after: &BTreeMap<String, Entries>,
+) -> Result<(), DotsyncError> {
+    let mut machines = Vec::new();
+    let mut paths = BTreeMap::new();
+    for (machine, now) in after {
+        if !graph
+            .ancestors_and_self(machine)
+            .iter()
+            .any(|scope| scope.name == WINDOWS_SCOPE)
+        {
+            continue;
+        }
+        let was = before.get(machine);
+        let mut refused = false;
+        for (path, value) in now {
+            let Some(value) = value else { continue };
+            if was.and_then(|was| was.get(path)) == Some(&Some(value.clone())) {
+                continue;
+            }
+            let reason = match value {
+                TreeValue::Symlink(_) => {
+                    Some("it is a symlink, which dotsync does not write on Windows".to_string())
+                }
+                _ => windows_cannot_name(path),
+            };
+            if let Some(reason) = reason {
+                paths.insert(path.clone(), reason);
+                refused = true;
+            }
+        }
+        if refused {
+            machines.push(machine.clone());
+        }
+    }
+    if paths.is_empty() {
+        return Ok(());
+    }
+    Err(DotsyncError::WindowsCannotHold {
+        paths: paths.into_iter().collect(),
+        machines,
     })
 }
 

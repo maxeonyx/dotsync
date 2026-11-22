@@ -52,3 +52,39 @@ pub(crate) fn repo_path_of(relative: &Path) -> Result<RepoPathBuf, DotsyncError>
         err => jj_error(format!("invalid repo path {}: {err}", relative.display())),
     })
 }
+
+/// Why Windows cannot hold a file at this repo path, if it cannot: a name
+/// with a character Windows refuses (`a\b` is one file on Linux and two
+/// folders deep on Windows), a name ending in a dot or space, which Windows
+/// silently trims, or a name Windows reserves for a device.
+///
+/// Splits on `/` itself rather than reading `Path` components, so the answer
+/// is the same on every platform the check runs on.
+pub(crate) fn windows_cannot_name(path: &Path) -> Option<String> {
+    const RESERVED: &[&str] = &["CON", "PRN", "AUX", "NUL"];
+    let spelled = path.to_string_lossy();
+    spelled.split('/').find_map(|name| {
+        if let Some(bad) = name
+            .chars()
+            .find(|c| matches!(c, '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control())
+        {
+            return Some(format!(
+                "`{name}` holds {bad:?}, which Windows refuses in a name"
+            ));
+        }
+        if name.ends_with('.') || name.ends_with(' ') {
+            return Some(format!(
+                "`{name}` ends in a dot or space, which Windows trims"
+            ));
+        }
+        let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+        let numbered = |prefix: &str| {
+            stem.strip_prefix(prefix)
+                .is_some_and(|n| n.len() == 1 && ('1'..='9').contains(&n.chars().next().unwrap()))
+        };
+        if RESERVED.contains(&stem.as_str()) || numbered("COM") || numbered("LPT") {
+            return Some(format!("`{name}` is a device name Windows reserves"));
+        }
+        None
+    })
+}
