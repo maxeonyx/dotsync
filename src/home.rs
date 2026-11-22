@@ -478,8 +478,33 @@ impl Home {
     /// at and does not record, an incoming head that stopped — and none of
     /// them is home content dotsync put there.
     pub(crate) async fn finish(mut self, session: &Session) -> Result<(), DotsyncError> {
-        let op_id: OperationId = session.repo().op_id().clone();
+        let mut op_id: OperationId = session.repo().op_id().clone();
         let managed = tree_paths(&self.mark().await?.tree())?;
+        // The wc commit forgets what the run only read, as the record does.
+        // Left holding it, the two disagree as soon as any later operation
+        // lands first (a read reaching the remote records one), and the next
+        // run's stale-copy repair would write the old read back into home.
+        let trimmed = only_at(&self.wc_commit.tree(), &managed)
+            .await
+            .map_err(|err| jj_error(format!("trim the working copy commit: {err}")))?;
+        if trimmed.tree_ids() != self.wc_commit.tree_ids() {
+            let mut tx = session.repo().start_transaction();
+            tx.repo_mut()
+                .rewrite_commit(&self.wc_commit)
+                .set_tree(trimmed)
+                .write()
+                .await
+                .map_err(|err| jj_error(format!("trim the working copy commit: {err}")))?;
+            tx.repo_mut()
+                .rebase_descendants()
+                .await
+                .map_err(|err| jj_error(format!("rebase descendants: {err}")))?;
+            let repo = tx
+                .commit("dotsync: forget what this run only read")
+                .await
+                .map_err(|err| jj_error(format!("commit trim: {err}")))?;
+            op_id = repo.op_id().clone();
+        }
         self.locked
             .keep_only(&managed)
             .await
