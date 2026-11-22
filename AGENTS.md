@@ -94,9 +94,9 @@ jj is linked in as a library (`jj-lib`); the jj CLI is never needed. See "Hard-w
 
 PRs in this repo can be merged without approval (Max, 2026-08-12).
 
-Single explicitly dispatched `ci.yml` integration workflow: PR/base validation, actionlint, release-guard tests, format, lint, the test ratchet, the test suite on Windows, Linux and Windows builds, auto-merge, GitHub Release, Pages, then an `integrated-ci` status on the exact merge commit.
+Single explicitly dispatched `ci.yml` integration workflow: PR/base validation, actionlint, release-guard tests, format, lint, the test ratchet, the test suite on Windows, Linux and Windows builds, auto-merge, a GitHub Release when the version is new, Pages, then an `integrated-ci` status on the exact merge commit.
 
-Each integration run publishes a fresh release, so its PR must use a new version in `Cargo.toml`, `Cargo.lock`, and `docs/version.json`. The existing release guard still verifies that artifact-changing work actually moved these versions together. `docs/version.json` is deployed verbatim to Pages and read by the agent-tools umbrella.
+A new version is what releases: an integration whose `Cargo.toml` version has no tag yet publishes one, and any other merges without a release. The release guard refuses a change to what `cargo build` produces (`src/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`) unless it moves the version in `Cargo.toml`, `Cargo.lock`, and `docs/version.json` together, so docs, tests and CI changes merge without a bump. `docs/version.json` is deployed verbatim to Pages and read by the agent-tools umbrella.
 
 CI compares the PR head with `origin/main` in `range` mode and runs `scripts/test_check_main_version_bump.py`. The repo-local pre-push hook remains an early version check; `devenv test` is the full offline actionlint, format, clippy, and ratchet gate.
 
