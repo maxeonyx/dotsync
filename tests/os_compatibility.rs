@@ -30,6 +30,7 @@ fn assert_refused_for_windows(output: &std::process::Output, path: &str) {
 }
 
 #[test]
+#[cfg_attr(not(unix), ignore = "Windows cannot create a file with this name")]
 fn a_name_windows_cannot_spell_stays_off_a_scope_a_windows_machine_takes() {
     let harness = TestHarness::new();
     let (linux, _windows) = linux_and_windows(&harness);
@@ -47,6 +48,7 @@ fn a_name_windows_cannot_spell_stays_off_a_scope_a_windows_machine_takes() {
 }
 
 #[test]
+#[cfg_attr(not(unix), ignore = "Windows cannot create a file with this name")]
 fn moving_a_name_windows_cannot_spell_onto_a_shared_scope_is_refused() {
     let harness = TestHarness::new();
     let (linux, _windows) = linux_and_windows(&harness);
